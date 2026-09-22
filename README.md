@@ -330,15 +330,38 @@ python -m app.selfcheck path/to/video.mp4
 
 全部配置在 `backend/.env`。完整列表见 `backend/.env.example`，以下是关键项。
 
+### 换模型不用改文件、不用重启
+
+界面上点右上角的**模型徽标**就能换。面板里可以：
+
+- 选服务商（ModelScope / 百炼 / 火山 / OpenRouter / 本地，一键填地址）
+- 改 API Key（留空表示不改，不会把脱敏值写回去覆盖真 key）
+- 拉取该服务商的模型列表，**逐个点「测」**看哪个真能用
+- 保存后**下一次反推立即生效**，不用重启服务
+
+**「测」是真的发一张纯红图**，回答里出现 `red` 才算「能读图」。
+为什么不只测连通性：纯文本模型也能回一句「OK」，你会以为配好了，
+真跑反推时才发现它收到图片就报错。自检必须覆盖「图片输入」这个前提。
+
+三种测试结果：
+
+| 结果 | 含义 |
+|---|---|
+| **能读图** | 可以放心用 |
+| **通但读不到图** | 接口通了，但没识别出图片内容 —— 多半是纯文本模型 |
+| **无法判定** | 有输出但被 max_tokens 截断。推理模型（思考过程很长）会这样，不代表不能用 |
+| **不可用** | 请求没被处理 —— 模型不支持该模态，或账号没开通推理服务 |
+
+> ⚠️ **列表里有 ≠ 你能用。** 服务商常常只返回精选列表，里面有些模型没部署推理服务，
+> 调用会报 `has no provider supported`。所以必须逐个测，绿灯的才算数。
+
 ### 模型
 
 | 变量 | 默认值 | 说明 |
 |---|---|---|
 | `VLM_API_KEY` | — | **必填** |
 | `VLM_BASE_URL` | `https://api-inference.modelscope.cn/v1` | 兼容 OpenAI 格式的服务地址 |
-| `VLM_MODEL` | `Qwen/Qwen2.5-VL-72B-Instruct` | 必须支持视觉输入 |
-| 变量 | 默认值 | 说明 |
-|---|---|---|
+| `VLM_MODEL` | `Qwen/Qwen3.5-27B` | 必须支持视觉输入，见上面的测试方法 |
 | `VLM_CONCURRENCY` | `3` | Pass1 分块并行数 |
 | `VLM_AUDIO_INPUT` | `false` | 把音频直接附给模型。**能收音频的模型很少**，见 [音频维度](#音频维度三条路能力不同) |
 | `VLM_TIMEOUT` | `180` | 单次请求超时（秒） |
@@ -455,16 +478,18 @@ Qwen-Omni）再把这个开关打开。
 
 ## 接口一览
 
-20 个接口，全部在 `/docs` 里可交互调试。
+23 个接口，全部在 `/docs` 里可交互调试。
 
 ### 系统
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/api/health` | 健康检查（ffmpeg / 模型 / ASR / yt-dlp 状态） |
-| GET | `/api/health/vlm` | **真实调用一次模型**，验证 key 与图片输入 |
+| GET | `/api/health/vlm` | **真实调用一次模型并附一张图**，验证 key 与图片输入 |
+| POST | `/api/health/vlm` | 试一组未保存的模型配置（只改模型名时不用重填 key） |
+| GET | `/api/models` | 拉服务商声明的模型列表（仅作候选，需逐个测） |
 | GET | `/api/settings` | 读取配置（key 已脱敏） |
-| POST | `/api/settings` | 更新配置（写回 `.env`，有键白名单） |
+| POST | `/api/settings` | 更新配置（写回 `.env` 并同步进程环境变量，有键白名单） |
 | GET | `/api/formats` | 反推模式与变体（按模式分组，`primary` 标出两种主模式） |
 | GET | `/api/stats` | 任务统计 |
 
@@ -590,7 +615,7 @@ YTDLP_FORMAT=bv*[height<=720][ext=mp4]+ba[ext=m4a]/bv*[height<=720]+ba/b[height<
 
 ```bash
 cd backend
-pytest                    # 全部 180 个
+pytest                    # 全部 190 个
 pytest -q tests/test_selection.py     # 只跑选帧策略
 pytest -q tests/test_pipeline_e2e.py  # 只跑端到端
 ruff check app tests                  # 静态检查
@@ -605,7 +630,7 @@ ruff check app tests                  # 静态检查
 | `test_templates.py` | 41 | Pass1 JSON 宽容解析（围栏 / 前后缀 / 尾随逗号 / 垃圾输入）、多块镜号重排、主体登记表解析与跨块合并、两种模式的模板硬约束、占位符替换干净、**音频未知时的编造禁令**、**频谱描述的措辞边界** |
 | `test_downloader.py` | 24 | 中文分享文案取链接、平台识别、aweme_id、yt-dlp 选项（**含 `ffmpeg_location` 回归**）、清晰度封顶、失败原因上传 |
 | `test_vlm.py` | 28 | 请求体构造（data URI / Anthropic 块 / **`input_audio` 音频块**）、响应解析（含 `choices: null`）、**空响应原因诊断**、音频格式白名单与体积上限、base_url 带不带 `/v1` 都能用 |
-| `test_api.py` | 26 | 接口契约、模式分组、上传校验、Range 流、SQLite 往返、缺列自愈、提示词库 |
+| `test_api.py` | 36 | 接口契约、模式分组、上传校验、Range 流、SQLite 往返、缺列自愈、提示词库、**模型热切换**、**测试不污染真实 .env** |
 | `test_pipeline_e2e.py` | 15 | **完整管线**：帧数对齐、预算生效、四种格式、主体登记表贯通到 Pass2、模式不串味、进度事件、分块、无 key 报错 |
 
 ### 关于 mock 模型
@@ -659,7 +684,7 @@ fastapi dev
 | **真实模型端到端** | `Qwen/Qwen3.5-27B`，10s 测试图案 | 112 秒出完整六段式 Ref2VA，结构、时间戳格式、retention 标记全对 |
 | 前端构建 | `vue-tsc + vite build` | 通过，112 模块 |
 | 静态检查 | `ruff check app tests` | 通过 |
-| 测试 | — | **180 passed** |
+| 测试 | — | **190 passed** |
 
 **模型真的在看图**：喂 SMPTE 彩条帧，它正确识别出彩条布局，并读出了画面里的
 实际数字（6.0s 那帧是 `'6'`，9.5s 是 `'9'`）。
@@ -742,3 +767,20 @@ fastapi dev
 13. **音频三条路不能互相替代。** ASR 给逐句时间戳 + 逐字原文；
     模型听给一段描述；频谱实测给能量分布。目标格式要求台词逐字原文，描述做不到；
     ASR 给文字但不会告诉你有没有鼓。所以三个都要留，各自填不同的字段。
+
+14. **模型自检必须发图，不能只测连通性。** 纯文本模型也能回「OK」，
+    用户会以为配好了，真跑反推时才发现收到图片就报错。
+    现在发一张纯红图，回答里出现 `red` 才算通过 —— 这是对照测试的思路。
+    另外自检的 `max_tokens` 不能太小：推理模型会先输出一大段思考，
+    16 个 token 被吃光后报 `finish_reason=length`，看起来像「不可用」，
+    实际只是额度不够。这种情形判为「无法判定」。
+
+15. **`POST /api/settings` 要同时写 `.env` 和 `os.environ`。**
+    pydantic-settings 的优先级是「环境变量 > .env」。如果服务是用
+    `VLM_MODEL=x uvicorn ...` 起的，只写 `.env` 会被旧的环境变量盖住 ——
+    界面上点保存毫无反应，而且不报错，是最难查的那类问题。
+
+16. **配置写入目标要能被测试改向。** 否则跑一次 pytest 就把用户的
+    `backend/.env` 改成测试里的假模型名（实测被写成 `Vendor/X`），
+    测试全绿但服务起不来。现在由 `ENV_FILE` 环境变量指定，测试指向临时文件，
+    并有一条测试断言真实 `.env` 的字节完全没变。
