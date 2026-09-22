@@ -17,24 +17,8 @@ const prompt = computed(() => store.prompt)
 /** 结果里记的 format 优先（历史任务可能不是当前选的模式）。 */
 const activeFormat = computed(() => (store.job?.options.format ?? store.options.format) as string)
 
-/** 「H3 模式 · Ref2VA 六段式（带参考素材）」这样的完整称呼。 */
-const formatLabel = computed(() => {
-  for (const m of store.modes) {
-    const v = m.variants.find((x) => x.value === activeFormat.value)
-    if (v) return v.label === m.label ? m.label : `${m.label} · ${v.label}`
-  }
-  return activeFormat.value
-})
-
-/** 单变体模式下前缀冗余，徽标只显示模式名。 */
-const modeBadge = computed(() => {
-  for (const m of store.modes) {
-    if (m.variants.some((x) => x.value === activeFormat.value)) {
-      return m.variants.length > 1 ? formatLabel.value : m.label
-    }
-  }
-  return activeFormat.value
-})
+/** 「H3 模式 · Ref2VA 六段式（带参考素材）」这样的完整称呼，与历史列表保持一致。 */
+const formatLabel = computed(() => store.labelOfFormat(activeFormat.value))
 
 const wordCount = computed(() => (prompt.value ? prompt.value.split(/\s+/).filter(Boolean).length : 0))
 const charCount = computed(() => prompt.value.length)
@@ -117,7 +101,7 @@ function fmtTime(sec: number): string {
     <div class="panel-head">
       <div class="panel-title"><span class="dot" />反推提示词</div>
       <div class="row" style="gap: 8px">
-        <span v-if="prompt" class="badge">{{ modeBadge }}</span>
+        <span v-if="prompt" class="badge">{{ formatLabel }}</span>
         <span v-if="prompt" class="badge">{{ charCount }} 字</span>
       </div>
     </div>

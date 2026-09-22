@@ -27,7 +27,7 @@ from urllib.parse import urlparse
 
 import httpx
 
-from ..core.config import TMP_DIR, get_settings
+from ..core.config import TMP_DIR, get_settings, resolve_ffmpeg
 from ..schemas import ProbeResult
 
 log = logging.getLogger("downloader")
@@ -79,6 +79,12 @@ def _yt_dlp_options() -> dict:
         "socket_timeout": 30,
         "http_headers": {"User-Agent": UA},
     }
+    # 关键：`bv*+ba` 这类格式合并音视频必须调用 ffmpeg，而本机 ffmpeg 常常不在 PATH 里
+    # （只有 ffmpeg-static 那种单文件）。不显式告诉 yt-dlp 位置，合并步骤必然失败，
+    # 表现为「解析成功但下载失败」，很容易误判成平台反爬。
+    ffmpeg = resolve_ffmpeg()
+    if ffmpeg:
+        opts["ffmpeg_location"] = ffmpeg
     if s.cookies_file:
         opts["cookiefile"] = s.cookies_file
     elif s.cookies_from_browser:
@@ -124,14 +130,20 @@ def probe_with_ytdlp(url: str) -> ProbeResult | None:
     )
 
 
-def download_with_ytdlp(url: str, out_dir: Path) -> Path | None:
+def download_with_ytdlp(url: str, out_dir: Path) -> tuple[Path | None, str]:
+    """下载并返回 `(文件路径, 失败原因)`。
+
+    失败原因要往上传，不能只写日志——否则界面只能给「会员内容/需要登录」这种
+    通用猜测，把「ffmpeg 找不到导致合并失败」误报成平台反爬，排查方向完全跑偏。
+    """
     if not yt_dlp_available():
-        return None
+        return None, "未安装 yt-dlp"
     out_dir.mkdir(parents=True, exist_ok=True)
     opts = _yt_dlp_options()
     opts.update({
         "outtmpl": str(out_dir / "%(id)s.%(ext)s"),
-        "format": "bv*+ba/b",
+        # 走配置的清晰度上限：反推会把帧缩到长边 896 再送模型，下 1080p 是纯浪费
+        "format": get_settings().ytdlp_format,
         "merge_output_format": "mp4",
         "overwrites": True,
     })
@@ -141,16 +153,17 @@ def download_with_ytdlp(url: str, out_dir: Path) -> Path | None:
             info = ydl.extract_info(url, download=True)
             path = Path(ydl.prepare_filename(info))
     except Exception as exc:  # noqa: BLE001
-        log.warning("yt-dlp 下载失败 %s: %s", url, exc)
-        return None
+        reason = " ".join(str(exc).split())[:300]
+        log.warning("yt-dlp 下载失败 %s: %s", url, reason)
+        return None, reason
 
     if path.is_file():
-        return path
-    # merge 后扩展名可能变化
+        return path, ""
+    # merge 后扩展名可能变化（webm/flv 源合并成 mp4）
     for cand in out_dir.glob(f"{path.stem}.*"):
         if cand.suffix.lower() in (".mp4", ".mkv", ".webm", ".flv", ".mov"):
-            return cand
-    return None
+            return cand, ""
+    return None, f"yt-dlp 下载完成但未产出可识别的视频文件（期望 {path.name}）"
 
 
 # ---------------------------------------------------------------------------
@@ -339,6 +352,7 @@ def download(url: str, job_id: str) -> tuple[Path | None, ProbeResult, str]:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     info = ProbeResult(platform=platform)
+    ytdlp_reason = ""
 
     # --- 通道 1：yt-dlp ---
     if yt_dlp_available():
@@ -346,13 +360,14 @@ def download(url: str, job_id: str) -> tuple[Path | None, ProbeResult, str]:
         if got:
             got.platform = platform
             info = got
-        path = download_with_ytdlp(url, out_dir)
+        path, ytdlp_reason = download_with_ytdlp(url, out_dir)
         if path:
             if not info.duration:
                 info = probe_with_ytdlp(url) or info
             return path, info, ""
-        log.info("yt-dlp 通道未成功，尝试平台原生通道（%s）", platform)
+        log.info("yt-dlp 通道未成功（%s），尝试平台原生通道", ytdlp_reason)
     else:
+        ytdlp_reason = "未安装 yt-dlp"
         log.info("未安装 yt-dlp，跳过该通道")
 
     # --- 通道 2：抖音原生 ---
@@ -378,5 +393,8 @@ def download(url: str, job_id: str) -> tuple[Path | None, ProbeResult, str]:
         )
     else:
         hint = "该链接无法解析。请确认是公开可访问的视频页面链接，或手动下载后上传。"
+
+    if ytdlp_reason:
+        hint += f"\n\nyt-dlp 原始报错：{ytdlp_reason}"
 
     return None, info, hint

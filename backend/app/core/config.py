@@ -85,6 +85,14 @@ class Settings(BaseSettings):
     # ---- 抓取 ----
     cookies_from_browser: str = ""
     cookies_file: str = ""
+    # 下载清晰度上限。反推会把帧缩到 FRAME_LONG_EDGE 再送模型，
+    # 下载 1080p 纯属浪费带宽和等待时间，720p 完全够用。
+    # 值直接透传给 yt-dlp 的 -f，所以可以写完整的 fallback 链。
+    ytdlp_format: str = (
+        "bv*[height<=720][ext=mp4]+ba[ext=m4a]/"
+        "bv*[height<=720]+ba/"
+        "b[height<=720]/bv*+ba/b"
+    )
 
     # ---------- 派生属性 ----------
     @property

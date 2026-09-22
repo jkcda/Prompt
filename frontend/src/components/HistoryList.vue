@@ -77,7 +77,7 @@ async function remove(job: JobSummary, e: Event) {
         <div v-else-if="job.error" class="hi-preview err">{{ job.error }}</div>
 
         <div class="hi-meta faint">
-          <span v-if="job.format" class="mono">{{ job.format }}</span>
+          <span v-if="job.format" class="mono">{{ store.labelOfFormat(job.format) }}</span>
           <span v-if="job.frames_used">{{ job.frames_used }} 帧</span>
           <span v-if="job.elapsed_sec">{{ job.elapsed_sec }}s</span>
           <span v-if="job.source && job.source !== 'upload'">{{ job.source }}</span>

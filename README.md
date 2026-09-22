@@ -382,6 +382,14 @@ python -m app.selfcheck path/to/video.mp4
 留空则跳过音频维度。也可以装 `pip install -e ".[local-asr]"` 用本地 faster-whisper，
 代码会优先走本地。
 
+### 抓取（可选）
+
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `COOKIES_FROM_BROWSER` | 空 | 从本机浏览器读 cookie，如 `chrome` |
+| `COOKIES_FILE` | 空 | 或给 Netscape 格式的 cookies.txt 路径 |
+| `YTDLP_FORMAT` | 720p 封顶 | 透传给 yt-dlp 的 `-f`，见 [清晰度封顶](#清晰度封顶) |
+
 ---
 
 ## 接口一览
@@ -490,6 +498,27 @@ COOKIES_FROM_BROWSER=chrome      # chrome / edge / firefox
 COOKIES_FILE=D:/cookies.txt
 ```
 
+### 清晰度封顶
+
+反推会把帧缩到长边 `FRAME_LONG_EDGE`（默认 896）再送模型，
+所以下载 1080p 是纯浪费带宽和等待时间。默认封顶 720p：
+
+```bash
+YTDLP_FORMAT=bv*[height<=720][ext=mp4]+ba[ext=m4a]/bv*[height<=720]+ba/b[height<=720]/bv*+ba/b
+```
+
+想强制原画质就写 `bv*+ba/b`。实测 212 秒的 B站 1080p 视频，封顶后下载到 1280x720，
+整条链路（下载 → 46 镜头 → 5 块 → 反推）66 秒跑完。
+
+### 一个容易误判的坑
+
+`bv*+ba` 这类格式**合并音视频必须调用 ffmpeg**。本机 ffmpeg 常常不在 PATH 里
+（只有 `ffmpeg-static` 那种单文件），所以代码会显式把路径传给 yt-dlp 的
+`ffmpeg_location`。少了这一步，现象是「链接能解析成功、但下载失败」——
+很容易误判成平台反爬，然后往 cookie 方向排查，方向全错。
+
+失败提示里现在会带上 yt-dlp 的原始报错，就是为了避免这种误判。
+
 ### 合规说明
 
 只处理公开可访问的内容；下载件仅存本地用于分析，不做二次分发。
@@ -500,7 +529,7 @@ COOKIES_FILE=D:/cookies.txt
 
 ```bash
 cd backend
-pytest                    # 全部 108 个
+pytest                    # 全部 132 个
 pytest -q tests/test_selection.py     # 只跑选帧策略
 pytest -q tests/test_pipeline_e2e.py  # 只跑端到端
 ruff check app tests                  # 静态检查
@@ -513,6 +542,7 @@ ruff check app tests                  # 静态检查
 | `test_selection.py` | 13 | 预算不超、每镜保底、超预算时均匀降采样、长镜头优先、时间有序 |
 | `test_ffmpeg.py` | 22 | 真实视频跑探测 / 场景检测 / 抽帧 / 缩放 / 音频 / 切分 |
 | `test_templates.py` | 32 | Pass1 JSON 宽容解析（围栏 / 前后缀 / 尾随逗号 / 垃圾输入）、多块镜号重排、主体登记表解析与跨块合并、两种模式的模板硬约束、占位符替换干净 |
+| `test_downloader.py` | 24 | 中文分享文案取链接、平台识别、aweme_id、yt-dlp 选项（**含 `ffmpeg_location` 回归**）、清晰度封顶、失败原因上传 |
 | `test_api.py` | 26 | 接口契约、模式分组、上传校验、Range 流、SQLite 往返、缺列自愈、提示词库 |
 | `test_pipeline_e2e.py` | 15 | **完整管线**：帧数对齐、预算生效、四种格式、主体登记表贯通到 Pass2、模式不串味、进度事件、分块、无 key 报错 |
 
@@ -550,6 +580,27 @@ fastapi dev
 | 超长视频被截断 | 默认 1800 秒上限，避免单任务跑太久 |
 | 任务状态在内存 | 活跃任务的进度事件不持久化，重启后只能看到已落库的终态结果 |
 | 无鉴权 | 当前是单机自用定位。对外部署前需要加认证与限流 |
+
+---
+
+## 验证记录
+
+不是「写完就交」的清单，是实际跑过的路径。
+
+| 路径 | 数据 | 结果 |
+|---|---|---|
+| 上传 → H3 T2VA | 10s 合成片（无场景切换） | 6 帧 / 6 镜头 / 1 块 |
+| 上传 → H3 Ref2VA | 同上 | `<Subject 2>` 存在且无 `<Subject 3>`，`retention_analysis` 行数 == 主体数 |
+| 上传 → Seedance | 同上 | 无 H3 字段名、无参考标签、有节拍表、纯中文 |
+| 中文名上传 | `演示片段.mp4` | `name` 保留中文，落盘 `file_id` 纯 ASCII，Range 返回 206 |
+| **B站链接 → 长视频分块** | BV1GJ411x7h7，**212.3s** | 下载 1280x720 → **46 镜头 → 5 块** → 46 帧 / 50.6k tokens，全程 **66 秒** |
+| 前端构建 | `vue-tsc + vite build` | 通过，112 模块 |
+| 静态检查 | `ruff check app tests` | 通过 |
+| 测试 | — | **132 passed** |
+
+未验证（需要真实模型 key）：真实多模态模型下的提示词质量。
+当前端到端跑的是 `tests/mock_vlm.py`，验证的是**管线**（抽帧、时间戳对齐、
+JSON 解析、分块合并、模式组装），不是模型输出质量。
 
 ---
 

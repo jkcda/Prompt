@@ -82,6 +82,19 @@ export const useAnalyzeStore = defineStore('analyze', () => {
     options.value.format = format
   }
 
+  /**
+   * 任意 format 的可读称呼（历史任务里的 format 可能不是当前选的那个）。
+   * 单变体模式下不重复前缀，`generic` 显示为「通用分镜表」而不是「通用分镜表 · 通用分镜表」。
+   * modes 还没加载完时退回原始值，总比显示空白好。
+   */
+  function labelOfFormat(fmt: string): string {
+    for (const m of modes.value) {
+      const v = m.variants.find((x) => x.value === fmt)
+      if (v) return v.label === m.label ? m.label : `${m.label} · ${v.label}`
+    }
+    return fmt
+  }
+
   // ---------------- 来源 ----------------
   const mode = ref<'upload' | 'link'>('upload')
   const file = ref<File | null>(null)
@@ -378,7 +391,7 @@ export const useAnalyzeStore = defineStore('analyze', () => {
     // 环境
     health, modes, primaryModes, extraModes, bootError,
     // 模式与格式
-    currentMode, currentVariants, formatInfo, selectMode, selectFormat,
+    currentMode, currentVariants, formatInfo, labelOfFormat, selectMode, selectFormat,
     // 选项
     options,
     // 来源
