@@ -529,7 +529,7 @@ YTDLP_FORMAT=bv*[height<=720][ext=mp4]+ba[ext=m4a]/bv*[height<=720]+ba/b[height<
 
 ```bash
 cd backend
-pytest                    # 全部 132 个
+pytest                    # 全部 161 个
 pytest -q tests/test_selection.py     # 只跑选帧策略
 pytest -q tests/test_pipeline_e2e.py  # 只跑端到端
 ruff check app tests                  # 静态检查
@@ -543,6 +543,7 @@ ruff check app tests                  # 静态检查
 | `test_ffmpeg.py` | 22 | 真实视频跑探测 / 场景检测 / 抽帧 / 缩放 / 音频 / 切分 |
 | `test_templates.py` | 32 | Pass1 JSON 宽容解析（围栏 / 前后缀 / 尾随逗号 / 垃圾输入）、多块镜号重排、主体登记表解析与跨块合并、两种模式的模板硬约束、占位符替换干净 |
 | `test_downloader.py` | 24 | 中文分享文案取链接、平台识别、aweme_id、yt-dlp 选项（**含 `ffmpeg_location` 回归**）、清晰度封顶、失败原因上传 |
+| `test_vlm.py` | 20 | 请求体构造（data URI / Anthropic 块）、响应解析（含 `choices: null`）、**空响应原因诊断**、base_url 带不带 `/v1` 都能用 |
 | `test_api.py` | 26 | 接口契约、模式分组、上传校验、Range 流、SQLite 往返、缺列自愈、提示词库 |
 | `test_pipeline_e2e.py` | 15 | **完整管线**：帧数对齐、预算生效、四种格式、主体登记表贯通到 Pass2、模式不串味、进度事件、分块、无 key 报错 |
 
@@ -594,13 +595,30 @@ fastapi dev
 | 上传 → Seedance | 同上 | 无 H3 字段名、无参考标签、有节拍表、纯中文 |
 | 中文名上传 | `演示片段.mp4` | `name` 保留中文，落盘 `file_id` 纯 ASCII，Range 返回 206 |
 | **B站链接 → 长视频分块** | BV1GJ411x7h7，**212.3s** | 下载 1280x720 → **46 镜头 → 5 块** → 46 帧 / 50.6k tokens，全程 **66 秒** |
+| **真实模型端到端** | `Qwen/Qwen3.5-27B`，10s 测试图案 | 112 秒出完整六段式 Ref2VA，结构、时间戳格式、retention 标记全对 |
 | 前端构建 | `vue-tsc + vite build` | 通过，112 模块 |
 | 静态检查 | `ruff check app tests` | 通过 |
-| 测试 | — | **132 passed** |
+| 测试 | — | **161 passed** |
 
-未验证（需要真实模型 key）：真实多模态模型下的提示词质量。
-当前端到端跑的是 `tests/mock_vlm.py`，验证的是**管线**（抽帧、时间戳对齐、
-JSON 解析、分块合并、模式组装），不是模型输出质量。
+**模型真的在看图**：喂 SMPTE 彩条帧，它正确识别出彩条布局，并读出了画面里的
+实际数字（6.0s 那帧是 `'6'`，9.5s 是 `'9'`）。
+
+### 实测可用 / 不可用的模型
+
+| 模型 | 结果 |
+|---|---|
+| **`Qwen/Qwen3.5-27B`** | ✅ 可用。红蓝对照测试通过，Pass1 JSON 稳定可解析 |
+| `Shanghai_AI_Laboratory/Intern-S2-Preview` | ⚠️ 能读图，但会把思考过程写进 content，不守「只输出 JSON」 |
+| `PaddlePaddle/ERNIE-4.5-VL-28B-A3B-PT` | ❌ `choices: null` + 0 tokens |
+| `OpenGVLab/InternVL3_5-241B-A28B` | ❌ 同上 |
+| `Shanghai_AI_Laboratory/Intern-S1-mini` | ❌ 同上 |
+
+`choices: null` + `usage` 全 0 表示**请求根本没被处理**——通常是模型不支持图片输入，
+或该账号没开通推理服务。代码会明确报出这个原因，不会只说「返回空内容」。
+
+> ⚠️ 服务商的 `/v1/models` 列表**不代表账号真实可用范围**。列表里名字带 `VL` 的模型
+> 也可能调不通，必须实测。判断「是否真能读图」要做**对照测试**
+> （喂纯红/纯蓝图看回答是否区分得开），只问一次答对了不算证据——可能是猜的。
 
 ---
 
@@ -646,3 +664,13 @@ JSON 解析、分块合并、模式组装），不是模型输出质量。
 10. **主体标签跨块判重要先剥冠词。** 模型会在不同块里把同一个主体写成
     `performer` / `The Performer` / `a performer`，不归一化就会写出三条 `<Subject N>`。
     但冠词只在后面紧跟空格时才剥，否则 `anime style` 会被吃成 `imestyle`。
+
+11. **「未知」要显式标注为未知，并禁止推测。** 只写中性陈述（「未获得文本内容」）
+    等于留白，模型一定会去填。实测 `enable_asr=False` 时，模型照着画面编出了
+    「电子提示音与数字跳变同步」并标成 `fully_copy`——听起来完全合理，但全是假的。
+    现在音频未转写时会明确写「音频内容对你完全未知」+ 逐条禁令，
+    并在绝对规则里堵住「似乎/仿佛」这类模糊措辞。三处都要堵，缺一处就漏。
+
+12. **排他性运动禁令两阶段都要写。** Pass2 早就禁止「the only motion is X」，
+    但 Pass1 没有——而 Pass1 的 `global_notes` 会原样喂进 Pass2。
+    只堵一处等于没堵。
