@@ -417,3 +417,12 @@ def build_frame_refs(job_id: str, frames: list[tuple[float, str, Path]], shot_in
         FrameRef(shot_index=shot_index, time=t, path=str(p), role=role)  # type: ignore[arg-type]
         for t, role, p in frames
     ]
+
+
+def run_pipeline_sync(job: Job, video_path: Path) -> JobResult:
+    """同步执行整条管线。
+
+    供 CLI、脚本和测试使用（这些场景不方便自己管事件循环）。
+    Web 路径走 `runner._spawn` 里的 `await run_pipeline(...)`，不要用这个。
+    """
+    return asyncio.run(run_pipeline(job, video_path))

@@ -66,13 +66,24 @@ def test_upload_accepts_video(client, sample_video: Path):
     assert body["video_url"].startswith("/api/media/upload/")
 
 
-def test_upload_keeps_chinese_filename(client, sample_video: Path):
+def test_upload_keeps_chinese_display_name(client, sample_video: Path):
+    """中文名要保留在展示字段里，但落盘文件名必须是纯 ASCII。
+
+    原因：中文出现在 URL 路径里，只要有一环没做百分号编码（curl、部分代理、
+    Content-Disposition）就会 400。展示与落盘分离，两边各取所需。
+    """
     r = client.post(
         "/api/upload",
         files={"file": ("我的测试视频.mp4", sample_video.read_bytes(), "video/mp4")},
     )
     assert r.status_code == 200
-    assert "我的测试视频" in r.json()["file_id"]
+    body = r.json()
+
+    assert body["name"] == "我的测试视频.mp4"
+    assert "我的测试视频" not in body["file_id"]
+    assert body["file_id"].isascii()
+    assert body["file_id"].endswith(".mp4")
+    assert body["video_url"].isascii()
 
 
 def test_media_stream_supports_range(client, sample_video: Path):
@@ -95,6 +106,20 @@ def test_media_stream_supports_range(client, sample_video: Path):
 
 def test_media_stream_missing_file(client):
     assert client.get("/api/media/upload/nope.mp4").status_code == 404
+
+
+def test_range_works_for_chinese_named_upload(client, sample_video: Path):
+    """中文名上传后，返回的 video_url 必须能直接喂给 <video>（即纯 ASCII 且支持 Range）。"""
+    up = client.post(
+        "/api/upload",
+        files={"file": ("产品演示视频.mp4", sample_video.read_bytes(), "video/mp4")},
+    ).json()
+    assert up["video_url"].isascii()
+
+    part = client.get(up["video_url"], headers={"Range": "bytes=100-1099"})
+    assert part.status_code == 206
+    assert len(part.content) == 1000
+    assert part.headers["content-range"].startswith("bytes 100-1099/")
 
 
 def test_analyze_requires_existing_file(client):

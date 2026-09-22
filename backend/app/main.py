@@ -15,7 +15,7 @@ from __future__ import annotations
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -103,8 +103,27 @@ async def index():
     })
 
 
+@app.get("/{full_path:path}", include_in_schema=False)
+async def spa_fallback(full_path: str):
+    """前端用 history 路由，直接访问 /job/xxx 这种深链要回落到 index.html。
+
+    只兜底非 /api 路径，且优先返回真实存在的静态文件。
+    """
+    if full_path.startswith("api/") or full_path in ("docs", "redoc", "openapi.json"):
+        raise HTTPException(404, "Not Found")
+
+    candidate = FRONTEND_DIST / full_path
+    if candidate.is_file() and FRONTEND_DIST in candidate.resolve().parents:
+        return FileResponse(candidate)
+
+    page = FRONTEND_DIST / "index.html"
+    if page.is_file():
+        return FileResponse(page, media_type="text/html")
+    raise HTTPException(404, "前端未构建")
+
+
 if FRONTEND_DIST.is_dir():
-    # 静态资源；前端用 history 模式时 404 由前端路由兜底
+    # 静态资源；前端用 history 模式时 404 由上面的 spa_fallback 兜底
     app.mount("/assets", StaticFiles(directory=str(FRONTEND_DIST / "assets")), name="assets")
 
 

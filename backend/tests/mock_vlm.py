@@ -1,0 +1,216 @@
+"""最小 OpenAI 兼容 mock 服务，用于端到端测试反推管线。
+
+为什么需要它：
+    真实模型调用有成本、有延迟、还依赖外部可用性。但管线里最容易出错的恰恰是
+    调用之外的部分——抽帧、时间戳对齐、Pass1 JSON 解析、多块合并、Pass2 组装。
+    mock 掉模型这一层，就能在 CI 里把整条链路完整跑一遍。
+
+判定逻辑：
+    - 请求体里带 image_url → 视为 Pass1（视觉观察），返回结构化镜头 JSON
+    - 不带图片            → 视为 Pass2（成文），返回一段目标格式提示词
+
+可以单独运行：
+    python -m tests.mock_vlm 8899
+"""
+
+from __future__ import annotations
+
+import json
+import re
+from typing import Any
+
+from fastapi import FastAPI, Request
+
+app = FastAPI(title="Mock VLM")
+
+# 记录收到的请求，便于测试断言（例如确认帧数、确认 Pass2 只调用一次）
+CALLS: list[dict[str, Any]] = []
+
+
+def reset() -> None:
+    CALLS.clear()
+
+
+def _count_images(payload: dict) -> int:
+    n = 0
+    for msg in payload.get("messages") or []:
+        content = msg.get("content")
+        if isinstance(content, list):
+            n += sum(1 for p in content if isinstance(p, dict) and p.get("type") == "image_url")
+    return n
+
+
+def _extract_timestamps(text: str) -> list[str]:
+    return re.findall(r"Image \d+ -> timestamp ([0-9.]+)s", text)
+
+
+def _make_pass1_response(payload: dict, user_text: str) -> str:
+    """根据请求里实际给的时间戳生成对应的镜头列表——这样测试能验证对齐是否正确。"""
+    stamps = _extract_timestamps(user_text)
+    if not stamps:
+        stamps = ["0.000"]
+
+    shots = []
+    for i, ts in enumerate(stamps):
+        secs = float(ts)
+        m, s = divmod(secs, 60)
+        shots.append({
+            "shot": str(i + 1),
+            "timecode": f"{int(m):02d}:{s:06.3f}",
+            "shot_size": "medium close-up" if i % 2 == 0 else "wide",
+            "camera": "slow dolly-in, small amplitude" if i % 3 else "static",
+            "subject": f"a performer in frame at {ts}s, wearing a dark jacket",
+            "action": (
+                "she turns toward the lens, her weight shifting onto the front foot "
+                "and the motion carrying up through her shoulders"
+            ),
+            "setting": "an industrial rooftop at dusk, vents and cables in the background",
+            "lighting": "low warm sun from camera left, soft falloff",
+            "color": "teal and amber, slightly desaturated",
+            "motion_energy": "medium, following a steady beat",
+            "on_screen_text": "none",
+            "dialogue": "still here" if i == 0 else "",
+            "sfx": "cloth movement",
+            "transition": "cut",
+            "confidence": 0.86,
+        })
+
+    return json.dumps({
+        "shots": shots,
+        "global_notes": f"mock 观察：共 {len(shots)} 个镜头，手持轻微晃动，暖色调统一。",
+    }, ensure_ascii=False)
+
+
+def _make_pass2_response(payload: dict, user_text: str) -> str:
+    """按 Pass2 提示里要求的字段名，返回一段结构合法的提示词。"""
+    system = ""
+    for msg in payload.get("messages") or []:
+        if msg.get("role") == "system":
+            system = msg.get("content") or ""
+            break
+
+    if "subject_definitions:" in system:
+        return (
+            "subject_definitions:\n"
+            "<Subject 1> is the performer in the source video, wearing a dark jacket.\n"
+            "<Video 1> is the source video for the target edit.\n\n"
+            "summary:\n"
+            "[video continuation + reference generation] The target video continues "
+            "<Subject 1>'s rooftop performance using the pacing of <Video 1>.\n\n"
+            "retention_analysis:\n"
+            "<Subject 1> (appears in [Shot 1]): fully_preserved - the dark jacket and "
+            "framing are retained.\n"
+            "<Video 1> (cut and pacing structure): weak_reference - the edit follows the "
+            "original rhythm.\n\n"
+            "detailed_description:\n"
+            "The target video is a cinematic rooftop performance with teal and amber grading.\n"
+            "[Shot 1] The shot opens on a medium close-up of <Subject 1>, who turns toward "
+            "the lens, her weight shifting onto her front foot and the motion carrying up "
+            "through her shoulders. She sings, her lips moving through every syllable of "
+            "the line.\n"
+            "[Shot 2] At 00:03.400, the shot cuts to a wide view of the industrial rooftop.\n\n"
+            "overall_soundscape:\n"
+            "Low rooftop wind and light cloth movement continue throughout.\n\n"
+            "non_diegetic_music:\n"
+            "A restrained synth pad at a slow tempo with no swell."
+        )
+
+    if "Seedance" in system:
+        return (
+            "一位身穿深色夹克的表演者站在黄昏的工业天台边缘，转身面向镜头，重心前移，"
+            "动作顺着肩膀向上传导。背景有通风管道与线缆，暖色侧光从画面左侧打来。"
+            "电影级写实风格，青橙色调，略微去饱和。以中近景开场，随后缓慢推轨至特写，浅景深。"
+            "全片两个镜头，节拍为 0–3.4 秒、3.4–6.8 秒。"
+            "天台风声与衣料摩擦声；无对白；末尾一段缓慢的合成器铺底配乐。"
+            "不要出现字幕、文字、水印。"
+        )
+
+    if "【整体风格】" in system:
+        return (
+            "【整体风格】\n"
+            "写实电影风格，青橙色调，黄昏暖侧光，节奏中速。\n\n"
+            "【镜头分镜】\n"
+            "镜头 1｜00:00.000–00:03.400\n"
+            "  景别 / 角度：中近景，平视\n"
+            "  运镜：缓慢推轨\n"
+            "  画面内容：表演者转身面向镜头，重心前移，动作传导至肩膀。\n"
+            "  台词 / 人声：still here\n"
+            "  音效：衣料摩擦\n"
+            "  转场：切\n\n"
+            "【声音设计】天台风声持续；无对白段落以配乐铺底。\n\n"
+            "【负面提示词】字幕, 文字, 水印, 平台 logo"
+        )
+
+    # 默认：H3 T2VA 三字段
+    return (
+        "integrated_multimodal_description: "
+        "The target video is a cinematic rooftop performance with teal and amber grading "
+        "and a slightly desaturated palette. "
+        "[Shot 1] The shot opens on a medium close-up of a performer in a dark jacket who "
+        "turns toward the lens, her weight shifting onto her front foot and the motion "
+        "carrying up through her shoulders. She sings, her lips moving through every "
+        "syllable of the line. "
+        "[Shot 2] At 00:03.400, the shot cuts to a wide view of the industrial rooftop, "
+        "vents and cables silhouetted against a low warm sun.\n\n"
+        "overall_soundscape: Low rooftop wind and light cloth movement continue throughout.\n\n"
+        "non_diegetic_music: A restrained synth pad at a slow tempo with no swell."
+    )
+
+
+@app.post("/v1/chat/completions")
+@app.post("/chat/completions")
+async def chat_completions(request: Request) -> dict:
+    payload = await request.json()
+
+    user_text = ""
+    for msg in payload.get("messages") or []:
+        if msg.get("role") == "user":
+            content = msg.get("content")
+            if isinstance(content, str):
+                user_text += content
+            elif isinstance(content, list):
+                user_text += "".join(
+                    p.get("text", "") for p in content
+                    if isinstance(p, dict) and p.get("type") == "text"
+                )
+
+    n_images = _count_images(payload)
+    is_pass1 = n_images > 0
+
+    CALLS.append({
+        "images": n_images,
+        "pass": 1 if is_pass1 else 2,
+        "model": payload.get("model"),
+        "chars": len(user_text),
+    })
+
+    text = _make_pass1_response(payload, user_text) if is_pass1 else _make_pass2_response(payload, user_text)
+
+    return {
+        "id": "mock-1",
+        "object": "chat.completion",
+        "model": payload.get("model") or "mock",
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": text},
+            "finish_reason": "stop",
+        }],
+        "usage": {"prompt_tokens": n_images * 1100, "completion_tokens": 400, "total_tokens": 0},
+    }
+
+
+@app.get("/v1/models")
+async def models() -> dict:
+    return {"data": [{"id": "mock-vlm", "object": "model"}]}
+
+
+def serve(port: int = 8899) -> None:
+    import uvicorn
+
+    uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")
+
+
+if __name__ == "__main__":
+    import sys
+
+    serve(int(sys.argv[1]) if len(sys.argv) > 1 else 8899)

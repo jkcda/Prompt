@@ -27,28 +27,33 @@ MAX_JOBS = 200
 
 
 class JobStore:
+    """内存任务表 + 事件总线。
+
+    这里刻意**不加 asyncio.Lock**：所有字典操作都是同步的（中间没有 await 点），
+    在单线程事件循环里本身就是原子的。加了反而会在跨事件循环使用时抛
+    "bound to a different event loop"——CLI 和测试需要在新循环里跑同一份 store。
+    """
+
     def __init__(self) -> None:
         self._jobs: OrderedDict[str, Job] = OrderedDict()
         self._events: dict[str, list[dict]] = {}
         self._subs: dict[str, list[asyncio.Queue]] = {}
         self._tasks: dict[str, asyncio.Task] = {}
         self._cancelled: set[str] = set()
-        self._lock = asyncio.Lock()
 
     # -- 生命周期 ----------------------------------------------------------
 
     async def create(self, job: Job) -> Job:
-        async with self._lock:
-            job.id = job.id or uuid.uuid4().hex[:16]
-            job.created_at = time.time()
-            self._jobs[job.id] = job
-            self._events[job.id] = []
-            self._subs[job.id] = []
-            while len(self._jobs) > MAX_JOBS:
-                old_id, _ = self._jobs.popitem(last=False)
-                self._events.pop(old_id, None)
-                self._subs.pop(old_id, None)
-                self._cancelled.discard(old_id)
+        job.id = job.id or uuid.uuid4().hex[:16]
+        job.created_at = time.time()
+        self._jobs[job.id] = job
+        self._events[job.id] = []
+        self._subs[job.id] = []
+        while len(self._jobs) > MAX_JOBS:
+            old_id, _ = self._jobs.popitem(last=False)
+            self._events.pop(old_id, None)
+            self._subs.pop(old_id, None)
+            self._cancelled.discard(old_id)
         self._persist(job)
         return job
 
@@ -178,25 +183,27 @@ class JobStore:
 
     async def subscribe(self, job_id: str) -> asyncio.Queue:
         q: asyncio.Queue = asyncio.Queue(maxsize=500)
-        async with self._lock:
-            self._subs.setdefault(job_id, []).append(q)
-            for event in self._events.get(job_id, []):
-                try:
-                    q.put_nowait(event)
-                except asyncio.QueueFull:
-                    break
-            job = self._jobs.get(job_id)
-            if job and job.state in ("succeeded", "failed", "cancelled"):
-                q.put_nowait({"type": "__close__", "ts": time.time()})
+        self._subs.setdefault(job_id, []).append(q)
+        for event in self._events.get(job_id, []):
+            try:
+                q.put_nowait(event)
+            except asyncio.QueueFull:
+                break
+        job = self._jobs.get(job_id)
+        if job and job.state in ("succeeded", "failed", "cancelled"):
+            q.put_nowait({"type": "__close__", "ts": time.time()})
         return q
 
     async def unsubscribe(self, job_id: str, q: asyncio.Queue) -> None:
-        async with self._lock:
-            subs = self._subs.get(job_id)
-            if subs and q in subs:
-                subs.remove(q)
+        subs = self._subs.get(job_id)
+        if subs and q in subs:
+            subs.remove(q)
 
     # -- 调试 --------------------------------------------------------------
+
+    def events(self, job_id: str) -> list[dict]:
+        """该任务已发出的事件（供测试与调试查看）。"""
+        return list(self._events.get(job_id, []))
 
     def stats(self) -> dict[str, Any]:
         by_state: dict[str, int] = {}

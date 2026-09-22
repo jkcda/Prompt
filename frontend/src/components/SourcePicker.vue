@@ -1,0 +1,355 @@
+<script setup lang="ts">
+import { computed, ref } from 'vue'
+
+import { useAnalyzeStore } from '@/stores/analyze'
+
+const store = useAnalyzeStore()
+const dragging = ref(false)
+const fileInput = ref<HTMLInputElement | null>(null)
+const showAdvanced = ref(false)
+
+const ACCEPT = 'video/mp4,video/quicktime,video/x-matroska,video/webm,video/x-msvideo,video/*'
+
+const pickedName = computed(() => store.file?.name ?? '')
+const pickedSize = computed(() => {
+  const s = store.file?.size ?? 0
+  if (!s) return ''
+  if (s < 1024 * 1024) return `${(s / 1024).toFixed(0)} KB`
+  return `${(s / 1048576).toFixed(1)} MB`
+})
+
+const canStart = computed(() => {
+  if (store.running || store.starting) return false
+  return store.mode === 'upload' ? !!store.file : !!store.linkUrl.trim()
+})
+
+function pick() {
+  fileInput.value?.click()
+}
+
+function onFileInput(e: Event) {
+  const target = e.target as HTMLInputElement
+  const f = target.files?.[0]
+  if (f) store.setFile(f)
+  target.value = ''
+}
+
+function onDrop(e: DragEvent) {
+  dragging.value = false
+  const f = e.dataTransfer?.files?.[0]
+  if (f) store.setFile(f)
+}
+
+function onDragOver() {
+  dragging.value = true
+}
+
+function onDragLeave() {
+  dragging.value = false
+}
+
+const selectedFormat = computed(
+  () => store.formats.find((f) => f.value === store.options.format) ?? null,
+)
+</script>
+
+<template>
+  <section class="panel">
+    <div class="panel-head">
+      <div class="panel-title"><span class="dot" />选择视频来源</div>
+      <div class="tabs">
+        <button
+          :class="['tab', { active: store.mode === 'upload' }]"
+          @click="store.mode = 'upload'"
+        >
+          上传视频
+        </button>
+        <button
+          :class="['tab', { active: store.mode === 'link' }]"
+          @click="store.mode = 'link'"
+        >
+          B站 / 抖音链接
+        </button>
+      </div>
+    </div>
+
+    <div class="panel-body">
+      <!-- ------------------------------------------------ 上传 -->
+      <template v-if="store.mode === 'upload'">
+        <div
+          :class="['dropzone', { dragging, filled: !!store.file }]"
+          @click="pick"
+          @dragover.prevent="onDragOver"
+          @dragleave="onDragLeave"
+          @drop.prevent="onDrop"
+        >
+          <input
+            ref="fileInput"
+            type="file"
+            :accept="ACCEPT"
+            hidden
+            @change="onFileInput"
+          />
+
+          <template v-if="store.file">
+            <div class="dz-icon">🎬</div>
+            <div class="dz-name">{{ pickedName }}</div>
+            <div class="dz-meta faint">{{ pickedSize }} · 点击更换</div>
+          </template>
+          <template v-else>
+            <div class="dz-icon">＋</div>
+            <div class="dz-name">拖入视频，或点击选择</div>
+            <div class="dz-meta faint">
+              支持 mp4 / mov / mkv / webm / avi 等，单个最大
+              {{ store.health ? '500' : '—' }}MB
+            </div>
+          </template>
+        </div>
+
+        <div v-if="store.uploading" class="upload-bar">
+          <div class="progress-track">
+            <div class="progress-fill" :style="{ width: store.uploadPercent + '%' }" />
+          </div>
+          <span class="faint mono">上传中 {{ store.uploadPercent }}%</span>
+        </div>
+      </template>
+
+      <!-- ------------------------------------------------ 链接 -->
+      <template v-else>
+        <div class="field">
+          <label class="field-label">视频链接或分享文案</label>
+          <textarea
+            v-model="store.linkUrl"
+            class="textarea"
+            rows="3"
+            placeholder="直接粘贴抖音分享文案也行，会自动从中提取链接。例如：&#10;7.32 复制打开抖音，看看【某某】的作品 https://v.douyin.com/xxxxxx/"
+          />
+          <div class="field-hint">
+            支持 B站（bilibili.com / b23.tv）与抖音（v.douyin.com）。
+            抖音签名校验变动频繁，自动抓取不是总能成功，失败时请手动下载后上传——分析效果完全一致。
+          </div>
+        </div>
+
+        <div class="row">
+          <button class="btn btn-sm" :disabled="store.probing || !store.linkUrl.trim()" @click="store.probe()">
+            <span v-if="store.probing" class="spinner" />
+            {{ store.probing ? '解析中' : '先解析看看' }}
+          </button>
+        </div>
+
+        <div v-if="store.probeResult" class="probe-card">
+          <div class="row" style="gap: 8px; align-items: flex-start">
+            <img
+              v-if="store.probeResult.thumbnail"
+              :src="store.probeResult.thumbnail"
+              class="probe-thumb"
+              alt=""
+            />
+            <div style="flex: 1; min-width: 0">
+              <div class="probe-title">{{ store.probeResult.title || '（无标题）' }}</div>
+              <div class="row row-wrap" style="margin-top: 6px; gap: 6px">
+                <span class="badge">{{ store.probeResult.platform || '未知平台' }}</span>
+                <span v-if="store.probeResult.uploader" class="badge">
+                  {{ store.probeResult.uploader }}
+                </span>
+                <span v-if="store.probeResult.duration" class="badge">
+                  {{ store.probeResult.duration.toFixed(1) }}s
+                </span>
+              </div>
+              <div v-if="store.probeResult.note" class="field-hint" style="margin-top: 8px">
+                {{ store.probeResult.note }}
+              </div>
+            </div>
+          </div>
+        </div>
+      </template>
+
+      <!-- ------------------------------------------------ 选项 -->
+      <div class="divider" />
+
+      <div class="field">
+        <label class="field-label">输出格式</label>
+        <select v-model="store.options.format" class="select">
+          <option v-for="f in store.formats" :key="f.value" :value="f.value">
+            {{ f.label }}
+          </option>
+        </select>
+        <div v-if="selectedFormat?.description" class="field-hint">
+          {{ selectedFormat.description }}
+        </div>
+      </div>
+
+      <div class="row row-wrap" style="gap: 18px; margin-bottom: 14px">
+        <label class="checkbox">
+          <input v-model="store.options.enable_asr" type="checkbox" />
+          语音转写（台词 / 口型 / 音效必须靠它）
+        </label>
+        <label class="checkbox">
+          <input v-model="store.options.enable_scene_split" type="checkbox" />
+          镜头自动切分
+        </label>
+        <label class="checkbox">
+          <input v-model="store.options.language" type="checkbox" true-value="zh" false-value="en" />
+          提示词用中文
+        </label>
+      </div>
+
+      <button class="btn btn-ghost btn-sm" @click="showAdvanced = !showAdvanced">
+        {{ showAdvanced ? '收起' : '展开' }}高级选项
+      </button>
+
+      <div v-if="showAdvanced" class="advanced">
+        <div class="field">
+          <label class="field-label">抽帧总预算（帧）</label>
+          <input
+            v-model.number="store.options.max_total_frames"
+            class="input"
+            type="number"
+            min="4"
+            max="200"
+            placeholder="留空用服务端默认（48）"
+          />
+          <div class="field-hint">
+            这是控制成本与质量的旋钮。48 帧约 5.3 万 tokens。
+            帧越多细节越全，但超过模型上下文会失败。
+          </div>
+        </div>
+
+        <div class="field">
+          <label class="field-label">额外要求（会拼进最终提示词任务里）</label>
+          <textarea
+            v-model="store.options.extra_instruction"
+            class="textarea"
+            rows="2"
+            placeholder="例如：重点描述运镜与光线；忽略背景人群；强调服装材质"
+          />
+        </div>
+
+        <div class="field">
+          <label class="field-label">目标时长（秒，可留空）</label>
+          <input
+            v-model.number="store.options.target_duration"
+            class="input"
+            type="number"
+            min="1"
+            placeholder="生成视频的期望时长，留空则按原片时长"
+          />
+        </div>
+      </div>
+
+      <!-- ------------------------------------------------ 启动 -->
+      <div class="row" style="margin-top: 18px; gap: 12px">
+        <button class="btn btn-primary btn-lg" :disabled="!canStart" @click="store.start()">
+          <span v-if="store.starting || store.uploading" class="spinner" />
+          {{ store.starting || store.uploading ? '处理中…' : '开始反推' }}
+        </button>
+        <button
+          v-if="store.job || store.error"
+          class="btn btn-ghost"
+          @click="store.reset()"
+        >
+          清空
+        </button>
+      </div>
+    </div>
+  </section>
+</template>
+
+<style scoped>
+.dropzone {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  min-height: 150px;
+  padding: 24px;
+  border: 1.5px dashed var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-soft);
+  cursor: pointer;
+  transition: border-color 0.16s, background 0.16s;
+}
+
+.dropzone:hover,
+.dropzone.dragging {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.dropzone.filled {
+  border-style: solid;
+  border-color: rgba(109, 139, 255, 0.4);
+}
+
+.dz-icon {
+  font-size: 24px;
+  line-height: 1;
+  margin-bottom: 4px;
+}
+
+.dz-name {
+  font-size: 13.5px;
+  font-weight: 500;
+  text-align: center;
+  word-break: break-all;
+}
+
+.dz-meta {
+  font-size: 11.5px;
+  text-align: center;
+}
+
+.upload-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.upload-bar .progress-track {
+  flex: 1;
+}
+
+.divider {
+  height: 1px;
+  background: var(--border-soft);
+  margin: 18px 0;
+}
+
+.probe-card {
+  margin-top: 14px;
+  padding: 12px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius);
+  background: var(--bg-soft);
+}
+
+.probe-thumb {
+  width: 96px;
+  height: 56px;
+  object-fit: cover;
+  border-radius: var(--radius-sm);
+  flex-shrink: 0;
+  background: var(--panel-2);
+}
+
+.probe-title {
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.5;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.advanced {
+  margin-top: 14px;
+  padding: 14px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius);
+  background: var(--bg-soft);
+}
+</style>

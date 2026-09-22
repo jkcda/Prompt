@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 import uuid
 from pathlib import Path
@@ -27,7 +28,12 @@ CHUNK = 1 << 20  # 1MB
 
 @router.post("/upload", response_model=UploadResponse, summary="上传视频")
 async def upload_video(settings: SettingsDep, file: UploadFile = File(...)) -> UploadResponse:
-    """流式落盘，边写边校验大小，避免把整个文件读进内存。"""
+    """流式落盘，边写边校验大小，避免把整个文件读进内存。
+
+    落盘文件名刻意保持纯 ASCII：中文文件名虽然更好认，但会出现在 URL 里，
+    一旦某一环没做百分号编码（curl、部分代理、Content-Disposition）就会 400。
+    原始中文名放在响应体的 `name` 字段里给前端展示，两边各取所需。
+    """
     raw_name = file.filename or "video.mp4"
     ext = Path(raw_name).suffix.lower()
     if ext not in VIDEO_EXTS:
@@ -36,8 +42,7 @@ async def upload_video(settings: SettingsDep, file: UploadFile = File(...)) -> U
             f"不支持的视频格式：{ext or '未知'}。支持 {', '.join(sorted(VIDEO_EXTS))}",
         )
 
-    stem = _safe_stem(Path(raw_name).stem)
-    file_id = f"{int(time.time())}_{uuid.uuid4().hex[:8]}_{stem}{ext}"
+    file_id = _make_file_id(Path(raw_name).stem, ext)
     dst = UPLOAD_DIR / file_id
 
     total = 0
@@ -81,8 +86,8 @@ async def upload_video(settings: SettingsDep, file: UploadFile = File(...)) -> U
     )
 
 
-def _safe_stem(stem: str) -> str:
-    """保留中文，只替换文件系统不安全的字符，并限长。"""
-    bad = '<>:"/\\|?*\x00-\x1f'
-    cleaned = "".join("_" if ch in bad else ch for ch in stem).strip(" .")
-    return cleaned[:60] or "video"
+def _make_file_id(stem: str, ext: str) -> str:
+    """生成纯 ASCII 的落盘文件名，尽量保留可读的英文/数字片段。"""
+    slug = re.sub(r"[^A-Za-z0-9]+", "_", stem).strip("_")[:32]
+    prefix = f"{int(time.time())}_{uuid.uuid4().hex[:8]}"
+    return f"{prefix}_{slug}{ext}" if slug else f"{prefix}{ext}"
