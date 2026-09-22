@@ -251,6 +251,25 @@ def test_diagnose_reasoning_model_budget_exhausted():
     assert "VLM_MAX_TOKENS" in msg, "要给出可操作的下一步"
 
 
+def test_diagnose_advice_leads_with_disabling_thinking():
+    """建议要按效果排序 —— 关思考比调大 max_tokens 有效得多。
+
+    实测 6 张图：关思考 15s 且正文正常，调大预算 236s。
+    报错里先让人调 max_tokens 是过时的建议（那是关思考还没实现时的结论）。
+    """
+    payload = {
+        "model": "m",
+        "choices": [{"finish_reason": "length",
+                     "message": {"content": "", "reasoning_content": "x" * 5000}}],
+        "usage": {"completion_tokens": 6144},
+    }
+    msg = VLMClient._diagnose_empty(payload, 6)
+    assert "VLM_DISABLE_THINKING" in msg
+    # 关思考必须排在调大 max_tokens 之前
+    assert msg.index("VLM_DISABLE_THINKING") < msg.index("VLM_MAX_TOKENS")
+    assert "236s" in msg and "15s" in msg, "要给出实测对比，让人信服"
+
+
 def test_diagnose_plain_length_still_works():
     """非推理模型的截断，仍然给简单提示。"""
     payload = {"model": "m", "choices": [{"finish_reason": "length",

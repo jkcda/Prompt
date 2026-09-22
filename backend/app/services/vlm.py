@@ -289,11 +289,13 @@ class VLMClient:
                         f"  思考过程长度：{rlen} 字符；本次完成 token："
                         f"{usage.get('completion_tokens')}（正好等于上限）。\n"
                         f"  这**不是**模型不支持图片——它确实在处理输入。\n"
-                        f"  处理办法（任选其一）：\n"
-                        f"    1) 调大 VLM_MAX_TOKENS（当前上限见 /api/settings），"
-                        f"实测 6 张图约需 16384；\n"
-                        f"    2) 换非推理模型（如 Qwen/Qwen3.5-27B），快很多；\n"
-                        f"    3) 减少抽帧数（MAX_TOTAL_FRAMES），输入越短思考越短。"
+                        f"  处理办法（按效果排序）：\n"
+                        f"    1) 打开 VLM_DISABLE_THINKING（默认已开）。这是最有效的："
+                        f"反推是「照结构填内容」不是解题，思考过程纯属浪费。"
+                        f"实测 6 张图从 236s 降到 15s，正文也不再被挤空；\n"
+                        f"    2) 确实需要思考时，把 VLM_MAX_TOKENS 调大（实测 6 张图约需 16384）；\n"
+                        f"    3) 换非推理模型（如 Qwen/Qwen3.5-27B），本来就不思考，快很多；\n"
+                        f"    4) 减少抽帧数（MAX_TOTAL_FRAMES），输入越短思考越短。"
                     )
                 return (
                     f"模型 {model} 的输出被 max_tokens 截断（finish_reason=length）。"
