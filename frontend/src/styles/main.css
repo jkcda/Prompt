@@ -368,6 +368,24 @@ a:hover {
   background: rgba(86, 200, 245, 0.1);
 }
 
+/* 可点击的徽标（模型切换入口）。做成按钮但不该看起来像个按钮——
+   它首先是状态显示，其次才是入口。 */
+.badge-btn {
+  font-family: inherit;
+  cursor: pointer;
+  transition: border-color 0.16s, filter 0.16s;
+}
+
+.badge-btn:hover {
+  border-color: var(--accent);
+  filter: brightness(1.18);
+}
+
+.badge-btn .gear {
+  font-size: 10px;
+  opacity: 0.7;
+}
+
 /* ---------------------------------------------------------------- 进度 */
 
 .progress-track {

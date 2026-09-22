@@ -18,6 +18,10 @@ _TMP = Path(tempfile.mkdtemp(prefix="vpr-test-"))
 os.environ["DATABASE_URL"] = f"sqlite:///{(_TMP / 'test.db').as_posix()}"
 os.environ["MAX_UPLOAD_MB"] = "50"
 os.environ["HISTORY_KEEP_DAYS"] = "0"
+# 关键：把配置写回目标指到临时文件。
+# 否则跑测试会往真实的 backend/.env 里写假模型名，
+# 测试全绿但服务起不来（踩过）。
+os.environ["ENV_FILE"] = str(_TMP / "test.env")
 os.environ.setdefault("VLM_API_KEY", "test-key-not-real")
 os.environ.setdefault("VLM_BASE_URL", "http://127.0.0.1:9/v1")
 os.environ.setdefault("VLM_MODEL", "test-model")

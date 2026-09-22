@@ -340,3 +340,144 @@ def test_settings_whitelist_rejects_unknown_keys(client):
     r = client.post("/api/settings", json={"SOME_RANDOM_KEY": "x"})
     assert r.status_code == 200
     assert r.json()["ok"] is False
+
+
+# ---------------------------------------------------------------------------
+# 模型热切换（用户要「自主切换模型」）
+# ---------------------------------------------------------------------------
+
+def test_settings_hot_switch_reflects_in_health(client):
+    """改模型不该需要重启服务 —— 写配置后 /api/health 必须立刻反映。"""
+    from app.core.config import get_settings
+
+    original = get_settings().vlm_model
+    try:
+        r = client.post("/api/settings", json={"VLM_MODEL": "Vendor/Another-Model"})
+        assert r.json()["ok"] is True
+        assert "VLM_MODEL" in r.json()["updated"]
+
+        assert client.get("/api/health").json()["vlm_model"] == "Vendor/Another-Model"
+        assert client.get("/api/settings").json()["vlm"]["model"] == "Vendor/Another-Model"
+    finally:
+        client.post("/api/settings", json={"VLM_MODEL": original})
+    assert client.get("/api/health").json()["vlm_model"] == original
+
+
+def test_settings_hot_switch_base_url(client):
+    from app.core.config import get_settings
+
+    original = get_settings().vlm_base_url
+    try:
+        client.post("/api/settings", json={"VLM_BASE_URL": "https://example.com/v1"})
+        assert client.get("/api/health").json()["vlm_model"]  # 仍然可用
+        assert client.get("/api/settings").json()["vlm"]["base_url"] == "https://example.com/v1"
+    finally:
+        client.post("/api/settings", json={"VLM_BASE_URL": original})
+
+
+def test_settings_omitting_key_does_not_wipe_it(client):
+    """切换模型时不该被迫重填 key —— 不传就不能动它。"""
+    from app.core.config import get_settings
+
+    before = get_settings().vlm_api_key
+    assert before, "测试前提：应该已有 key"
+
+    client.post("/api/settings", json={"VLM_MODEL": "Vendor/X"})
+    assert get_settings().vlm_api_key == before
+
+    masked = client.get("/api/settings").json()["vlm"]["api_key_masked"]
+    assert masked and before not in masked
+
+
+def test_settings_audio_input_toggle(client):
+    from app.core.config import get_settings
+
+    original = get_settings().vlm_audio_input
+    try:
+        client.post("/api/settings", json={"VLM_AUDIO_INPUT": "true"})
+        assert get_settings().vlm_audio_input is True
+        assert client.get("/api/settings").json()["vlm"]["audio_input"] is True
+    finally:
+        client.post("/api/settings", json={"VLM_AUDIO_INPUT": "false" if not original else "true"})
+    assert get_settings().vlm_audio_input == original
+
+
+def test_models_endpoint_returns_shape_on_failure(client):
+    """拉不到列表时要给出原因，不能 500。
+
+    conftest 把 base_url 指到 127.0.0.1:9（discard 端口），必然连不上。
+    """
+    r = client.get("/api/models")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is False
+    assert body["models"] == []
+    assert body["message"]
+
+
+def test_models_endpoint_accepts_base_url_override(client):
+    r = client.get("/api/models", params={"base_url": "http://127.0.0.1:9/v1"})
+    assert r.status_code == 200
+    assert r.json()["ok"] is False
+
+
+def test_test_vlm_config_endpoint_accepts_overrides(client):
+    """POST /api/health/vlm 要能试一组未保存的配置。"""
+    r = client.post("/api/health/vlm", json={
+        "model": "Vendor/Probe-Target",
+        "base_url": "http://127.0.0.1:9/v1",
+    })
+    assert r.status_code == 200
+    body = r.json()
+    assert body["model"] == "Vendor/Probe-Target"
+    assert body["base_url"] == "http://127.0.0.1:9/v1"
+    assert body["ok"] is False
+    assert body["vision"] is False
+    assert body["inconclusive"] is False
+    assert body["message"]
+
+
+def test_test_vlm_config_falls_back_to_saved_key(client):
+    """只改模型名时不该要求重填 key。"""
+    from app.core.config import get_settings
+
+    r = client.post("/api/health/vlm", json={"model": get_settings().vlm_model})
+    assert r.status_code == 200
+    assert r.json()["configured"] is True
+
+
+def test_vision_probe_image_is_generated(ffmpeg_bin: str):
+    """自检图片必须真的能生成，否则自检会假阳性。"""
+    from app.services.vlm import _vision_probe_image
+
+    p = _vision_probe_image()
+    assert p is not None and p.is_file()
+    assert p.stat().st_size > 0
+    assert p.read_bytes()[:2] == b"\xff\xd8"  # JPEG SOI
+
+
+def test_settings_write_does_not_touch_real_env_file(client):
+    """跑测试不能改真实的 backend/.env。
+
+    踩过：测试把 VLM_MODEL 写成 Vendor/X，测试全绿但服务起不来了。
+    现在写入目标由 ENV_FILE 指向临时文件，真实 .env 必须纹丝不动。
+    """
+    import os
+
+    from app.core.config import BACKEND_DIR, env_file_path
+
+    real_env = BACKEND_DIR / ".env"
+    before = real_env.read_bytes() if real_env.is_file() else None
+
+    client.post("/api/settings", json={"VLM_MODEL": "Vendor/Pollution-Probe"})
+
+    after = real_env.read_bytes() if real_env.is_file() else None
+    assert before == after, "测试污染了真实的 backend/.env！"
+    assert "Pollution-Probe" not in (after or b"").decode("utf-8", "replace")
+
+    # 写入应该落在临时文件上
+    target = env_file_path()
+    assert target != real_env
+    assert target.is_file()
+    assert "Pollution-Probe" in target.read_text(encoding="utf-8")
+    assert os.environ["ENV_FILE"] == str(target)

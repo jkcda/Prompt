@@ -1,12 +1,14 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import { RouterLink } from 'vue-router'
 
+import ModelSettings from '@/components/ModelSettings.vue'
 import { useAnalyzeStore } from '@/stores/analyze'
 
 defineProps<{ isHome: boolean }>()
 
 const store = useAnalyzeStore()
+const settingsOpen = ref(false)
 
 const vlmBadge = computed(() => {
   const h = store.health
@@ -37,12 +39,22 @@ const asrBadge = computed(() => {
       <div class="header-right">
         <span v-if="store.health?.ytdlp" class="badge info">链接抓取可用</span>
         <span v-if="asrBadge" :class="['badge', asrBadge.cls]">{{ asrBadge.text }}</span>
-        <span :class="['badge', vlmBadge.cls]">{{ vlmBadge.text }}</span>
+        <!-- 模型徽标就是切换模型的入口，不用去别处找 -->
+        <button
+          :class="['badge', 'badge-btn', vlmBadge.cls]"
+          :title="`当前模型：${store.health?.vlm_model || '未配置'}（点击切换）`"
+          @click="settingsOpen = true"
+        >
+          {{ vlmBadge.text }}
+          <span class="gear">⚙</span>
+        </button>
 
         <RouterLink v-if="!isHome" to="/" class="btn btn-sm">新建反推</RouterLink>
       </div>
     </div>
   </header>
+
+  <ModelSettings :open="settingsOpen" @close="settingsOpen = false" />
 </template>
 
 <style scoped>

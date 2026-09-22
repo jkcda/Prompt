@@ -19,7 +19,8 @@ from pathlib import Path
 
 import httpx
 
-from ..core.config import get_settings
+from ..core.config import get_settings, resolve_ffmpeg
+from .ffmpeg import run as ffmpeg_run
 
 log = logging.getLogger("vlm")
 
@@ -379,29 +380,151 @@ class VLMClient:
 # 连通性自检
 # ---------------------------------------------------------------------------
 
-async def healthcheck() -> dict:
+async def healthcheck(
+    model: str | None = None,
+    base_url: str | None = None,
+    api_key: str | None = None,
+) -> dict:
+    """连通性自检。**会真的发一张图**，所以通过就代表这个模型能读图。
+
+    为什么要发图：只发文本的话，纯文本模型也能回「OK」，
+    用户会以为配好了，真跑反推时才发现收到图片就报错。
+    自检必须覆盖「图片输入」这个前提，否则等于没检。
+
+    为什么用纯色图：这是对照测试的思路——给一张纯红图，
+    回答里必须出现 red 才算真读到了。答案对不上说明模型在猜。
+    """
     s = get_settings()
     info = {
-        "configured": bool(s.vlm_api_key),
-        "base_url": s.vlm_base_url,
-        "model": s.vlm_model,
+        "configured": bool(api_key if api_key is not None else s.vlm_api_key),
+        "base_url": (base_url or s.vlm_base_url),
+        "model": (model or s.vlm_model),
         "ok": False,
+        "vision": False,
+        "inconclusive": False,
         "message": "",
     }
-    if not s.vlm_api_key:
+    if not info["configured"]:
         info["message"] = "未配置 VLM_API_KEY"
         return info
 
-    client = VLMClient()
+    probe = _vision_probe_image()
+    if not probe:
+        info["message"] = "无法生成自检用图片（ffmpeg 不可用）"
+        return info
+
+    client = VLMClient(
+        api_key=api_key if api_key is not None else None,
+        base_url=base_url if base_url is not None else None,
+        model=model if model is not None else None,
+    )
     try:
         text = await client.complete(
-            "You are a connectivity probe. Reply with exactly: OK",
-            "Reply with exactly: OK",
-            max_tokens=16,
+            "You are a connectivity probe for a vision model. Answer in one word.",
+            "What is the dominant colour of this image? Answer with a single English colour word.",
+            images=[probe],
+            # 不能给太小：推理模型（DeepSeek-V4 / GLM 这类）会先输出一大段思考，
+            # max_tokens=16 会被思考过程吃光，然后报 finish_reason=length，
+            # 看起来像「模型不可用」，其实只是额度不够。
+            max_tokens=512,
             retries=1,
         )
         info["ok"] = True
-        info["message"] = text[:80]
+        info["message"] = text[:120]
+        # 纯红图，答案里必须出现 red。答案跑偏说明它没真在看图。
+        info["vision"] = "red" in text.lower()
+        if not info["vision"]:
+            info["message"] = (
+                f"接口通了，但回答是 {text[:60]!r}，没有识别出图片内容。"
+                "该模型可能只支持文本输入，或图片被忽略了。"
+            )
     except Exception as exc:  # noqa: BLE001
-        info["message"] = str(exc)[:300]
+        msg = str(exc)
+        info["message"] = msg[:400]
+        # 输出被截断 ≠ 不可用。推理模型的思考过程可能极长，
+        # 这种情况只能判「无法确定」，不能判「不支持」。
+        if "finish_reason=length" in msg:
+            info["inconclusive"] = True
+            info["message"] = (
+                "无法判定：模型有输出但被 max_tokens 截断，可能是推理模型"
+                "（思考过程很长）。请换一张图或在真实任务里试。"
+            )
     return info
+
+
+_PROBE_IMAGE: Path | None = None
+
+
+def _vision_probe_image() -> Path | None:
+    """生成（并缓存）一张纯红小图，用于验证模型真的能读图。"""
+    global _PROBE_IMAGE
+    if _PROBE_IMAGE and _PROBE_IMAGE.is_file():
+        return _PROBE_IMAGE
+
+    from ..core.config import TMP_DIR
+
+    out = Path(TMP_DIR) / "vision_probe.jpg"
+    try:
+        ff = resolve_ffmpeg()
+        if not ff:
+            return None
+        ffmpeg_run([
+            ff, "-hide_banner", "-loglevel", "error",
+            "-f", "lavfi", "-i", "color=c=red:size=64x64:duration=1",
+            "-frames:v", "1", "-y", str(out),
+        ], timeout=30)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("生成自检图片失败: %s", exc)
+        return None
+
+    if out.is_file() and out.stat().st_size > 0:
+        _PROBE_IMAGE = out
+        return out
+    return None
+
+
+async def list_models(
+    base_url: str | None = None,
+    api_key: str | None = None,
+) -> dict:
+    """拉取服务商声明的模型列表。
+
+    ⚠ 返回的列表**不代表账号真实可用范围**——很多服务商只返回精选列表，
+    里面有些模型没有部署推理服务，调用会报 has no provider supported。
+    所以列表只能当候选来源，必须逐个测试才能确定哪个真能用。
+    """
+    s = get_settings()
+    base = (base_url or s.vlm_base_url).rstrip("/")
+    key = api_key if api_key is not None else s.vlm_api_key
+    url = f"{base}/models" if base.endswith("/v1") else f"{base}/v1/models"
+
+    if not key:
+        return {"ok": False, "models": [], "message": "未配置 VLM_API_KEY"}
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.get(url, headers={"Authorization": f"Bearer {key}"})
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "models": [], "message": f"请求失败：{exc}"}
+
+    if resp.status_code != 200:
+        return {
+            "ok": False,
+            "models": [],
+            "message": f"HTTP {resp.status_code}：{' '.join(resp.text[:200].split())}",
+        }
+
+    try:
+        data = resp.json()
+    except Exception:  # noqa: BLE001
+        return {"ok": False, "models": [], "message": "返回的不是 JSON"}
+
+    raw = data.get("data") if isinstance(data, dict) else data
+    ids: list[str] = []
+    for item in raw or []:
+        if isinstance(item, dict) and item.get("id"):
+            ids.append(str(item["id"]))
+        elif isinstance(item, str):
+            ids.append(item)
+
+    return {"ok": True, "models": sorted(ids), "message": f"共 {len(ids)} 个"}

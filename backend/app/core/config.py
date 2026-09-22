@@ -203,6 +203,19 @@ def refresh_settings() -> Settings:
     return get_settings()
 
 
+def env_file_path() -> Path:
+    """写回配置的目标文件（`POST /api/settings` 用）。
+
+    为什么单独抽出来：如果测试直接写真实的 `backend/.env`，跑一次测试就会把
+    用户的模型配置改成测试里的假值 —— 踩过：测试把 VLM_MODEL 写成 `Vendor/X`，
+    测试全绿但服务起不来了。所以允许用 ENV_FILE 环境变量把写入目标指到别处。
+
+    刻意不走 pydantic-settings：它是用来定位配置文件本身的，从配置文件里读会自相矛盾。
+    """
+    custom = os.environ.get("ENV_FILE", "").strip()
+    return Path(custom) if custom else (BACKEND_DIR / ".env")
+
+
 def ffmpeg_required() -> str:
     path = resolve_ffmpeg()
     if not path:

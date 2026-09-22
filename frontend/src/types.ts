@@ -186,6 +186,55 @@ export interface HealthInfo {
   db: string
 }
 
+/** 模型自检结果。`vision` 才是关键 —— 它代表模型真的读到了图片内容。 */
+export interface ModelTestResult {
+  configured: boolean
+  base_url: string
+  model: string
+  ok: boolean
+  /** 真的识别出了自检图片（纯红图答出了 red） */
+  vision: boolean
+  /** 无法判定：有输出但被 max_tokens 截断（推理模型思考过程很长） */
+  inconclusive: boolean
+  message: string
+}
+
+export interface ModelListResult {
+  ok: boolean
+  models: string[]
+  message: string
+}
+
+/** `GET /api/settings` 的响应。只包含可热更新的项。 */
+export interface SettingsInfo {
+  vlm: {
+    configured: boolean
+    base_url: string
+    model: string
+    concurrency: number
+    audio_input: boolean
+    api_key_masked: string
+  }
+  asr: {
+    configured: boolean
+    base_url: string
+    model: string
+    api_key_masked: string
+  }
+  frames: {
+    max_total_frames: number
+    max_frames_per_shot: number
+    long_shot_seconds: number
+    long_edge: number
+    jpeg_quality: number
+  }
+  scene: { threshold: number; min_shot_seconds: number }
+  chunk: { threshold_seconds: number; seconds: number; overlap_seconds: number }
+  upload: { max_mb: number }
+  database: { url: string; path: string }
+  ffmpeg: { path: string | null; ffprobe: string | null }
+}
+
 /** SSE 事件（后端 `store.emit` 发出的载荷）。 */
 export interface JobEvent {
   type: 'progress' | 'chunk' | 'fetched' | 'video_ready' | 'done' | '__close__'

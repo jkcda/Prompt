@@ -8,7 +8,10 @@ import type {
   Job,
   JobEvent,
   JobSummary,
+  ModelListResult,
+  ModelTestResult,
   ProbeResult,
+  SettingsInfo,
   UploadResult,
 } from '@/types'
 
@@ -38,12 +41,23 @@ export function errorMessage(err: unknown): string {
 export const getHealth = () => http.get<HealthInfo>('/health').then((r) => r.data)
 
 export const checkVLM = () =>
-  http.get<{ configured: boolean; ok: boolean; message: string; model: string }>('/health/vlm')
+  http.get<ModelTestResult>('/health/vlm').then((r) => r.data)
+
+/** 试一组模型配置但**不保存**。api_key 留空表示沿用已保存的。 */
+export const testModelConfig = (payload: {
+  model?: string
+  base_url?: string
+  api_key?: string
+}) => http.post<ModelTestResult>('/health/vlm', payload, { timeout: 180000 }).then((r) => r.data)
+
+/** 拉服务商声明的模型列表。注意这不代表账号真实可用范围，要逐个测。 */
+export const listModels = (baseUrl?: string) =>
+  http.get<ModelListResult>('/models', { params: baseUrl ? { base_url: baseUrl } : {} })
     .then((r) => r.data)
 
 export const getFormats = () => http.get<PromptModeOption[]>('/formats').then((r) => r.data)
 
-export const getSettings = () => http.get<Record<string, unknown>>('/settings').then((r) => r.data)
+export const getSettings = () => http.get<SettingsInfo>('/settings').then((r) => r.data)
 
 export const updateSettings = (patch: Record<string, unknown>) =>
   http.post<{ ok: boolean; updated?: string[]; message?: string }>('/settings', patch)
