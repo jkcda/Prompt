@@ -23,7 +23,10 @@ export interface AnalyzeOptions {
   language: 'zh' | 'en'
   enable_asr: boolean
   enable_scene_split: boolean
+  /** 以下留空（null）表示用服务端 .env 里的默认值 */
   max_total_frames: number | null
+  frame_interval_seconds: number | null
+  prompt_word_limit: number | null
   extra_instruction: string
   target_duration: number | null
 }
@@ -224,10 +227,12 @@ export interface SettingsInfo {
   frames: {
     max_total_frames: number
     max_frames_per_shot: number
+    frame_interval_seconds: number
     long_shot_seconds: number
     long_edge: number
     jpeg_quality: number
   }
+  prompt: { word_limit: number }
   scene: { threshold: number; min_shot_seconds: number }
   chunk: { threshold_seconds: number; seconds: number; overlap_seconds: number }
   upload: { max_mb: number }

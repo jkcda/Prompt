@@ -113,6 +113,9 @@ async def run_pipeline(job: Job, video_path: Path) -> JobResult:
 
     # ---------------- 4. 帧预算分配 ----------------
     budget = opts.max_total_frames or s.max_total_frames
+    # 按次覆盖：前端高级选项里可以单独指定，留空用服务端默认
+    interval = opts.frame_interval_seconds or s.frame_interval_seconds
+    word_limit = opts.prompt_word_limit or s.prompt_word_limit
     await step("plan", 26, f"{len(shots)} 个镜头，预算 {budget} 帧")
 
     # ---------------- 5. 逻辑分块（镜头边界处切） ----------------
@@ -122,7 +125,7 @@ async def run_pipeline(job: Job, video_path: Path) -> JobResult:
 
     # 按块时长比例分配帧预算
     per_chunk_budget = _split_budget(
-        chunks, budget, s.max_frames_per_shot, s.long_shot_seconds, s.frame_interval_seconds
+        chunks, budget, s.max_frames_per_shot, s.long_shot_seconds, interval
     )
 
     await step("frames", 32, f"抽帧（{total_chunks} 块）")
@@ -137,7 +140,7 @@ async def run_pipeline(job: Job, video_path: Path) -> JobResult:
             per_chunk_budget[ci],
             max_per_shot=s.max_frames_per_shot,
             long_shot_seconds=s.long_shot_seconds,
-            frame_interval=s.frame_interval_seconds,
+            frame_interval=interval,
         )
         role_of = {round(p.time, 3): p.role for p in plan}
         out_dir = frame_root / f"c{ci:02d}"
@@ -285,7 +288,7 @@ async def run_pipeline(job: Job, video_path: Path) -> JobResult:
     # 残缺的提示词比超长的更糟。
     prompt = prompt.strip()
     word_count = len(prompt.split())
-    limit = s.prompt_word_limit
+    limit = word_limit
     compressed = False
     if limit > 0 and word_count > limit:
         await step("compose", 92, f"提示词 {word_count} 词，压缩到 {limit} 词以内")
@@ -352,10 +355,10 @@ async def run_pipeline(job: Job, video_path: Path) -> JobResult:
             "est_tokens": selection.estimate_tokens(total_frames),
             "prompt_words": word_count,
             "prompt_chars": len(prompt),
-            "prompt_word_limit": s.prompt_word_limit,
+            "prompt_word_limit": word_limit,
             "prompt_compressed": compressed,
             "prompt_over_limit": bool(
-                s.prompt_word_limit > 0 and word_count > s.prompt_word_limit
+                word_limit > 0 and word_count > word_limit
             ),
             "format": opts.format,
             "format_label": templates.format_display(opts.format),
@@ -367,7 +370,7 @@ async def run_pipeline(job: Job, video_path: Path) -> JobResult:
                     budget,
                     max_per_shot=s.max_frames_per_shot,
                     long_shot_seconds=s.long_shot_seconds,
-                    frame_interval=s.frame_interval_seconds,
+                    frame_interval=interval,
                 ),
                 [(sh.start, sh.end) for sh in shots],
             ),

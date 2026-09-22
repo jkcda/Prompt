@@ -292,3 +292,66 @@ def test_long_video_is_chunked(mock_vlm_env, sample_video: Path, monkeypatch):
         monkeypatch.setenv("CHUNK_THRESHOLD_SECONDS", "90")
         monkeypatch.setenv("CHUNK_SECONDS", "60")
         cfg.refresh_settings()
+
+
+# ---------------------------------------------------------------------------
+# 请求级覆盖（前端高级选项）
+# ---------------------------------------------------------------------------
+
+def test_frame_interval_override_changes_frame_count(mock_vlm_env, sample_video: Path):
+    """请求里指定 frame_interval_seconds 要真的生效。
+
+    sample_video 是 10 秒 / 3 个镜头（4s / 3s / 3s），预算 96 不会成为瓶颈。
+    间隔 1.0 -> 每镜 4/3/3 帧 = 10 帧；间隔 3.0 -> 每镜 3/3/3（受保底 3 限制）= 9 帧。
+    """
+    import asyncio
+
+    from app.services.jobs import store
+
+    counts = {}
+    for interval in (1.0, 3.0):
+        mock_vlm.reset()
+        job = asyncio.run(store.create(Job(
+            id=f"e2e-int-{interval}",
+            source="upload",
+            options=AnalyzeOptions(
+                format="h3", enable_asr=False, frame_interval_seconds=interval
+            ),
+        )))
+        result = pipeline.run_pipeline_sync(job, sample_video)
+        counts[interval] = result.frames_used
+        assert result.stats["plan"]
+
+    assert counts[1.0] > counts[3.0], f"间隔越小帧应越多：{counts}"
+
+
+def test_frame_interval_override_shows_up_in_plan(mock_vlm_env, sample_video: Path):
+    import asyncio
+
+    from app.services.jobs import store
+
+    mock_vlm.reset()
+    job = asyncio.run(store.create(Job(
+        id="e2e-int-plan", source="upload",
+        options=AnalyzeOptions(enable_asr=False, frame_interval_seconds=2.0),
+    )))
+    result = pipeline.run_pipeline_sync(job, sample_video)
+    # 每镜最多 3 张 -> 3s 的镜头间隔 2s 只该拿 3 帧（保底），4s 的拿 3 帧
+    assert "每镜最多" in result.stats["plan"]
+
+
+def test_prompt_word_limit_override_recorded(mock_vlm_env, sample_video: Path):
+    """请求里指定的词数上限要记进 stats，供前端判断是否超限。"""
+    import asyncio
+
+    from app.services.jobs import store
+
+    mock_vlm.reset()
+    job = asyncio.run(store.create(Job(
+        id="e2e-wordlimit", source="upload",
+        options=AnalyzeOptions(enable_asr=False, prompt_word_limit=1234),
+    )))
+    result = pipeline.run_pipeline_sync(job, sample_video)
+    assert result.stats["prompt_word_limit"] == 1234
+    assert "prompt_words" in result.stats
+    assert "prompt_over_limit" in result.stats

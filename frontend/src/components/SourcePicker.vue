@@ -240,12 +240,48 @@ function onDragLeave() {
             class="input"
             type="number"
             min="4"
-            max="200"
-            placeholder="留空用服务端默认（48）"
+            max="800"
+            :placeholder="`留空用服务端默认（${store.settings?.frames.max_total_frames ?? 96}）`"
           />
           <div class="field-hint">
-            这是控制成本与质量的旋钮。48 帧约 5.3 万 tokens。
-            帧越多细节越全，但超过模型上下文会失败。
+            <strong>这只是安全网</strong>，不是目标值 —— 实际抽多少由镜头时长决定
+            （每镜每秒约一帧，上限
+            {{ store.settings?.frames.max_frames_per_shot ?? 8 }} 帧）。
+            15 秒的短片只会用到 15 帧左右，调大不影响短片，只防止长视频失控。
+            <br />
+            一帧约 1100 tokens。128k 上下文用 96，256k 用 200，1M 可以用到 400。
+          </div>
+        </div>
+
+        <div class="field">
+          <label class="field-label">镜头内取帧间隔（秒）</label>
+          <input
+            v-model.number="store.options.frame_interval_seconds"
+            class="input"
+            type="number"
+            step="0.1"
+            min="0.2"
+            max="5"
+            :placeholder="`留空用服务端默认（${store.settings?.frames.frame_interval_seconds ?? 1}）`"
+          />
+          <div class="field-hint">
+            越小越密。1.0 表示 8 秒的镜头取 8 帧。想更细就调到 0.5。
+          </div>
+        </div>
+
+        <div class="field">
+          <label class="field-label">提示词词数上限</label>
+          <input
+            v-model.number="store.options.prompt_word_limit"
+            class="input"
+            type="number"
+            min="200"
+            max="3000"
+            :placeholder="`留空用服务端默认（${store.settings?.prompt.word_limit ?? 700}）`"
+          />
+          <div class="field-hint">
+            限的是<strong>整篇</strong>（含主体定义和保留分析），不只是正文。
+            超了会自动压缩一次。你用的视频模型吃得下多长就写多长。
           </div>
         </div>
 

@@ -23,6 +23,9 @@ const formatLabel = computed(() => store.labelOfFormat(activeFormat.value))
 const wordCount = computed(() => (prompt.value ? prompt.value.split(/\s+/).filter(Boolean).length : 0))
 const charCount = computed(() => prompt.value.length)
 
+/** 超过服务端设的词数上限时提醒 —— 视频模型会截断或忽略超长提示词。 */
+const overLimit = computed(() => store.stats.prompt_over_limit === true)
+
 /** 各格式的段落切分，用于侧栏做锚点导航。 */
 const sections = computed(() => {
   if (!prompt.value) return []
@@ -171,11 +174,28 @@ function fmtTime(sec: number): string {
 
           <div class="stats-row">
             <span class="faint">约 {{ wordCount }} 词</span>
+            <!-- 视频模型提示词窗口有限，超限要说清楚 -->
+            <span
+              v-if="overLimit"
+              class="badge warn"
+              :title="`超过 ${store.stats.prompt_word_limit} 词上限，视频模型可能截断或忽略`"
+            >
+              超出 {{ wordCount - Number(store.stats.prompt_word_limit) }} 词
+            </span>
+            <span v-else-if="store.stats.prompt_compressed" class="badge ok">
+              已压缩
+            </span>
             <span v-if="store.stats.frames" class="faint">
               {{ store.stats.frames }} 帧
             </span>
             <span v-if="store.stats.shots" class="faint">
               {{ store.stats.shots }} 镜头
+            </span>
+            <span v-if="store.stats.subjects" class="faint">
+              {{ store.stats.subjects }} 主体
+            </span>
+            <span v-if="store.stats.scene_adaptive" class="badge info" title="镜头检测触发了自适应重检">
+              镜头自适应
             </span>
             <span v-if="store.stats.elapsed_sec" class="faint">
               耗时 {{ store.stats.elapsed_sec }}s

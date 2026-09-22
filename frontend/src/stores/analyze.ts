@@ -18,6 +18,7 @@ import type {
   JobSummary,
   ProbeResult,
   PromptFormat,
+  SettingsInfo,
   PromptMode,
   PromptModeOption,
   UploadResult,
@@ -26,6 +27,8 @@ import type {
 export const useAnalyzeStore = defineStore('analyze', () => {
   // ---------------- 环境 ----------------
   const health = ref<HealthInfo | null>(null)
+  /** 服务端配置，用来给高级选项填默认值提示 */
+  const settings = ref<SettingsInfo | null>(null)
   const modes = ref<PromptModeOption[]>([])
   const bootError = ref('')
 
@@ -36,6 +39,8 @@ export const useAnalyzeStore = defineStore('analyze', () => {
     enable_asr: true,
     enable_scene_split: true,
     max_total_frames: null,
+    frame_interval_seconds: null,
+    prompt_word_limit: null,
     extra_instruction: '',
     target_duration: null,
   })
@@ -156,9 +161,12 @@ export const useAnalyzeStore = defineStore('analyze', () => {
   async function init() {
     bootError.value = ''
     try {
-      const [h, m] = await Promise.all([api.getHealth(), api.getFormats()])
+      const [h, m, cfg] = await Promise.all([
+        api.getHealth(), api.getFormats(), api.getSettings(),
+      ])
       health.value = h
       modes.value = m
+      settings.value = cfg
       // 后端换了默认变体时跟随，避免本地写死的 format 在后端已下线
       const known = m.some((x) => x.variants.some((v) => v.value === options.value.format))
       if (!known) {
@@ -389,7 +397,7 @@ export const useAnalyzeStore = defineStore('analyze', () => {
 
   return {
     // 环境
-    health, modes, primaryModes, extraModes, bootError,
+    health, settings, modes, primaryModes, extraModes, bootError,
     // 模式与格式
     currentMode, currentVariants, formatInfo, labelOfFormat, selectMode, selectFormat,
     // 选项

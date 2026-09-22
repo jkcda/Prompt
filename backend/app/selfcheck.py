@@ -42,11 +42,16 @@ def main(argv: list[str]) -> int:
     print(f"    音轨   : {'有' if info.has_audio else '无'}")
 
     t0 = time.time()
-    cuts = ff.detect_scene_cuts(video, threshold=s.scene_threshold, max_duration=info.duration)
+    # 必须和真实管线走同一条路径，否则自检结果会误导 ——
+    # 踩过：自检用固定阈值检出 2 个镜头，管线因为自适应检出 4 个，
+    # 用户照着自检结果调参就调错了。
+    shots, cut_count, used_th, note = ff.detect_shots_adaptive(
+        video, info.duration, threshold=s.scene_threshold, min_shot_seconds=s.min_shot_seconds
+    )
     print(f"\n[2] 镜头检测  ({time.time() - t0:.2f}s)")
-    print(f"    切换点 : {len(cuts)} 个 -> {[round(c, 2) for c in cuts[:12]]}")
+    print(f"    切换点 : {cut_count} 个")
+    print(f"    阈值   : {used_th:.2f}" + (f"（{note}）" if note else ""))
 
-    shots = ff.cuts_to_shots(cuts, info.duration, s.min_shot_seconds)
     if len(shots) < 2:
         shots = ff.uniform_shots(info.duration, max(2, min(12, int(info.duration / 4) or 2)))
         print("    (切换不足，退化为均匀逻辑镜头)")
@@ -56,7 +61,11 @@ def main(argv: list[str]) -> int:
 
     t0 = time.time()
     plan = selection.plan_frames(
-        shots, s.max_total_frames, s.max_frames_per_shot, s.long_shot_seconds
+        shots,
+        s.max_total_frames,
+        max_per_shot=s.max_frames_per_shot,
+        long_shot_seconds=s.long_shot_seconds,
+        frame_interval=s.frame_interval_seconds,
     )
     print(f"\n[3] 选帧规划  ({time.time() - t0:.2f}s)")
     print(f"    {selection.describe_plan(plan, shots)}")

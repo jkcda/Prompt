@@ -26,7 +26,10 @@ class AnalyzeOptions(BaseModel):
     language: Literal["zh", "en"] = "en"
     enable_asr: bool = True
     enable_scene_split: bool = True
+    # 以下留空表示用服务端 .env 里的默认值
     max_total_frames: int | None = None
+    frame_interval_seconds: float | None = None
+    prompt_word_limit: int | None = None
     extra_instruction: str = ""
     target_duration: float | None = None
 
