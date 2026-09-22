@@ -22,12 +22,41 @@ def test_health(client):
     assert body["db"].endswith(".db")
 
 
-def test_formats(client):
+def test_formats_returns_two_primary_modes(client):
+    """对外只有两种模式：H3 与 Seedance。generic 作为兜底，primary=False。"""
     r = client.get("/api/formats")
     assert r.status_code == 200
-    values = {f["value"] for f in r.json()}
+    modes = r.json()
+
+    primary = [m for m in modes if m["primary"]]
+    assert [m["value"] for m in primary] == ["h3", "seedance"]
+    assert all(m["label"] and m["description"] for m in modes)
+
+    # 每个变体都要归属到自己的模式
+    for m in modes:
+        assert m["variants"], f"{m['value']} 没有变体"
+        for v in m["variants"]:
+            assert v["mode"] == m["value"]
+            assert v["label"] and v["description"]
+        assert sum(1 for v in m["variants"] if v["default"]) == 1
+
+
+def test_formats_h3_mode_has_two_variants(client):
+    """T2VA 与 Ref2VA 写法不同（有没有参考素材），必须在 H3 模式下显式选。"""
+    modes = {m["value"]: m for m in client.get("/api/formats").json()}
+    h3 = modes["h3"]
+    assert [v["value"] for v in h3["variants"]] == ["h3", "h3-ref"]
+    assert [v["value"] for v in h3["variants"] if v["default"]] == ["h3"]
+    assert [v["value"] for v in modes["seedance"]["variants"]] == ["seedance"]
+
+
+def test_formats_covers_all_formats(client):
+    values = {
+        v["value"]
+        for m in client.get("/api/formats").json()
+        for v in m["variants"]
+    }
     assert values == {"h3", "h3-ref", "seedance", "generic"}
-    assert all(f["label"] for f in r.json())
 
 
 def test_settings_masks_api_key(client):
@@ -253,6 +282,58 @@ def test_storage_persists_job_roundtrip(client, sample_video: Path):
 
     summaries = storage.list_jobs(limit=50)
     assert any(s.id == job.id for s in summaries)
+
+
+def test_storage_persists_subject_registry(client):
+    """主体登记表也要落库，否则从历史打开 Ref2VA 结果会丢参考标签依据。"""
+    from app.schemas import AnalyzeOptions, Job, JobResult, SubjectEntry
+    from app.services.jobs import store
+
+    job = Job(
+        id="persist00000002",
+        state="succeeded",
+        source="upload",
+        options=AnalyzeOptions(format="h3-ref"),
+        result=JobResult(
+            prompt="subject_definitions:\n<Subject 1> ...",
+            subjects=[
+                SubjectEntry(label="performer", kind="person",
+                             description="dark jacket", shots=["1", "3"],
+                             notes="hair tied back"),
+                SubjectEntry(label="rooftop", kind="environment", shots=["1"]),
+            ],
+        ),
+    )
+    storage.save_job(job)
+    store._jobs.pop(job.id, None)
+
+    loaded = store.get(job.id)
+    assert loaded is not None and loaded.result is not None
+    assert [s.label for s in loaded.result.subjects] == ["performer", "rooftop"]
+    assert loaded.result.subjects[0].shots == ["1", "3"]
+    assert loaded.result.subjects[0].notes == "hair tied back"
+
+
+def test_schema_adds_missing_columns_on_existing_db(client, tmp_path):
+    """老库升级后缺列时，init_db 要能补上，而不是报 no such column。"""
+    from sqlalchemy import inspect, text
+
+    from app.core.db import get_engine, init_db
+
+    engine = get_engine()
+    with engine.begin() as conn:
+        conn.execute(text("DROP TABLE IF EXISTS jobs"))
+        conn.execute(text(
+            "CREATE TABLE jobs ("
+            "id VARCHAR PRIMARY KEY, state VARCHAR, created_at FLOAT, "
+            "observations_json VARCHAR, prompt VARCHAR)"
+        ))
+
+    init_db()
+
+    columns = {c["name"] for c in inspect(engine).get_columns("jobs")}
+    assert "subjects_json" in columns
+    assert "observations_json" in columns
 
 
 def test_settings_whitelist_rejects_unknown_keys(client):

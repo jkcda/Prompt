@@ -12,19 +12,21 @@ import * as api from '@/api'
 import { errorMessage } from '@/api'
 import type {
   AnalyzeOptions,
-  FormatOption,
   HealthInfo,
   Job,
   JobEvent,
   JobSummary,
   ProbeResult,
+  PromptFormat,
+  PromptMode,
+  PromptModeOption,
   UploadResult,
 } from '@/types'
 
 export const useAnalyzeStore = defineStore('analyze', () => {
   // ---------------- 环境 ----------------
   const health = ref<HealthInfo | null>(null)
-  const formats = ref<FormatOption[]>([])
+  const modes = ref<PromptModeOption[]>([])
   const bootError = ref('')
 
   // ---------------- 选项 ----------------
@@ -37,6 +39,48 @@ export const useAnalyzeStore = defineStore('analyze', () => {
     extra_instruction: '',
     target_duration: null,
   })
+
+  /** 只用于主选择位的两种模式（H3 / Seedance）。 */
+  const primaryModes = computed(() => modes.value.filter((m) => m.primary))
+  /** 兜底格式，界面上折进「其他格式」。 */
+  const extraModes = computed(() => modes.value.filter((m) => !m.primary))
+
+  /** 当前 format 属于哪个模式。 */
+  const currentMode = computed<PromptMode | ''>(() => {
+    const hit = modes.value.find((m) => m.variants.some((v) => v.value === options.value.format))
+    return hit?.value ?? ''
+  })
+
+  /** 当前模式下的变体；单变体模式返回空数组，界面不显示切换器。 */
+  const currentVariants = computed(() => {
+    const hit = modes.value.find((m) => m.value === currentMode.value)
+    if (!hit || hit.variants.length < 2) return []
+    return hit.variants
+  })
+
+  /** 当前 format 的展示信息（任意模式，含兜底格式）。 */
+  const formatInfo = computed(() => {
+    for (const m of modes.value) {
+      const v = m.variants.find((x) => x.value === options.value.format)
+      if (v) return { mode: m, variant: v }
+    }
+    return null
+  })
+
+  /**
+   * 切换模式。选中的是变体而不是模式本身——模式只是分组。
+   * 切到某个模式时，用它的默认变体。
+   */
+  function selectMode(mode: PromptMode) {
+    const hit = modes.value.find((m) => m.value === mode)
+    if (!hit || !hit.variants.length) return
+    const preferred = hit.variants.find((v) => v.default) ?? hit.variants[0]
+    options.value.format = preferred.value
+  }
+
+  function selectFormat(format: PromptFormat) {
+    options.value.format = format
+  }
 
   // ---------------- 来源 ----------------
   const mode = ref<'upload' | 'link'>('upload')
@@ -80,6 +124,7 @@ export const useAnalyzeStore = defineStore('analyze', () => {
 
   const prompt = computed(() => job.value?.result?.prompt ?? '')
   const observations = computed(() => job.value?.result?.observations ?? [])
+  const subjects = computed(() => job.value?.result?.subjects ?? [])
   const frameUrls = computed(() => job.value?.result?.frame_urls ?? [])
   const shots = computed(() => job.value?.result?.shots ?? [])
   const audio = computed(() => job.value?.result?.audio ?? null)
@@ -98,9 +143,16 @@ export const useAnalyzeStore = defineStore('analyze', () => {
   async function init() {
     bootError.value = ''
     try {
-      const [h, f] = await Promise.all([api.getHealth(), api.getFormats()])
+      const [h, m] = await Promise.all([api.getHealth(), api.getFormats()])
       health.value = h
-      formats.value = f
+      modes.value = m
+      // 后端换了默认变体时跟随，避免本地写死的 format 在后端已下线
+      const known = m.some((x) => x.variants.some((v) => v.value === options.value.format))
+      if (!known) {
+        const first = m.find((x) => x.primary) ?? m[0]
+        const fallback = first?.variants.find((v) => v.default) ?? first?.variants[0]
+        if (fallback) options.value.format = fallback.value
+      }
     } catch (e) {
       bootError.value = errorMessage(e)
     }
@@ -324,7 +376,9 @@ export const useAnalyzeStore = defineStore('analyze', () => {
 
   return {
     // 环境
-    health, formats, bootError,
+    health, modes, primaryModes, extraModes, bootError,
+    // 模式与格式
+    currentMode, currentVariants, formatInfo, selectMode, selectFormat,
     // 选项
     options,
     // 来源
@@ -334,7 +388,7 @@ export const useAnalyzeStore = defineStore('analyze', () => {
     jobId, job, events, starting, error, elapsed, history, historyLoading,
     // 派生
     running, progress, stageLabel, stageMessage, stageHint,
-    videoUrl, prompt, observations, frameUrls, shots, audio, media, stats,
+    videoUrl, prompt, observations, subjects, frameUrls, shots, audio, media, stats,
     // 动作
     init, loadHistory, setFile, probe, start, refreshJob, loadJob, cancel, remove,
     reset, clearError,

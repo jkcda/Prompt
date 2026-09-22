@@ -32,6 +32,27 @@ class ShotObservation(BaseModel):
     confidence: float = 0.0
 
 
+class SubjectEntry(BaseModel):
+    """跨镜头复用的主体登记项。
+
+    为什么要单独建模：
+        `ShotObservation` 是逐镜头视角，同一个角色在第 1 镜和第 5 镜会被描述成
+        两段互不相关的文字，模型无法判断「这是同一个人」。而 Ref2VA 的
+        `subject_definitions`（把画风当独立主体锁、多参考图分工）和
+        `retention_analysis`（逐主体写保留等级）恰恰需要跨镜头的主体身份，
+        否则 Pass2 只能凭猜测编标签，参考标签会漂。
+
+        所以 Pass1 除了逐镜头观察，还要额外交一份主体登记表：谁/什么、
+        在第几镜出现、外观的哪些特征需要跨镜保持一致。
+    """
+
+    label: str = ""            # 建议标签，如 performer / rooftop / jacket / grade
+    kind: str = ""             # person | environment | prop | wardrobe | style | other
+    description: str = ""      # 外观、材质、颜色、可识别特征
+    shots: list[str] = Field(default_factory=list)  # 出现的镜号（字符串）
+    notes: str = ""            # 需要跨镜保持一致的要点 / 易漂移特征
+
+
 class ChunkObservation(BaseModel):
     """一个分块的观察结果。长视频会被切成多个块并行分析。"""
 
@@ -39,5 +60,6 @@ class ChunkObservation(BaseModel):
     start: float
     end: float
     shots: list[ShotObservation] = Field(default_factory=list)
+    subjects: list[SubjectEntry] = Field(default_factory=list)
     global_notes: str = ""
     raw: str = ""

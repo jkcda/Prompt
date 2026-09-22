@@ -48,11 +48,42 @@ def get_engine():
 
 
 def init_db() -> None:
-    """建表（幂等）。启动时调用。"""
+    """建表 + 补齐缺失列（幂等）。启动时调用。"""
     from ..models import job as _job_models  # noqa: F401  确保模型已注册到 metadata
 
-    SQLModel.metadata.create_all(get_engine())
+    engine = get_engine()
+    SQLModel.metadata.create_all(engine)
+    _ensure_columns(engine)
     log.info("数据表就绪：%s", ", ".join(SQLModel.metadata.tables.keys()))
+
+
+def _ensure_columns(engine) -> None:
+    """给已存在的表补上模型里新增的列。
+
+    为什么需要：`create_all` 只建新表，不会改老表。而这个项目的结果字段还会继续长
+    （例如新增主体登记表），如果不补列，老库一升级就会报 "no such column"。
+    这里只做加法——新增列一律可空，不删列、不改类型，因此不会丢数据。
+    """
+    from sqlalchemy import inspect, text
+
+    inspector = inspect(engine)
+    existing_tables = set(inspector.get_table_names())
+
+    with engine.begin() as conn:
+        for table_name, table in SQLModel.metadata.tables.items():
+            if table_name not in existing_tables:
+                continue
+            have = {c["name"] for c in inspector.get_columns(table_name)}
+            for column in table.columns:
+                if column.name in have:
+                    continue
+                if not column.nullable and column.default is None and not column.autoincrement:
+                    log.warning("跳过非空无默认值的新列 %s.%s，请手工处理",
+                                table_name, column.name)
+                    continue
+                ddl = f'ALTER TABLE "{table_name}" ADD COLUMN "{column.name}" {column.type.compile(engine.dialect)}'
+                conn.execute(text(ddl))
+                log.info("补列：%s.%s", table_name, column.name)
 
 
 def get_session() -> Iterator[Session]:

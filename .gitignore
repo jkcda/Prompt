@@ -67,3 +67,6 @@ release/
 # ---------------- 工作区辅助数据 ----------------
 # AI 工作区的记忆/日志，不属于项目源码
 .workbuddy-ai/
+
+# Vite 中断构建时留下的临时配置文件
+vite.config.ts.timestamp-*.mjs

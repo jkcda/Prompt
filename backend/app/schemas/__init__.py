@@ -15,6 +15,7 @@ from .api import (
     HealthResponse,
     JobCreatedResponse,
     ProbeResult,
+    PromptModeOption,
     UploadResponse,
 )
 from .job import (
@@ -25,19 +26,21 @@ from .job import (
     JobState,
     JobSummary,
     PromptFormat,
+    PromptMode,
 )
 from .media import AudioReport, FrameRef, MediaInfo, Shot, TranscriptSegment
-from .observation import ChunkObservation, ShotObservation
+from .observation import ChunkObservation, ShotObservation, SubjectEntry
 
 __all__ = [
     # media
     "MediaInfo", "Shot", "FrameRef", "TranscriptSegment", "AudioReport",
     # observation
-    "ShotObservation", "ChunkObservation",
+    "ShotObservation", "ChunkObservation", "SubjectEntry",
     # job
     "AnalyzeOptions", "JobProgress", "JobResult", "Job", "JobSummary",
-    "PromptFormat", "JobState",
+    "PromptFormat", "PromptMode", "JobState",
     # api
     "UploadResponse", "AnalyzeRequest", "FetchRequest", "FetchProbeRequest",
-    "ProbeResult", "JobCreatedResponse", "FormatOption", "HealthResponse",
+    "ProbeResult", "JobCreatedResponse", "FormatOption", "PromptModeOption",
+    "HealthResponse",
 ]

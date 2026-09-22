@@ -77,8 +77,46 @@ def _make_pass1_response(payload: dict, user_text: str) -> str:
 
     return json.dumps({
         "shots": shots,
+        "subjects": [
+            {
+                "label": "performer",
+                "kind": "person",
+                "description": "a performer in a dark jacket, dark hair tied back",
+                "shots": [str(i + 1) for i in range(len(shots))],
+                "notes": "the dark jacket and the tied-back hair must not change between shots",
+            },
+            {
+                "label": "rooftop",
+                "kind": "environment",
+                "description": "an industrial rooftop at dusk with vents and cables",
+                "shots": [str(i + 1) for i in range(len(shots))],
+                "notes": "the vent positions and the low warm sun direction stay fixed",
+            },
+        ],
         "global_notes": f"mock 观察：共 {len(shots)} 个镜头，手持轻微晃动，暖色调统一。",
     }, ensure_ascii=False)
+
+
+def _extract_registry(user_text: str) -> list[dict[str, str]]:
+    """从 Pass2 的用户消息里抽出主体登记表。
+
+    mock 按真实登记表生成 <Subject N> 与 retention_analysis 行，
+    这样测试才能验证「登记表确实送到了 Pass2」，而不是只看字段名在不在。
+    """
+    block = ""
+    if "=== SUBJECT REGISTRY" in user_text:
+        block = user_text.split("=== SUBJECT REGISTRY", 1)[1].split("===", 1)[1]
+    entries: list[dict[str, str]] = []
+    for line in block.splitlines():
+        m = re.match(r"^\s*(\d+)\.\s+(.+?)\s+\(([^)]*)\)\s+-\s+(.+)$", line)
+        if m:
+            entries.append({
+                "index": m.group(1),
+                "label": m.group(2).strip(),
+                "kind": m.group(3).strip(),
+                "shots": m.group(4).strip(),
+            })
+    return entries
 
 
 def _make_pass2_response(payload: dict, user_text: str) -> str:
@@ -90,16 +128,27 @@ def _make_pass2_response(payload: dict, user_text: str) -> str:
             break
 
     if "subject_definitions:" in system:
+        registry = _extract_registry(user_text) or [
+            {"index": "1", "label": "performer", "kind": "person", "shots": "[Shot 1]"},
+        ]
+        definitions = "\n".join(
+            f"<Subject {e['index']}> is the {e['label']} ({e['kind']}) from the source video."
+            for e in registry
+        )
+        retention = "\n".join(
+            f"<Subject {e['index']}> (appears in {e['shots']}): fully_preserved - "
+            f"the {e['label']} is carried over unchanged."
+            for e in registry
+        )
         return (
             "subject_definitions:\n"
-            "<Subject 1> is the performer in the source video, wearing a dark jacket.\n"
+            f"{definitions}\n"
             "<Video 1> is the source video for the target edit.\n\n"
             "summary:\n"
             "[video continuation + reference generation] The target video continues "
             "<Subject 1>'s rooftop performance using the pacing of <Video 1>.\n\n"
             "retention_analysis:\n"
-            "<Subject 1> (appears in [Shot 1]): fully_preserved - the dark jacket and "
-            "framing are retained.\n"
+            f"{retention}\n"
             "<Video 1> (cut and pacing structure): weak_reference - the edit follows the "
             "original rhythm.\n\n"
             "detailed_description:\n"
@@ -108,7 +157,7 @@ def _make_pass2_response(payload: dict, user_text: str) -> str:
             "the lens, her weight shifting onto her front foot and the motion carrying up "
             "through her shoulders. She sings, her lips moving through every syllable of "
             "the line.\n"
-            "[Shot 2] At 00:03.400, the shot cuts to a wide view of the industrial rooftop.\n\n"
+            "[Shot 2] At 00:03.400, the shot cuts to a wide view of <Subject 2>.\n\n"
             "overall_soundscape:\n"
             "Low rooftop wind and light cloth movement continue throughout.\n\n"
             "non_diegetic_music:\n"

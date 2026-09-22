@@ -6,16 +6,34 @@ import { useAnalyzeStore } from '@/stores/analyze'
 
 const store = useAnalyzeStore()
 
-const tab = ref<'prompt' | 'shots' | 'audio'>('prompt')
+const tab = ref<'prompt' | 'shots' | 'subjects' | 'audio'>('prompt')
 const copied = ref(false)
 const saving = ref(false)
 const saveMsg = ref('')
 const saveError = ref('')
 
 const prompt = computed(() => store.prompt)
+
+/** 结果里记的 format 优先（历史任务可能不是当前选的模式）。 */
+const activeFormat = computed(() => (store.job?.options.format ?? store.options.format) as string)
+
+/** 「H3 模式 · Ref2VA 六段式（带参考素材）」这样的完整称呼。 */
 const formatLabel = computed(() => {
-  const fmt = (store.job?.options.format ?? store.options.format) as string
-  return store.formats.find((f) => f.value === fmt)?.label ?? fmt
+  for (const m of store.modes) {
+    const v = m.variants.find((x) => x.value === activeFormat.value)
+    if (v) return v.label === m.label ? m.label : `${m.label} · ${v.label}`
+  }
+  return activeFormat.value
+})
+
+/** 单变体模式下前缀冗余，徽标只显示模式名。 */
+const modeBadge = computed(() => {
+  for (const m of store.modes) {
+    if (m.variants.some((x) => x.value === activeFormat.value)) {
+      return m.variants.length > 1 ? formatLabel.value : m.label
+    }
+  }
+  return activeFormat.value
 })
 
 const wordCount = computed(() => (prompt.value ? prompt.value.split(/\s+/).filter(Boolean).length : 0))
@@ -99,7 +117,7 @@ function fmtTime(sec: number): string {
     <div class="panel-head">
       <div class="panel-title"><span class="dot" />反推提示词</div>
       <div class="row" style="gap: 8px">
-        <span v-if="prompt" class="badge">{{ formatLabel }}</span>
+        <span v-if="prompt" class="badge">{{ modeBadge }}</span>
         <span v-if="prompt" class="badge">{{ charCount }} 字</span>
       </div>
     </div>
@@ -127,6 +145,13 @@ function fmtTime(sec: number): string {
             @click="tab = 'shots'"
           >
             镜头观察 {{ store.observations.length }}
+          </button>
+          <button
+            v-if="store.subjects.length"
+            :class="['tab', { active: tab === 'subjects' }]"
+            @click="tab = 'subjects'"
+          >
+            主体 {{ store.subjects.length }}
           </button>
           <button :class="['tab', { active: tab === 'audio' }]" @click="tab = 'audio'">
             音频
@@ -202,6 +227,37 @@ function fmtTime(sec: number): string {
                   ['画面文字', o.on_screen_text],
                 ]" :key="label">
                   <template v-if="value && value !== 'none'">
+                    <dt>{{ label }}</dt>
+                    <dd>{{ value }}</dd>
+                  </template>
+                </template>
+              </dl>
+            </div>
+          </div>
+        </template>
+
+        <!-- 主体登记表 -->
+        <template v-else-if="tab === 'subjects'">
+          <div class="field-hint" style="margin-bottom: 12px">
+            这些是 Pass1 跨镜头登记的主体。Ref2VA 模式下它们会依次变成
+            &lt;Subject 1..N&gt;，并逐个写进 retention_analysis。
+          </div>
+          <div class="shot-list">
+            <div v-for="(s, i) in store.subjects" :key="i" class="shot-card">
+              <div class="shot-head">
+                <span class="shot-no">&lt;Subject {{ i + 1 }}&gt;</span>
+                <span class="mono faint">{{ s.label }}</span>
+                <span v-if="s.kind" class="badge">{{ s.kind }}</span>
+                <span v-if="s.shots.length" class="badge">
+                  {{ s.shots.map((x) => `[Shot ${x}]`).join(' ') }}
+                </span>
+              </div>
+              <dl class="shot-fields">
+                <template v-for="[label, value] in [
+                  ['外观', s.description],
+                  ['需保持一致', s.notes],
+                ]" :key="label">
+                  <template v-if="value">
                     <dt>{{ label }}</dt>
                     <dd>{{ value }}</dd>
                   </template>

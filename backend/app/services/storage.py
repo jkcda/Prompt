@@ -25,6 +25,7 @@ from ..schemas import (
     MediaInfo,
     Shot,
     ShotObservation,
+    SubjectEntry,
 )
 
 log = logging.getLogger("storage")
@@ -83,6 +84,7 @@ def save_job(job: Job) -> None:
             record.audio_json = _dumps(result.audio.model_dump() if result.audio else {})
             record.shots_json = _dumps([s.model_dump() for s in result.shots])
             record.observations_json = _dumps([o.model_dump() for o in result.observations])
+            record.subjects_json = _dumps([s.model_dump() for s in result.subjects])
             record.frame_urls_json = _dumps(result.frame_urls)
             record.stats_json = _dumps(result.stats)
 
@@ -215,6 +217,7 @@ def _to_job(r: JobRecord) -> Job:
         result = JobResult(
             prompt=r.prompt,
             observations=[ShotObservation(**o) for o in _loads(r.observations_json, [])],
+            subjects=[SubjectEntry(**s) for s in _loads(getattr(r, "subjects_json", None) or "[]", [])],
             media=MediaInfo(**media_raw) if media_raw else None,
             audio=AudioReport(**audio_raw) if audio_raw else None,
             shots=[Shot(**s) for s in _loads(r.shots_json, [])],

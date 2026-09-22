@@ -165,6 +165,78 @@ def test_pipeline_supports_all_formats(mock_vlm_env, sample_video: Path):
         assert result.stats["format"] == fmt
 
 
+def test_pipeline_collects_subject_registry(mock_vlm_env, sample_video: Path):
+    """Pass1 登记的主体要一路带到结果里，镜号是重排后的全局镜号。"""
+    mock_vlm.reset()
+    job = Job(
+        id="e2e-subjects",
+        source="upload",
+        options=AnalyzeOptions(format="h3-ref", enable_asr=False),
+    )
+    result = pipeline.run_pipeline_sync(job, sample_video)
+
+    assert result.subjects, "主体登记表是空的"
+    labels = {s.label for s in result.subjects}
+    assert labels == {"performer", "rooftop"}
+    assert result.stats["subjects"] == len(result.subjects)
+
+    shot_count = len(result.observations)
+    for sub in result.subjects:
+        assert sub.shots, f"{sub.label} 没有登记镜号"
+        assert all(1 <= int(x) <= shot_count for x in sub.shots), \
+            f"{sub.label} 的镜号超出范围：{sub.shots}"
+
+
+def test_subject_registry_reaches_pass2(mock_vlm_env, sample_video: Path):
+    """Ref2VA 的参考标签必须来自登记表，而不是 Pass2 自己编。
+
+    mock 会照登记表生成 <Subject N>，所以只要标签数量对得上，
+    就说明登记表确实送到了 Pass2。
+    """
+    mock_vlm.reset()
+    job = Job(
+        id="e2e-registry-pass2",
+        source="upload",
+        options=AnalyzeOptions(format="h3-ref", enable_asr=False),
+    )
+    result = pipeline.run_pipeline_sync(job, sample_video)
+
+    n = len(result.subjects)
+    assert f"<Subject {n}>" in result.prompt
+    assert f"<Subject {n + 1}>" not in result.prompt
+    assert result.prompt.count("): fully_preserved") == n
+
+
+def test_seedance_mode_does_not_leak_h3_structure(mock_vlm_env, sample_video: Path):
+    """两种模式不能串味：Seedance 输出里不该有 H3 的字段名。"""
+    mock_vlm.reset()
+    job = Job(
+        id="e2e-seedance-clean",
+        source="upload",
+        options=AnalyzeOptions(format="seedance", enable_asr=False),
+    )
+    result = pipeline.run_pipeline_sync(job, sample_video)
+
+    assert "subject_definitions" not in result.prompt
+    assert "integrated_multimodal_description" not in result.prompt
+    assert "retention_analysis" not in result.prompt
+    assert result.stats["mode"] == "seedance"
+
+
+def test_h3_modes_report_their_mode(mock_vlm_env, sample_video: Path):
+    """T2VA 与 Ref2VA 都归到 h3 模式，但 format 各自不同。"""
+    for fmt in ("h3", "h3-ref"):
+        mock_vlm.reset()
+        job = Job(
+            id=f"e2e-mode-{fmt}",
+            source="upload",
+            options=AnalyzeOptions(format=fmt, enable_asr=False),  # type: ignore[arg-type]
+        )
+        result = pipeline.run_pipeline_sync(job, sample_video)
+        assert result.stats["mode"] == "h3"
+        assert result.stats["format"] == fmt
+
+
 def test_pipeline_reports_progress_stages(mock_vlm_env, sample_video: Path):
     """进度事件必须覆盖到各个阶段，前端才能画步骤条。"""
     import asyncio

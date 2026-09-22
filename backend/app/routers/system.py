@@ -11,9 +11,8 @@ from fastapi import APIRouter
 from ..core.config import refresh_settings, resolve_ffmpeg, resolve_ffprobe
 from ..core.db import db_path
 from ..dependencies import SettingsDep, StoreDep
-from ..schemas import FormatOption, HealthResponse
-from ..services import downloader, storage
-from ..services.templates import FORMAT_LABELS, FORMAT_NOTES
+from ..schemas import FormatOption, HealthResponse, PromptModeOption
+from ..services import downloader, storage, templates
 from ..services.vlm import healthcheck as vlm_healthcheck
 
 log = logging.getLogger("api.system")
@@ -119,12 +118,33 @@ async def write_settings(payload: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "updated": sorted(updates.keys())}
 
 
-@router.get("/formats", response_model=list[FormatOption], summary="可选提示词格式")
-async def formats() -> list[FormatOption]:
-    return [
-        FormatOption(value=k, label=v, description=FORMAT_NOTES.get(k, ""))
-        for k, v in FORMAT_LABELS.items()
-    ]
+@router.get("/formats", response_model=list[PromptModeOption], summary="可选反推模式与变体")
+async def formats() -> list[PromptModeOption]:
+    """按「模式 → 变体」分组返回。
+
+    对外是两种模式：H3 与 Seedance。`generic` 作为工具无关的兜底，
+    `primary=False`，前端把它折进「其他格式」而不占主选择位。
+    """
+    out: list[PromptModeOption] = []
+    for mode, variants in templates.MODE_VARIANTS.items():
+        options = [
+            FormatOption(
+                value=value,  # type: ignore[arg-type]
+                label=templates.FORMAT_LABELS.get(value, value),
+                description=templates.FORMAT_NOTES.get(value, ""),
+                mode=mode,  # type: ignore[arg-type]
+                default=is_default,
+            )
+            for value, is_default in variants
+        ]
+        out.append(PromptModeOption(
+            value=mode,  # type: ignore[arg-type]
+            label=templates.MODE_LABELS.get(mode, mode),
+            description=templates.MODE_NOTES.get(mode, ""),
+            primary=templates.MODE_PRIMARY.get(mode, False),
+            variants=options,
+        ))
+    return out
 
 
 @router.get("/stats", summary="任务统计")

@@ -49,6 +49,7 @@ class JobRecord(SQLModel, table=True):
     audio_json: str = "{}"
     shots_json: str = "[]"
     observations_json: str = "[]"
+    subjects_json: str = "[]"
     frame_urls_json: str = "[]"
     stats_json: str = "{}"
 

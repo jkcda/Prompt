@@ -7,6 +7,7 @@ const store = useAnalyzeStore()
 const dragging = ref(false)
 const fileInput = ref<HTMLInputElement | null>(null)
 const showAdvanced = ref(false)
+const showExtra = ref(false)
 
 const ACCEPT = 'video/mp4,video/quicktime,video/x-matroska,video/webm,video/x-msvideo,video/*'
 
@@ -47,10 +48,6 @@ function onDragOver() {
 function onDragLeave() {
   dragging.value = false
 }
-
-const selectedFormat = computed(
-  () => store.formats.find((f) => f.value === store.options.format) ?? null,
-)
 </script>
 
 <template>
@@ -164,18 +161,55 @@ const selectedFormat = computed(
         </div>
       </template>
 
-      <!-- ------------------------------------------------ 选项 -->
+      <!-- ------------------------------------------------ 模式 -->
       <div class="divider" />
 
       <div class="field">
-        <label class="field-label">输出格式</label>
-        <select v-model="store.options.format" class="select">
-          <option v-for="f in store.formats" :key="f.value" :value="f.value">
-            {{ f.label }}
-          </option>
-        </select>
-        <div v-if="selectedFormat?.description" class="field-hint">
-          {{ selectedFormat.description }}
+        <label class="field-label">反推模式</label>
+        <div class="mode-grid">
+          <button
+            v-for="m in store.primaryModes"
+            :key="m.value"
+            :class="['mode-card', { active: store.currentMode === m.value }]"
+            @click="store.selectMode(m.value)"
+          >
+            <div class="mode-name">{{ m.label }}</div>
+            <div class="mode-desc">{{ m.description }}</div>
+          </button>
+        </div>
+
+        <!-- H3 有两个变体：有没有参考素材，写法完全不同，所以必须显式选 -->
+        <div v-if="store.currentVariants.length > 1" class="variants">
+          <button
+            v-for="v in store.currentVariants"
+            :key="v.value"
+            :class="['variant', { active: store.options.format === v.value }]"
+            @click="store.selectFormat(v.value)"
+          >
+            {{ v.label }}
+          </button>
+        </div>
+        <div v-if="store.formatInfo?.variant.description" class="field-hint">
+          {{ store.formatInfo.variant.description }}
+        </div>
+
+        <button
+          v-if="store.extraModes.length"
+          class="btn btn-ghost btn-sm"
+          style="margin-top: 10px"
+          @click="showExtra = !showExtra"
+        >
+          {{ showExtra ? '收起' : '其他格式' }}
+        </button>
+        <div v-if="showExtra" class="variants" style="margin-top: 10px">
+          <button
+            v-for="m in store.extraModes"
+            :key="m.value"
+            :class="['variant', { active: store.options.format === m.variants[0]?.value }]"
+            @click="store.selectMode(m.value)"
+          >
+            {{ m.label }}
+          </button>
         </div>
       </div>
 
@@ -351,5 +385,86 @@ const selectedFormat = computed(
   border: 1px solid var(--border-soft);
   border-radius: var(--radius);
   background: var(--bg-soft);
+}
+
+/* 两张大卡片选模式。H3 与 Seedance 是并列的两种产物，不给下拉框——
+   下拉框会把「这是两个不同目标模型」这件事藏起来。 */
+.mode-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.mode-card {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px 14px;
+  text-align: left;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-soft);
+  color: var(--text);
+  cursor: pointer;
+  transition: border-color 0.16s, background 0.16s;
+  font-family: inherit;
+}
+
+.mode-card:hover {
+  border-color: var(--border-hover, #3a4460);
+}
+
+.mode-card.active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.mode-name {
+  font-size: 13.5px;
+  font-weight: 500;
+}
+
+.mode-card.active .mode-name {
+  color: var(--accent-hover);
+}
+
+.mode-desc {
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--text-faint);
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.variants {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.variant {
+  padding: 6px 12px;
+  font-size: 12px;
+  font-family: inherit;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: border-color 0.16s, color 0.16s, background 0.16s;
+}
+
+.variant:hover {
+  color: var(--text);
+}
+
+.variant.active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent-hover);
 }
 </style>

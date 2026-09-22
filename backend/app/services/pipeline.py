@@ -191,13 +191,14 @@ async def run_pipeline(job: Job, video_path: Path) -> JobResult:
 
     observations: list[ChunkObservation] = []
     for ci, raw in enumerate(raw_outputs):
-        shots_obs, notes = templates.parse_pass1_json(raw)
+        shots_obs, subjects_obs, notes = templates.parse_pass1_json(raw)
         chunk = chunks[ci]
         observations.append(ChunkObservation(
             chunk_index=ci,
             start=chunk[0].start,
             end=chunk[-1].end,
             shots=shots_obs,
+            subjects=subjects_obs,
             global_notes=notes,
             raw=raw,
         ))
@@ -205,6 +206,7 @@ async def run_pipeline(job: Job, video_path: Path) -> JobResult:
             "type": "chunk",
             "index": ci,
             "shots": len(shots_obs),
+            "subjects": len(subjects_obs),
             "total": total_chunks,
         })
 
@@ -215,8 +217,11 @@ async def run_pipeline(job: Job, video_path: Path) -> JobResult:
             "或换用更强的视觉模型。"
         )
 
+    subjects = templates.merge_subjects(observations, merged)
+    log.info("观察完成：%d 个镜头，%d 个主体", len(merged), len(subjects))
+
     # ---------------- 7. Pass2：合成目标格式 ----------------
-    await step("compose", 82, f"合成 {templates.FORMAT_LABELS.get(opts.format, opts.format)} 提示词")
+    await step("compose", 82, f"合成 {templates.format_display(opts.format)} 提示词")
 
     shots_summary = _describe_shots(shots)
     pass2_system = templates.build_pass2_system(opts.format, opts.language)
@@ -227,6 +232,8 @@ async def run_pipeline(job: Job, video_path: Path) -> JobResult:
         shots_summary=shots_summary,
         extra_instruction=opts.extra_instruction,
         target_duration=opts.target_duration,
+        subjects=subjects,
+        fmt=opts.format,
     )
 
     try:
@@ -244,6 +251,7 @@ async def run_pipeline(job: Job, video_path: Path) -> JobResult:
     result = JobResult(
         prompt=prompt.strip(),
         observations=merged,
+        subjects=subjects,
         media=media,
         audio=audio,
         shots=shots,
@@ -256,9 +264,11 @@ async def run_pipeline(job: Job, video_path: Path) -> JobResult:
             "frames": total_frames,
             "chunks": total_chunks,
             "scene_cuts": len(cuts),
+            "subjects": len(subjects),
             "est_tokens": selection.estimate_tokens(total_frames),
             "format": opts.format,
-            "format_label": templates.FORMAT_LABELS.get(opts.format, opts.format),
+            "format_label": templates.format_display(opts.format),
+            "mode": templates.mode_of(opts.format),
             "asr": audio.note or ("已转写" if audio.transcript else "无转写"),
             "plan": selection.describe_plan(
                 selection.plan_frames(

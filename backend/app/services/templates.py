@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import json
 
-from ..schemas import AudioReport, ChunkObservation, MediaInfo, ShotObservation
+from ..schemas import AudioReport, ChunkObservation, MediaInfo, ShotObservation, SubjectEntry
 
 # ---------------------------------------------------------------------------
 # Pass 1 —— 结构化镜头观察
@@ -46,6 +46,14 @@ inside a shot into that shot's `dialogue` field, preserving the original languag
 non-verbal sound (footsteps, impact, whoosh, ambience) into `sfx`.
 7. `timecode` must be the real timestamp of that shot's first supplied frame, formatted as \
 MM:SS.mmm.
+8. After the per-shot list, build a SUBJECT REGISTRY. A subject is anything that must look the \
+same if it reappears: a person, an environment, a prop, a wardrobe piece, or the overall visual \
+style itself. Give each one a short lowercase label, list every shot index it appears in, and \
+spell out the features that must stay consistent. If the same person or place appears in \
+several shots, it must be ONE entry covering all of them — not one entry per shot. This registry \
+is what lets the final prompt keep identities from drifting, so be precise about the traits that \
+are easy to get wrong (eye colour, hair length and parting, garment cut and hardware, tattoo \
+placement, the exact grade).
 
 Output STRICT JSON only, no markdown fence, no commentary, matching exactly this shape:
 
@@ -67,6 +75,15 @@ Output STRICT JSON only, no markdown fence, no commentary, matching exactly this
       "sfx": "non-verbal sounds in this shot",
       "transition": "how the shot ends / how it hands off to the next shot",
       "confidence": 0.0
+    }
+  ],
+  "subjects": [
+    {
+      "label": "short lowercase label, e.g. performer / rooftop / jacket / grade",
+      "kind": "person | environment | prop | wardrobe | style | other",
+      "description": "appearance, material, colour, identifying features",
+      "shots": ["1", "2", "5"],
+      "notes": "what must stay consistent, and which traits are prone to drifting"
     }
   ],
   "global_notes": "cross-shot observations: overall style, recurring subjects, wardrobe continuity, \
@@ -109,8 +126,12 @@ def build_pass1_user(
     return "\n".join(lines)
 
 
-def parse_pass1_json(raw: str) -> tuple[list[ShotObservation], str]:
-    """宽容解析 Pass1 的 JSON 输出（模型偶尔会包 markdown 围栏或加前后缀）。"""
+def parse_pass1_json(raw: str) -> tuple[list[ShotObservation], list[SubjectEntry], str]:
+    """宽容解析 Pass1 的 JSON 输出（模型偶尔会包 markdown 围栏或加前后缀）。
+
+    返回 `(逐镜头观察, 主体登记表, 跨镜头备注)`。解析不出来时返回空列表，
+    由调用方决定是报错还是降级——不要在这里抛异常，一块失败不该拖垮整条管线。
+    """
     text = (raw or "").strip()
 
     if text.startswith("```"):
@@ -122,7 +143,7 @@ def parse_pass1_json(raw: str) -> tuple[list[ShotObservation], str]:
     start = text.find("{")
     end = text.rfind("}")
     if start == -1 or end == -1 or end <= start:
-        return [], ""
+        return [], [], ""
 
     try:
         data = json.loads(text[start:end + 1])
@@ -133,9 +154,16 @@ def parse_pass1_json(raw: str) -> tuple[list[ShotObservation], str]:
         try:
             data = json.loads(cleaned)
         except json.JSONDecodeError:
-            return [], ""
+            return [], [], ""
 
-    shots_raw = data.get("shots") or []
+    shots = _parse_shots(data.get("shots"))
+    subjects = _parse_subjects(data.get("subjects"))
+    return shots, subjects, str(data.get("global_notes") or "")
+
+
+def _parse_shots(shots_raw: object) -> list[ShotObservation]:
+    if not isinstance(shots_raw, list):
+        return []
     shots: list[ShotObservation] = []
     for item in shots_raw:
         if not isinstance(item, dict):
@@ -148,8 +176,38 @@ def parse_pass1_json(raw: str) -> tuple[list[ShotObservation], str]:
             }))
         except Exception:  # noqa: BLE001
             continue
+    return shots
 
-    return shots, str(data.get("global_notes") or "")
+
+def _parse_subjects(subjects_raw: object) -> list[SubjectEntry]:
+    """解析主体登记表。`shots` 可能是列表也可能是逗号串，两种都收。"""
+    if not isinstance(subjects_raw, list):
+        return []
+    subjects: list[SubjectEntry] = []
+    for item in subjects_raw:
+        if not isinstance(item, dict):
+            continue
+        shots_field = item.get("shots")
+        if isinstance(shots_field, str):
+            shot_list = [s.strip() for s in shots_field.replace("，", ",").split(",") if s.strip()]
+        elif isinstance(shots_field, list):
+            shot_list = [str(s).strip() for s in shots_field if str(s).strip()]
+        else:
+            shot_list = []
+
+        label = str(item.get("label") or "").strip()
+        description = str(item.get("description") or "").strip()
+        if not label and not description:
+            continue  # 整条都是空的，丢掉比留着干净
+
+        subjects.append(SubjectEntry(
+            label=label,
+            kind=str(item.get("kind") or "").strip(),
+            description=description,
+            shots=shot_list,
+            notes=str(item.get("notes") or "").strip(),
+        ))
+    return subjects
 
 
 # ---------------------------------------------------------------------------
@@ -177,14 +235,19 @@ Never paraphrase dialogue.
 6. Do not mention watermarks, logos, platform UI, or the fact that this is a reverse-engineered \
 prompt. If the observation notes on-screen text, either transcribe it as diegetic text when it \
 is part of the scene, or omit it.
-7. Write in {language_instruction}."""
+7. Keep each subject's appearance wording IDENTICAL across shots. A character described as "a \
+performer in a dark quilted jacket" in shot 1 must not become "a woman in a leather coat" in \
+shot 3 — inconsistent wording is read as a different person and the identity drifts.
+8. Write in {language_instruction}."""
 
 
 _PASS2_H3 = """{common}
 
-TARGET FORMAT — MiniMax H3 T2VA (text-to-video with audio). Output exactly three fields, in \
-this order, each starting at the beginning of a line with its bare name followed by a colon. \
-Do NOT wrap the field names in angle brackets or any other markup.
+TARGET MODE — MiniMax H3, text-to-video with audio (T2VA). There are NO reference assets in this \
+task, so the prompt must be fully self-contained: everything the model needs is in the text.
+
+Output exactly three fields, in this order, each starting at the beginning of a line with its \
+bare name followed by a colon. Do NOT wrap the field names in angle brackets or any other markup.
 
 integrated_multimodal_description: <the main body>
 overall_soundscape: <ambience and physical sounds>
@@ -198,6 +261,10 @@ BEFORE the first shot marker.
 cut time from the observation report.
 - Inside each shot, establish in this order: framing and camera movement, subject appearance and \
 position, environment and lighting, the action with its physical detail, and the current sound.
+- Because there are no reference assets, appearance must be stated in full the first time a \
+subject appears, and the same wording must be reused for that subject afterwards. Never write \
+`<Subject 1>`, `<Video 1>`, `<Audio 1>` or any other reference label — they are meaningless in \
+T2VA and will be read as literal text.
 - Assign speakers stable IDs `(S1)`, `(S2)` in order of first vocal event. Write dialogue and \
 lyrics as `<d>[Language] the exact words</d>`. When a speaker is on camera, state their mouth \
 movement in the same shot.
@@ -216,8 +283,13 @@ observation report indicates there is no score."""
 
 _PASS2_H3_REF = """{common}
 
-TARGET FORMAT — MiniMax H3 full-reference (Ref2VA) rewrite. The uploaded video is the single \
-reference asset, labelled `<Video 1>`; if it has usable audio, that track is `<Audio 1>`. \
+TARGET MODE — MiniMax H3 full-reference (Ref2VA) rewrite. The uploaded video is the single \
+reference asset, labelled `<Video 1>`; if its audio is actually reused, that track is `<Audio 1>`.
+
+A SUBJECT REGISTRY is provided in the user message: it lists every subject the observer found, \
+with the shots each one appears in. Use it as the authoritative source for labels — do not invent \
+subjects that are not in it, and do not split one registry entry into several labels.
+
 Output exactly six sections, in this order, each starting at the beginning of a line with its \
 bare name followed by a colon. Do NOT wrap field names in angle brackets or any other markup.
 
@@ -229,17 +301,21 @@ overall_soundscape:
 non_diegetic_music:
 
 Rules:
-- `subject_definitions`: one line per tracked item. Use `<Subject 1>`, `<Subject 2>` ... for \
-reusable visible content (people, environments, props, wardrobe, style). Define `<Video 1>` as \
-the source video. Define `<Audio 1>` only if its audio is actually reused. Each line states what \
-the label denotes, its reference role, and its main features to follow.
+- `subject_definitions`: one line per registry entry, numbered in registry order as `<Subject 1>`, \
+`<Subject 2>`, ... Each line states what the label denotes, its reference role, and the features \
+that must be followed. Registry entries whose `kind` is `style` should be defined as the look and \
+grade to carry across, not as an object. Always define `<Video 1>` as the source video. Define \
+`<Audio 1>` only if its audio is actually reused.
 - `summary`: one short paragraph beginning with a bracketed task-type prefix, e.g. \
 `[video continuation + reference generation]` or `[reference generation + audio reference]`. \
 Do not introduce new labels here.
 - `retention_analysis`: one line per label, using the fixed markers — visible content: \
 `fully_preserved` / `partially_preserved` / `attribute_transfer` / `weak_reference`; audio: \
 `fully_copy` / `partially_copy` / `reference` / `weak_reference`. Format: \
-`<Subject 1> (appears in [Shot 1], [Shot 3]): fully_preserved - ...`
+`<Subject 1> (appears in [Shot 1], [Shot 3]): fully_preserved - ...` and take the shot list \
+verbatim from the registry entry for that subject. Only `<Video 1>` may be `weak_reference` — \
+every subject the registry actually tracked must be `fully_preserved` or `partially_preserved` \
+unless the observation report says its appearance changes.
 - `detailed_description`: the main body. One or two sentences of style before `[Shot 1]`. Then \
 `[Shot 1]` with no timestamp, and `[Shot N] At MM:SS.mmm, ...` for later shots. Insert reference \
 labels at first appearance and wherever their role applies. Speakers use `(Sx)` and dialogue uses \
@@ -250,30 +326,38 @@ score. Write `N/A` when a category is absent. Never repeat dialogue here."""
 
 _PASS2_SEEDANCE = """{common}
 
-TARGET FORMAT — Seedance 2.0 (doubao-seedance). Write ONE coherent natural-language prompt in \
-CHINESE, following the official six-element order: 主体 → 动作 → 环境 → 风格 → 镜头 → 声音. \
-Do NOT use field labels, do NOT use `[Shot N]` markers, do NOT use H3's colon structure.
+TARGET MODE — Seedance 2.0 / 即梦. Write ONE coherent natural-language prompt in CHINESE. The \
+official element order is 主体 → 动作 → 环境 → 风格 → 镜头 → 声音.
 
-Rules:
-- Write it as flowing prose, not a bullet list. Roughly: 主体+动作 occupies about half the \
-length, then one sentence each for 环境, 风格, 镜头, 声音.
-- Be concrete: only describe what is visible or audible. Never write vague words like 漂亮、高级、\
-电影感十足.
+Hard constraints for this mode:
+- Write in Chinese only. Do not use English words except for proper nouns and on-screen text.
+- Do NOT use field labels. Do NOT use `[Shot N]` markers. Do NOT use H3's colon structure or any \
+`<Subject N>` / `<d>` markup. This mode is plain prose, not a structured document.
+- Write flowing prose, not a bullet list. Roughly: 主体 + 动作 take about half the length, then \
+one sentence each for 环境, 风格, 镜头, 声音.
+- Be concrete. 主体 must be pinned down by colour, material, garment cut and identifying features, \
+because there are no reference images in this mode — vague words like 漂亮、高级、电影感十足 \
+carry no information and are forbidden.
+- 动作 must carry its physical consequence: 重心转移、头发摆动、衣料起伏、配饰晃动、与地面的接触。\
+A subject without motion description renders as a frozen mannequin.
 - 镜头 sentence: express shot sizes and camera movement as a continuous progression, e.g. \
 「以全景开场，随后缓慢推轨至中近景，浅景深」. If the video does not cut at all, say 全片不切镜. \
-If it does cut, state the shot count and beat map at the end of the camera sentence, e.g. \
+If it does cut, state the shot count and beat map at the end of the camera sentence, and the beat \
+map must cover EVERY shot in the observation report without gaps or overlap, e.g. \
 「全片四个镜头，节拍为 0–2.5 秒、2.5–5 秒、5–7.5 秒、7.5–10 秒」.
 - 声音 sentence: list ambience, action sounds, music and dialogue compactly, separated by 分号. \
 If there is no dialogue, end with 无对白. Append the score description at the very end.
 - Add explicit negative instructions on their own at the end when the observation report shows \
 text, subtitles, logos or watermarks: 「不要出现字幕、文字、水印」.
 - Do not write duration or aspect ratio into the prompt — those are separate parameters.
-- Keep dialogue and lyrics in their original language, quoting them inline."""
+- Keep dialogue and lyrics in their original language, quoting them inline. When a speaker is on \
+camera, state their mouth movement in that part of the 动作 description.
+- The prompt must not end with a closing or resolution marker."""
 
 
 _PASS2_GENERIC = """{common}
 
-TARGET FORMAT — a neutral, tool-agnostic storyboard prompt sheet. Write in \
+TARGET MODE — a neutral, tool-agnostic storyboard prompt sheet. Write in \
 {language_instruction} using this structure:
 
 【整体风格】one paragraph: medium, genre, grade, palette, lighting logic, aspect feel, pacing.
@@ -296,6 +380,50 @@ observation report (text overlays, watermarks, unwanted artefacts, identity drif
 Do not add a closing or summary section after the negative prompt."""
 
 
+# ---------------------------------------------------------------------------
+# 模式与变体
+# ---------------------------------------------------------------------------
+#
+# 对外只暴露两种模式：
+#   H3 模式       —— 给 MiniMax H3 用，英文，字段名裸名 + 冒号
+#   Seedance 模式 —— 给 Seedance 2.0 / 即梦 用，中文连贯段落，六要素顺序
+#
+# 每个模式下的变体（variant）是真正的 format 取值。H3 有两个变体是因为
+# T2VA 与 Ref2VA 不只是措辞不同：T2VA 没有任何参考素材，提示词必须自洽；
+# Ref2VA 要输出 <Subject N> 参考标签和逐主体的 retention 等级。
+# 把两者混为一谈会写出既带参考标签、又没有参考素材的四不像。
+
+MODE_OF_FORMAT: dict[str, str] = {
+    "h3": "h3",
+    "h3-ref": "h3",
+    "seedance": "seedance",
+    "generic": "generic",
+}
+
+MODE_LABELS = {
+    "h3": "H3 模式",
+    "seedance": "Seedance 模式",
+    "generic": "通用分镜表",
+}
+
+MODE_NOTES = {
+    "h3": "输出给 MiniMax H3 的视频提示词，英文为主，字段名裸名加冒号，"
+          "镜头用 [Shot N] 标记并带切点时间戳。",
+    "seedance": "输出给 Seedance 2.0 / 即梦的中文提示词，"
+                "按 主体→动作→环境→风格→镜头→声音 六要素写成连贯段落，不带字段名。",
+    "generic": "工具无关的分镜脚本，适合人工二次加工或投喂给其他工具。",
+}
+
+# 模式 → 变体。顺序即前端展示顺序，`default=True` 的变体是该模式的默认选择。
+MODE_VARIANTS: dict[str, list[tuple[str, bool]]] = {
+    "h3": [("h3", True), ("h3-ref", False)],
+    "seedance": [("seedance", True)],
+    "generic": [("generic", True)],
+}
+
+MODE_PRIMARY = {"h3": True, "seedance": True, "generic": False}
+
+
 _PASS2_BY_FORMAT = {
     "h3": _PASS2_H3,
     "h3-ref": _PASS2_H3_REF,
@@ -304,23 +432,38 @@ _PASS2_BY_FORMAT = {
 }
 
 FORMAT_LABELS = {
-    "h3": "MiniMax H3（T2VA 三字段）",
-    "h3-ref": "MiniMax H3（Ref2VA 六段式）",
-    "seedance": "Seedance 2.0（六要素中文）",
+    "h3": "T2VA 三字段（从零生成）",
+    "h3-ref": "Ref2VA 六段式（带参考素材）",
+    "seedance": "六要素中文段",
     "generic": "通用分镜表",
 }
 
 FORMAT_NOTES = {
-    "h3": "从零生成用。三个字段：integrated_multimodal_description / overall_soundscape / "
-          "non_diegetic_music，带 [Shot N] 切点时间戳。反推场景的默认选择。",
-    "h3-ref": "带参考素材时用。六段式：subject_definitions / summary / retention_analysis / "
-              "detailed_description / overall_soundscape / non_diegetic_music，"
-              "把上传的视频作为 <Video 1> 引用。",
+    "h3": "手里没有参考图、纯靠文字从零生成时用。三个字段："
+          "integrated_multimodal_description / overall_soundscape / non_diegetic_music，"
+          "带 [Shot N] 切点时间戳，不出现任何参考标签。",
+    "h3-ref": "要拿这段视频当参考素材继续改时用。六段式：subject_definitions / summary / "
+              "retention_analysis / detailed_description / overall_soundscape / "
+              "non_diegetic_music，把上传的视频作为 <Video 1>，并按主体登记表逐个写保留等级。",
     "seedance": "Seedance 2.0 / 即梦。中文连贯段落，按 主体→动作→环境→风格→镜头→声音 顺序，"
-                "不用字段名，末尾附负面指令。",
-    "generic": "工具无关的分镜脚本，含整体风格、逐镜分镜表、声音设计、负面提示词。"
-               "适合人工二次加工或投喂给其他工具。",
+                "不用字段名，镜头节拍覆盖全部镜头，末尾附负面指令。",
+    "generic": "工具无关的分镜脚本，含整体风格、逐镜分镜表、声音设计、负面提示词。",
 }
+
+
+def mode_of(fmt: str) -> str:
+    """把 format 归到所属模式。未知值按 generic 处理，不抛异常。"""
+    return MODE_OF_FORMAT.get(fmt, "generic")
+
+
+def format_display(fmt: str) -> str:
+    """给日志和界面用的完整称呼，如「H3 模式 · Ref2VA 六段式（带参考素材）」。"""
+    mode = mode_of(fmt)
+    variant = FORMAT_LABELS.get(fmt, fmt)
+    label = MODE_LABELS.get(mode, mode)
+    # 单变体模式下前缀是冗余的（「Seedance 模式 · 六要素中文段」读起来还行，
+    # 但「通用分镜表 · 通用分镜表」就重复了）
+    return label if variant == label else f"{label} · {variant}"
 
 
 def build_pass2_system(fmt: str, language: str) -> str:
@@ -332,7 +475,10 @@ def build_pass2_system(fmt: str, language: str) -> str:
         lang_instr = "English, except that dialogue and lyrics stay in their original language"
 
     template = _PASS2_BY_FORMAT.get(fmt) or _PASS2_GENERIC
-    return template.format(common=_COMMON_RULES, language_instruction=lang_instr)
+    # 注意：_COMMON_RULES 自己带 {language_instruction} 占位符，而 str.format 不会
+    # 递归替换被代入的值——必须先单独 format 一次，否则这段会原样漏给模型。
+    common = _COMMON_RULES.format(language_instruction=lang_instr)
+    return template.format(common=common, language_instruction=lang_instr)
 
 
 def build_pass2_user(
@@ -342,6 +488,8 @@ def build_pass2_user(
     shots_summary: str,
     extra_instruction: str = "",
     target_duration: float | None = None,
+    subjects: list[SubjectEntry] | None = None,
+    fmt: str = "",
 ) -> str:
     """把 Pass1 的观察结果整理成 Pass2 的输入。"""
     lines: list[str] = []
@@ -356,7 +504,27 @@ def build_pass2_user(
     lines.append(f"shot structure: {shots_summary}")
     if target_duration:
         lines.append(f"target duration for the generated video: {target_duration:.2f}s")
+    lines.append(f"target mode: {MODE_LABELS.get(mode_of(fmt), fmt or 'unknown')}")
     lines.append("")
+
+    registry = subjects or []
+    if registry:
+        lines.append("=== SUBJECT REGISTRY (authoritative labels) ===")
+        for i, sub in enumerate(registry, start=1):
+            shots_txt = ", ".join(f"[Shot {s}]" for s in sub.shots) or "unspecified shots"
+            head = f"{i}. {sub.label or 'unnamed'} ({sub.kind or 'unspecified'}) - {shots_txt}"
+            lines.append(head)
+            if sub.description:
+                lines.append(f"     appearance: {sub.description}")
+            if sub.notes:
+                lines.append(f"     must stay consistent: {sub.notes}")
+        lines.append("")
+        lines.append(
+            "These entries are the only subjects you may reference. In reference-based formats "
+            "they become <Subject 1..N> in registry order. In non-reference formats use the same "
+            "wording for each one in every shot it appears in."
+        )
+        lines.append("")
 
     lines.append("=== SHOT OBSERVATION REPORT ===")
     total = 0
@@ -421,3 +589,98 @@ def merge_observations(chunks: list[ChunkObservation]) -> list[ShotObservation]:
             item.shot = str(len(merged) + 1)
             merged.append(item)
     return merged
+
+
+def merge_subjects(
+    chunks: list[ChunkObservation],
+    merged_shots: list[ShotObservation],
+) -> list[SubjectEntry]:
+    """跨分块合并主体登记表。
+
+    分块会让同一个主体在多个块里各登记一次（例如主角在第 1 块和第 3 块都出现），
+    直接拼起来会出现重复标签，Ref2VA 的 retention_analysis 就会写出两条
+    `<Subject 1>`。所以这里按标签归一化后合并，并把镜号映射到重排后的全局镜号。
+
+    归一化用 `_subject_key`：小写、去空格与非字母数字，这样 "The Performer" 与
+    "performer" 会归成同一条。
+    """
+    # 块内镜号 → 全局镜号：merge_observations 是按块顺序、块内顺序重排的
+    local_to_global: dict[tuple[int, str], str] = {}
+    cursor = 0
+    for chunk in sorted(chunks, key=lambda c: c.start):
+        for shot in chunk.shots:
+            cursor += 1
+            local_to_global[(chunk.chunk_index, str(shot.shot).strip())] = str(cursor)
+
+    # 全局镜号 → 该镜在重排结果里的下标，用于兜底按主体描述反查
+    order = {str(i + 1): s for i, s in enumerate(merged_shots)}
+
+    merged: dict[str, SubjectEntry] = {}
+    for chunk in sorted(chunks, key=lambda c: c.start):
+        for sub in chunk.subjects:
+            key = _subject_key(sub.label) or _subject_key(sub.description[:40])
+            if not key:
+                continue
+
+            shots: list[str] = []
+            for raw in sub.shots:
+                gid = local_to_global.get((chunk.chunk_index, raw.strip()))
+                if gid is None:
+                    gid = raw.strip() if raw.strip().isdigit() else ""
+                if gid and gid not in shots:
+                    shots.append(gid)
+
+            if key not in merged:
+                merged[key] = SubjectEntry(
+                    label=sub.label,
+                    kind=sub.kind,
+                    description=sub.description,
+                    shots=shots,
+                    notes=sub.notes,
+                )
+                continue
+
+            existing = merged[key]
+            if len(sub.description) > len(existing.description):
+                existing.description = sub.description
+            if sub.notes and sub.notes not in existing.notes:
+                existing.notes = (existing.notes + " " + sub.notes).strip()
+            for gid in shots:
+                if gid not in existing.shots:
+                    existing.shots.append(gid)
+            if not existing.kind:
+                existing.kind = sub.kind
+            if not existing.label:
+                existing.label = sub.label
+
+    result = list(merged.values())
+
+    # 兜底：模型忘了写 shots 时，用主体描述里的关键词回查镜号，
+    # 否则 retention_analysis 会写不出「appears in [Shot N]」。
+    for sub in result:
+        if sub.shots or not sub.description:
+            continue
+        needle = _subject_key(sub.description[:24])
+        if not needle:
+            continue
+        hits = [sid for sid, shot in order.items()
+                if needle and needle in _subject_key(shot.subject)]
+        if hits:
+            sub.shots = sorted(hits, key=lambda x: int(x))
+
+    for sub in result:
+        sub.shots = sorted(set(sub.shots), key=lambda x: int(x) if x.isdigit() else 9999)
+    return result
+
+
+def _subject_key(text: str) -> str:
+    """归一化主体标签，用于跨块判重。
+
+    先去掉前导冠词再压掉非字母数字：模型会在不同块里把同一个主体写成
+    "performer" / "The Performer" / "a performer"，这三种要归成一条，
+    否则 retention_analysis 会写出三条 <Subject N>。
+    冠词只在后面紧跟空格时才剥，"anime style" 不能被吃成 "imestyle"。
+    """
+    import re
+    raw = re.sub(r"^(the|a|an)\s+", "", (text or "").strip().lower())
+    return re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "", raw)

@@ -6,7 +6,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from .job import AnalyzeOptions, PromptFormat
+from .job import AnalyzeOptions, PromptFormat, PromptMode
 
 
 class UploadResponse(BaseModel):
@@ -54,9 +54,27 @@ class JobCreatedResponse(BaseModel):
 
 
 class FormatOption(BaseModel):
+    """一个具体的输出格式（模式的变体）。"""
+
     value: PromptFormat
     label: str
     description: str = ""
+    mode: PromptMode = "h3"
+    default: bool = False  # 该模式下的默认变体
+
+
+class PromptModeOption(BaseModel):
+    """一种反推模式，以及它下面的变体。
+
+    对外只暴露两种模式：H3 与 Seedance。`generic` 作为工具无关的兜底，
+    `primary=False`，前端折进「其他格式」里，不占用主选择位。
+    """
+
+    value: PromptMode
+    label: str
+    description: str = ""
+    primary: bool = True
+    variants: list[FormatOption] = Field(default_factory=list)
 
 
 class HealthResponse(BaseModel):

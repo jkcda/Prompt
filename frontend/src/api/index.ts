@@ -3,7 +3,7 @@
 import axios, { AxiosError } from 'axios'
 import type {
   AnalyzeOptions,
-  FormatOption,
+  PromptModeOption,
   HealthInfo,
   Job,
   JobEvent,
@@ -41,7 +41,7 @@ export const checkVLM = () =>
   http.get<{ configured: boolean; ok: boolean; message: string; model: string }>('/health/vlm')
     .then((r) => r.data)
 
-export const getFormats = () => http.get<FormatOption[]>('/formats').then((r) => r.data)
+export const getFormats = () => http.get<PromptModeOption[]>('/formats').then((r) => r.data)
 
 export const getSettings = () => http.get<Record<string, unknown>>('/settings').then((r) => r.data)
 

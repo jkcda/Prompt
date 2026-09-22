@@ -1,6 +1,7 @@
 /** 与后端 `app/schemas` 一一对应的类型定义。 */
 
 export type PromptFormat = 'h3' | 'h3-ref' | 'seedance' | 'generic'
+export type PromptMode = 'h3' | 'seedance' | 'generic'
 export type JobState = 'pending' | 'running' | 'succeeded' | 'failed' | 'cancelled'
 export type JobSource = 'upload' | 'bilibili' | 'douyin' | 'url'
 export type FrameRole = 'head' | 'mid' | 'tail' | 'uniform'
@@ -81,9 +82,19 @@ export interface ShotObservation {
   confidence: number
 }
 
+/** Pass1 的跨镜头主体登记项，Ref2VA 的参考标签由它推导。 */
+export interface SubjectEntry {
+  label: string
+  kind: string
+  description: string
+  shots: string[]
+  notes: string
+}
+
 export interface JobResult {
   prompt: string
   observations: ShotObservation[]
+  subjects: SubjectEntry[]
   media: MediaInfo | null
   audio: AudioReport | null
   shots: Shot[]
@@ -145,6 +156,22 @@ export interface FormatOption {
   value: PromptFormat
   label: string
   description: string
+  mode: PromptMode
+  default: boolean
+}
+
+/**
+ * 一种反推模式及其变体。
+ *
+ * 对外只有两种模式：H3 与 Seedance。`generic` 是工具无关的兜底，
+ * `primary: false`，界面上折进「其他格式」，不占主选择位。
+ */
+export interface PromptModeOption {
+  value: PromptMode
+  label: string
+  description: string
+  primary: boolean
+  variants: FormatOption[]
 }
 
 export interface HealthInfo {

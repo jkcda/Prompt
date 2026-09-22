@@ -5,13 +5,22 @@
 后端 FastAPI + Python，前端 Vue 3 + Vite，抽帧与镜头分割全部由 ffmpeg 完成，
 视觉理解走任意 OpenAI 兼容的多模态模型。
 
-支持四种输出格式：MiniMax H3（T2VA 三字段 / Ref2VA 六段式）、Seedance 2.0、通用分镜表。
+支持**两种反推模式**：
+
+| 模式 | 变体 | 产物 |
+| --- | --- | --- |
+| **H3 模式** | T2VA 三字段（默认） | 英文，字段名裸名加冒号，`[Shot N]` + 切点时间戳，无任何参考标签 |
+| | Ref2VA 六段式 | 英文，六段结构，把上传视频作为 `<Video 1>`，按主体登记表逐个写保留等级 |
+| **Seedance 模式** | 六要素中文段 | 中文连贯段落，按 主体→动作→环境→风格→镜头→声音 顺序，末尾附负面指令 |
+
+另有 `generic`（工具无关分镜表）作为兜底，界面上折进「其他格式」，不占主选择位。
 
 ---
 
 ## 目录
 
 - [它是怎么工作的](#它是怎么工作的)
+- [两种模式的区别](#两种模式的区别)
 - [为什么不是「1 秒抽 10 帧」](#为什么不是1-秒抽-10-帧)
 - [项目结构](#项目结构)
 - [快速开始](#快速开始)
@@ -46,18 +55,60 @@
   长视频在**镜头边界**分块（不物理切割）
      │
      ├─→ Pass 1「只看不写」：每块并行送模型
-     │        └→ 结构化 JSON：景别 / 运镜 / 主体 / 动作 / 光线 / 色调 /
-     │           台词 / 音效 / 转场 / 置信度
+     │        ├→ 逐镜头结构化 JSON：景别 / 运镜 / 主体 / 动作 / 光线 / 色调 /
+     │        │   台词 / 音效 / 转场 / 置信度
+     │        └→ 跨镜头主体登记表：每个主体在哪些镜头出现、哪些特征不能漂
      │
      ▼
-  Pass 2「只写不看」：全部观察 JSON + 音频报告 + 全局统计
-     │        └→ 目标格式提示词（H3 / H3-Ref / Seedance / 通用）
+  Pass 2「只写不看」：全部观察 JSON + 主体登记表 + 音频报告 + 全局统计
+     │        └→ 目标提示词（H3 模式 / Seedance 模式）
      ▼
   落库（SQLite）→ 前端左视频右提示词对照展示
 ```
 
 **同一份观察结果可以出多种格式**，这是两阶段的额外收益：Pass 1 花钱花时间，
 Pass 2 很便宜，想换格式不用重新看一遍视频。
+
+### 主体登记表是为什么加的
+
+`ShotObservation` 是逐镜头视角——同一个角色在第 1 镜和第 5 镜会被描述成两段互不相关的
+文字，模型判断不出「这是同一个人」。而 Ref2VA 的 `subject_definitions` 和
+`retention_analysis` 恰恰需要跨镜头的主体身份：哪个主体、在第几镜出现、要保留到什么程度。
+
+没有登记表，Pass 2 只能自己编标签，`retention_analysis` 的 `appears in [Shot N]` 就靠猜，
+参考标签会漂。所以 Pass 1 除了逐镜头观察，还额外交一份登记表：
+
+```json
+"subjects": [
+  { "label": "performer", "kind": "person",
+    "description": "a performer in a dark quilted jacket, dark hair tied back",
+    "shots": ["1", "2", "3", "5"],
+    "notes": "the jacket hardware and the tied-back hair must not change" }
+]
+```
+
+分块会让同一主体在多块里各登记一次，`merge_subjects()` 按标签归一化合并
+（`performer` / `The Performer` / `a performer` 归成一条），并把块内镜号映射成全局镜号。
+
+---
+
+## 两种模式的区别
+
+不是换措辞，是换目标模型，写法和硬约束都不一样。
+
+| | H3 模式 | Seedance 模式 |
+| --- | --- | --- |
+| 语言 | 英文为主（台词保留原文） | 中文 |
+| 结构 | 裸字段名 + 冒号，多段 | 连贯段落，无字段名 |
+| 镜头标记 | `[Shot N] At MM:SS.mmm` | 末尾一句节拍表 |
+| 台词 | `<d>[Language] 原文</d>` + 说话人 `(Sx)` | 引号内联，保留原文 |
+| 参考标签 | Ref2VA 有 `<Subject N>` / `<Video 1>` | **禁止出现**，会被当字面文本 |
+| 兜底 | 不出现参考标签 | 末尾附「不要出现字幕、文字、水印」 |
+
+**H3 模式为什么还要分 T2VA / Ref2VA**：T2VA 手里没有任何参考素材，提示词必须自洽——
+主体外观第一次出现就要写全，且不能出现 `<Subject N>`（模型会照着字面画出来）。
+Ref2VA 则反过来，要输出参考标签和逐主体的保留等级。混为一谈会写出既带参考标签、
+又没有参考素材的四不像，所以做成两个必须显式选的变体。
 
 ---
 
@@ -135,7 +186,7 @@ ffmpeg -i in.mp4 -vf "select='gt(scene,0.30)',showinfo" -an -f null -
 │   │   │   └── media.py            /media（含 HTTP Range）
 │   │   ├── schemas/                Pydantic 模型
 │   │   │   ├── media.py            媒体 / 镜头 / 帧 / 音频报告
-│   │   │   ├── observation.py      Pass1 结构化观察
+│   │   │   ├── observation.py      Pass1 结构化观察 + 主体登记表
 │   │   │   ├── job.py              任务 / 进度 / 结果 / 选项
 │   │   │   └── api.py              HTTP 请求响应体
 │   │   ├── models/job.py           SQLModel 表定义
@@ -345,7 +396,7 @@ python -m app.selfcheck path/to/video.mp4
 | GET | `/api/health/vlm` | **真实调用一次模型**，验证 key 与图片输入 |
 | GET | `/api/settings` | 读取配置（key 已脱敏） |
 | POST | `/api/settings` | 更新配置（写回 `.env`，有键白名单） |
-| GET | `/api/formats` | 四种输出格式及说明 |
+| GET | `/api/formats` | 反推模式与变体（按模式分组，`primary` 标出两种主模式） |
 | GET | `/api/stats` | 任务统计 |
 
 ### 反推
@@ -449,7 +500,7 @@ COOKIES_FILE=D:/cookies.txt
 
 ```bash
 cd backend
-pytest                    # 全部 80 个
+pytest                    # 全部 108 个
 pytest -q tests/test_selection.py     # 只跑选帧策略
 pytest -q tests/test_pipeline_e2e.py  # 只跑端到端
 ruff check app tests                  # 静态检查
@@ -461,9 +512,9 @@ ruff check app tests                  # 静态检查
 |---|---|---|
 | `test_selection.py` | 13 | 预算不超、每镜保底、超预算时均匀降采样、长镜头优先、时间有序 |
 | `test_ffmpeg.py` | 22 | 真实视频跑探测 / 场景检测 / 抽帧 / 缩放 / 音频 / 切分 |
-| `test_templates.py` | 14 | Pass1 JSON 宽容解析（围栏 / 前后缀 / 尾随逗号 / 垃圾输入）、多块镜号重排 |
-| `test_api.py` | 23 | 接口契约、上传校验、Range 流、SQLite 往返、提示词库 |
-| `test_pipeline_e2e.py` | 8 | **完整管线**：帧数对齐、预算生效、四种格式、进度事件、分块、无 key 报错 |
+| `test_templates.py` | 32 | Pass1 JSON 宽容解析（围栏 / 前后缀 / 尾随逗号 / 垃圾输入）、多块镜号重排、主体登记表解析与跨块合并、两种模式的模板硬约束、占位符替换干净 |
+| `test_api.py` | 26 | 接口契约、模式分组、上传校验、Range 流、SQLite 往返、缺列自愈、提示词库 |
+| `test_pipeline_e2e.py` | 15 | **完整管线**：帧数对齐、预算生效、四种格式、主体登记表贯通到 Pass2、模式不串味、进度事件、分块、无 key 报错 |
 
 ### 关于 mock 模型
 
@@ -527,3 +578,20 @@ fastapi dev
 6. **Pass1 提示词里明确禁止静态动词。** `hold` / `remain` / `stay` / `final frame`
    这类词会让生成视频冻结，包括嘴部动作。同理禁止「画面唯一运动是 X」这类排他声明——
    写了之后其他一切都不动了。
+
+7. **模式只是分组，`format` 是唯一真源。** 没有单独的 `mode` 请求字段——
+   否则会出现 `mode=h3` 配 `format=seedance` 这种自相矛盾的组合。
+   `mode` 由 `templates.MODE_OF_FORMAT` 从 `format` 推导。
+
+8. **`_COMMON_RULES` 要单独 format 一次。** `str.format` 不递归替换被代入的值：
+   `template.format(common=_COMMON_RULES)` 之后，`_COMMON_RULES` 自己带的
+   `{language_instruction}` 会原样漏给模型。所以 `build_pass2_system` 先对公共规则
+   单独 format 一次，再代入外层模板。有测试守着这条。
+
+9. **`init_db` 会补缺失的列。** `create_all` 只建新表、不改老表，而这个项目的结果字段
+   还会继续长。补列只做加法（新增列一律可空），不会丢数据，避免老库一升级就报
+   `no such column`。
+
+10. **主体标签跨块判重要先剥冠词。** 模型会在不同块里把同一个主体写成
+    `performer` / `The Performer` / `a performer`，不归一化就会写出三条 `<Subject N>`。
+    但冠词只在后面紧跟空格时才剥，否则 `anime style` 会被吃成 `imestyle`。

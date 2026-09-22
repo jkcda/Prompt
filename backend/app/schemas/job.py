@@ -7,15 +7,20 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 from .media import AudioReport, MediaInfo, Shot
-from .observation import ShotObservation
+from .observation import ShotObservation, SubjectEntry
 
 PromptFormat = Literal["h3", "h3-ref", "seedance", "generic"]
+PromptMode = Literal["h3", "seedance", "generic"]
 JobState = Literal["pending", "running", "succeeded", "failed", "cancelled"]
 JobSource = Literal["upload", "bilibili", "douyin", "url"]
 
 
 class AnalyzeOptions(BaseModel):
-    """一次反推的可调参数。前端「高级选项」面板对应这里。"""
+    """一次反推的可调参数。前端「高级选项」面板对应这里。
+
+    `format` 是唯一的格式真源，`mode` 由它推导（见 `templates.MODE_OF_FORMAT`），
+    不额外传参——否则会出现 mode=h3 而 format=seedance 这种自相矛盾的组合。
+    """
 
     format: PromptFormat = "h3"
     language: Literal["zh", "en"] = "en"
@@ -36,6 +41,7 @@ class JobProgress(BaseModel):
 class JobResult(BaseModel):
     prompt: str = ""
     observations: list[ShotObservation] = Field(default_factory=list)
+    subjects: list[SubjectEntry] = Field(default_factory=list)
     media: MediaInfo | None = None
     audio: AudioReport | None = None
     shots: list[Shot] = Field(default_factory=list)
