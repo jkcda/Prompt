@@ -66,6 +66,11 @@ class Settings(BaseSettings):
     # 参数名用 OpenAI 生态里最常见的 `enable_thinking`；不支持的模型会报 400，
     # 代码会自动摘掉这个参数重试，所以默认开着是安全的。
     vlm_disable_thinking: bool = True
+    # 最终提示词的词数上限。视频生成模型的提示词窗口有限，超长会被截断或忽略。
+    # 实测不限长时，六段式很容易写到 1800 词 / 11000 字符 —— 视频模型吃不下。
+    # 注意这是**整篇**上限（含 subject_definitions / retention_analysis），
+    # 不只是正文。模板里按段落给了细分预算，模型更容易命中。
+    prompt_word_limit: int = 700
     # 把音频片段直接附给模型（OpenAI 的 input_audio 内容块）。
     # 默认关：能收音频的模型很少，很多「多模态」模型只支持图片，
     # 开了但模型不支持会返回 choices:null（代码会明确报出来）。
@@ -82,8 +87,19 @@ class Settings(BaseSettings):
     ffmpeg_dir: str = ""
 
     # ---- 抽帧预算 ----
-    max_total_frames: int = 48
-    max_frames_per_shot: int = 3
+    # 抽帧总预算。这只是**安全网**，不是目标值 —— 真正决定抽多少帧的是
+    # 「每镜每秒约一帧」+ max_frames_per_shot。15 秒的视频只会用到 15 帧左右，
+    # 预算给大不影响短片的帧数，只保证长视频不会失控。
+    # 按 1100 tokens/帧 估算：96 帧 ≈ 10.6 万 tokens。128k 上下文的模型够用，
+    # 1M 上下文的可以放心再调大。
+    max_total_frames: int = 96
+    # 单个镜头的帧数上限。这是**短片真正的瓶颈** ——
+    # 原来固定 3 帧，导致 15 秒视频（4 个镜头）只有 12 帧。
+    # 现在每镜按「时长 / frame_interval_seconds」算目标值，再夹在这个上限内。
+    max_frames_per_shot: int = 8
+    # 镜头内平均多久取一帧。1.0 表示 8 秒的镜头取 8 帧。
+    frame_interval_seconds: float = 1.0
+    # 单个镜头超过多少秒时额外补帧（保留给长镜头加权用）
     long_shot_seconds: float = 5.0
     frame_long_edge: int = 896
     frame_jpeg_quality: int = 82

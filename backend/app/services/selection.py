@@ -15,7 +15,6 @@
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 
 # 单帧图片（长边 ~900px）在主流多模态模型里的经验 token 成本
@@ -70,81 +69,102 @@ def _positions_in_shot(start: float, end: float, count: int) -> list[tuple[float
 def plan_frames(
     shots: list[tuple[float, float]],
     budget: int,
-    max_per_shot: int = 3,
+    max_per_shot: int = 8,
     long_shot_seconds: float = 5.0,
+    frame_interval: float = 1.0,
+    min_per_shot: int = 3,
 ) -> list[PlannedFrame]:
     """把帧预算分配到各个镜头上。
 
+    **每个镜头要几帧，由它的时长决定，不是由总预算决定。**
+
+    这一点踩过坑：原来每个镜头固定最多 3 帧，导致一段 13 秒的视频
+    （4 个镜头）只抽到 12 帧 —— 而预算有 48 帧，四倍没用上。
+    反过来长视频里 3 帧又不够覆盖一个 8 秒的镜头。
+
+    现在的规则是「**每秒约一帧**」：
+        target[i] = clamp(round(时长 / frame_interval), min_per_shot, max_per_shot)
+
+    15 秒 / 4 个镜头 → 每镜 3~5 帧，合计约 14 帧（原来 12 帧，且分布更合理）。
+    212 秒 / 46 个镜头 → 每镜目标 5 帧，但总量受 budget 约束，自动压缩到约 2 帧。
+
     分配规则（按优先级）：
-      1. 每个镜头保底 1 帧 —— 保证每个镜头都被模型看到；
-      2. 剩余预算按镜头时长加权分配，单个镜头不超过 max_per_shot；
-      3. 时长超过 long_shot_seconds 的镜头，在预算允许时优先补到 3 帧；
-      4. 若镜头数本身已超过预算（超快剪视频），改为按时间均匀降采样镜头。
+      1. 按「每秒一帧」算每个镜头的目标帧数；
+      2. 总量没超 budget → 直接用目标值；
+      3. 超了 → 每个镜头先保底 min_per_shot，剩余按镜头时长加权分配，
+         且不超过各自的目标值（长镜头优先补满）；
+      4. 若镜头数 × min_per_shot 都超预算（超快剪），改为按时间均匀挑镜头。
     """
     if not shots:
         return []
     budget = max(1, int(budget))
     max_per_shot = max(1, int(max_per_shot))
+    min_per_shot = max(1, min(int(min_per_shot), max_per_shot))
+    frame_interval = max(0.1, float(frame_interval))
 
-    # --- 情况 A：镜头数 > 预算，按时间均匀挑镜头 ---
-    if len(shots) > budget:
+    durations = [max(0.05, b - a) for a, b in shots]
+
+    # --- 每个镜头的目标帧数：每秒约一帧，夹在 [min, max] 之间 ---
+    target = [
+        max(min_per_shot, min(max_per_shot, int(round(d / frame_interval)) or min_per_shot))
+        for d in durations
+    ]
+
+    if sum(target) <= budget:
+        alloc = target
+    elif len(shots) <= budget:
+        # --- 情况 B：总量超预算，但**每个镜头至少能分到 1 帧** ---
+        #
+        # 顺序很关键：先保证「每个镜头都被模型看到」，再加密度。
+        # 反过来（先给少数镜头 3 帧、其余 0 帧）会让一部分镜头完全不可见 ——
+        # 46 个镜头 / 96 帧预算时，实测旧策略有 14 个镜头拿到 0 帧。
+        #
+        # 加密度时按「剩余容量 × 镜头时长」加权 —— 长镜头信息量大，优先补满。
+        # 用轮转（每轮每人加一帧）会让长短镜头拿到一样多，等于没加权。
+        alloc = [1] * len(shots)
+        remaining = budget - len(shots)
+
+        while remaining > 0:
+            weights = [
+                max(0, target[i] - alloc[i]) * durations[i] for i in range(len(shots))
+            ]
+            total_w = sum(weights)
+            if total_w <= 0:
+                break
+
+            given = 0
+            shares = [
+                (weights[i] / total_w * remaining) if weights[i] > 0 else 0.0
+                for i in range(len(shots))
+            ]
+            # 先给整数部分
+            for i in range(len(shots)):
+                give = min(int(shares[i]), target[i] - alloc[i], remaining)
+                if give > 0:
+                    alloc[i] += give
+                    remaining -= give
+                    given += give
+            # 整数部分全是 0（余量太小）时，按权重从大到小逐个补 1
+            if given == 0:
+                for i in sorted(range(len(shots)), key=lambda k: weights[k], reverse=True):
+                    if remaining <= 0:
+                        break
+                    if alloc[i] < target[i]:
+                        alloc[i] += 1
+                        remaining -= 1
+                        given += 1
+            if given == 0:
+                break
+    else:
+        # --- 情况 C：镜头数比预算还多（超快剪），只能均匀挑镜头，每镜 1 帧 ---
         picked = _evenly_pick(len(shots), budget)
         out: list[PlannedFrame] = []
         for idx in picked:
             a, b = shots[idx]
             t, role = _positions_in_shot(a, b, 1)[0]
             out.append(PlannedFrame(idx, t, role))
+        out.sort(key=lambda f: f.time)
         return out
-
-    # --- 情况 B：常规加权分配 ---
-    alloc = [1] * len(shots)
-    remaining = budget - len(shots)
-
-    if remaining > 0:
-        durations = [max(0.05, b - a) for a, b in shots]
-
-        # 第一轮：给超过 long_shot_seconds 的镜头补到 3 帧（长镜头信息量大）
-        order = sorted(range(len(shots)), key=lambda i: durations[i], reverse=True)
-        for i in order:
-            while remaining > 0 and alloc[i] < min(3, max_per_shot) and durations[i] >= long_shot_seconds:
-                alloc[i] += 1
-                remaining -= 1
-
-        # 第二轮：按剩余容量按时长比例分配
-        while remaining > 0:
-            cap_total = sum(max(0, min(max_per_shot, 3) - alloc[i]) for i in range(len(shots)))
-            if cap_total <= 0:
-                # 还有余量就放宽上限
-                cap_total = sum(max(0, max_per_shot - alloc[i]) for i in range(len(shots)))
-                if cap_total <= 0:
-                    break
-                weights = [max(0, max_per_shot - alloc[i]) for i in range(len(shots))]
-            else:
-                weights = [max(0, min(max_per_shot, 3) - alloc[i]) for i in range(len(shots))]
-
-            total_w = sum(weights)
-            if total_w <= 0:
-                break
-
-            added = 0
-            for i in range(len(shots)):
-                if remaining <= 0:
-                    break
-                share = weights[i] / total_w * remaining
-                give = min(int(math.floor(share)), weights[i], remaining)
-                if give > 0:
-                    alloc[i] += give
-                    remaining -= give
-                    added += give
-            if added == 0:
-                # 逐个补齐，避免浮点导致分配停滞
-                for i in range(len(shots)):
-                    if remaining <= 0:
-                        break
-                    room = max_per_shot - alloc[i]
-                    if room > 0:
-                        alloc[i] += 1
-                        remaining -= 1
 
     out = []
     for i, (a, b) in enumerate(shots):

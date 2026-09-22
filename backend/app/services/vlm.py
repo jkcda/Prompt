@@ -128,6 +128,7 @@ class VLMClient:
         images: list[Path],
         max_tokens: int,
         audio: list[Path] | None = None,
+        disable_thinking: bool | None = None,
     ) -> dict:
         content: list[dict] = [{"type": "text", "text": user}]
         for img in images:
@@ -147,7 +148,8 @@ class VLMClient:
         # 推理模型：关掉思考。实测快近 10 倍，而且正文不会被思考挤空。
         # 用 `enable_thinking` 这个 OpenAI 生态里最常见的名字；
         # 不支持的模型会 400，调用方会自动摘掉这个字段重试。
-        if self.disable_thinking:
+        # `disable_thinking` 参数可按次覆盖（编辑类任务需要开思考）。
+        if self.disable_thinking if disable_thinking is None else disable_thinking:
             payload["enable_thinking"] = False
         return payload
 
@@ -158,6 +160,7 @@ class VLMClient:
         images: list[Path],
         max_tokens: int,
         audio: list[Path] | None = None,
+        disable_thinking: bool | None = None,
     ) -> dict:
         if audio:
             # Anthropic 的 messages 协议目前没有音频内容块。
@@ -316,8 +319,14 @@ class VLMClient:
         max_tokens: int = 4096,
         retries: int = 3,
         audio: list[Path] | None = None,
+        disable_thinking: bool | None = None,
     ) -> str:
-        """单次调用。失败自动重试；请求体过大时自动减半图片重试。"""
+        """单次调用。失败自动重试；请求体过大时自动减半图片重试。
+
+        `disable_thinking` 可以按次覆盖实例默认值。**编辑类任务要开思考** ——
+        实测把 833 词的提示词压缩到 700 词以内：关思考只砍 74 词（甚至原样返回），
+        开思考砍 252 词。生成类任务（照结构填内容）才需要关思考。
+        """
         self.require_configured()
         images = list(images or [])
         audio = list(audio or [])
@@ -325,7 +334,7 @@ class VLMClient:
         url, headers = self._endpoint_and_headers()
         async with self._sem:
             return await self._complete_inner(
-                url, headers, system, user, images, max_tokens, retries, audio
+                url, headers, system, user, images, max_tokens, retries, audio, disable_thinking
             )
 
     async def _complete_inner(
@@ -338,6 +347,7 @@ class VLMClient:
         max_tokens: int,
         retries: int,
         audio: list[Path] | None = None,
+        disable_thinking: bool | None = None,
     ) -> str:
         attempt = 0
         working = list(images)
@@ -349,9 +359,13 @@ class VLMClient:
         while True:
             attempt += 1
             payload = (
-                self._anthropic_payload(system, user, working, max_tokens, working_audio)
+                self._anthropic_payload(
+                    system, user, working, max_tokens, working_audio, disable_thinking
+                )
                 if self.protocol == "anthropic"
-                else self._openai_payload(system, user, working, max_tokens, working_audio)
+                else self._openai_payload(
+                    system, user, working, max_tokens, working_audio, disable_thinking
+                )
             )
 
             try:

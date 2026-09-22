@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import json
+import re
 
 from ..schemas import AudioReport, ChunkObservation, MediaInfo, ShotObservation, SubjectEntry
 
@@ -294,8 +295,11 @@ T2VA and will be read as literal text.
 - Assign speakers stable IDs `(S1)`, `(S2)` in order of first vocal event. Write dialogue and \
 lyrics as `<d>[Language] the exact words</d>`. When a speaker is on camera, state their mouth \
 movement in the same shot.
-- **Length: keep the description under 700 words.** Be dense — spend the budget on concrete \
-visual and physical detail, not on restating the style.
+- **LENGTH BUDGET — hard requirement.** The generated video model has a limited prompt window. \
+Keep `integrated_multimodal_description` to **420 words or fewer**. Oversized prompts get \
+truncated or ignored by the generator. Write tight, information-dense sentences — no filler, no \
+restating the style, no repeating a subject's appearance after its first mention. If you are \
+running long, cut adjectives and scene-setting, never the action or the mouth movement.
 - The description must not end with any closing or resolution marker. It ends on the last \
 described action, mid-flow.
 
@@ -317,14 +321,12 @@ reference asset and must NOT be cited as one.
 That means:
 - Do NOT define or mention `<Video 1>` or `<Audio 1>`. There is no video reference and no audio \
 reference in this task.
-- The `<Subject N>` labels are the reusable content you extracted from the footage (people, \
-wardrobe, props, environments, the look). The user will supply their OWN reference images for \
-these labels when generating, so each definition must be self-contained enough to identify the \
-thing from the text alone.
+- The `<Subject N>` labels are the reusable content you extracted from the footage. The user will \
+supply their OWN reference images for these labels, so each definition must be self-contained \
+enough to identify the thing from the text alone.
 
-A SUBJECT REGISTRY is provided in the user message: it lists every subject the observer found, \
-with the shots each one appears in. Use it as the authoritative source for labels — do not invent \
-subjects that are not in it, and do not split one registry entry into several labels.
+A SUBJECT REGISTRY is provided in the user message. Use it as the authoritative source for labels \
+— do not invent subjects that are not in it, and do not split one registry entry into several.
 
 Output exactly six sections, in this order, each starting at the beginning of a line with its \
 bare name followed by a colon. Do NOT wrap field names in angle brackets or any other markup.
@@ -336,28 +338,50 @@ detailed_description:
 overall_soundscape:
 non_diegetic_music:
 
-Rules:
-- `subject_definitions`: one line per registry entry, numbered in registry order as `<Subject 1>`, \
-`<Subject 2>`, ... Each line states what the label denotes and the features that must be followed. \
-Registry entries whose `kind` is `style` should be defined as the look and grade to carry across, \
-not as an object. Do not add a `<Video 1>` or `<Audio 1>` line.
+## LENGTH BUDGET — this is a hard requirement, not a suggestion
+
+The generated video model has a limited prompt window. **The entire output must be under \
+700 words.** Oversized prompts get truncated or ignored by the generator, which makes the whole \
+rewrite useless. Hit these per-section budgets:
+
+| section | budget |
+|---|---|
+| `subject_definitions` | **at most 6 entries**, 15 words each — see selection rule below |
+| `summary` | 40 words |
+| `retention_analysis` | one line per subject, 15 words each |
+| `detailed_description` | **420 words** — the bulk of the budget belongs here |
+| `overall_soundscape` | 40 words |
+| `non_diegetic_music` | 25 words |
+
+If you are running long, cut words from the definition and analysis lines, never from \
+`detailed_description`. Write tight, information-dense sentences — no filler, no restating the \
+style, no repeating a subject's appearance after its first mention.
+
+**Subject selection rule**: the registry may list more than 6 items. Pick at most 6 — the ones \
+that most need a reference image, in this priority: people > wardrobe/props > environment > \
+style/grade. Drop the least important ones entirely rather than giving everyone a half-line.
+
+## Section rules
+
+- `subject_definitions`: one line per SELECTED registry entry, numbered in registry order as \
+`<Subject 1>`, `<Subject 2>`, ... Each line: what the label denotes, then its identifying \
+features, in 15 words or fewer. Registry entries whose `kind` is `style` should be defined as the \
+look and grade to carry across, not as an object. Do not add a `<Video 1>` or `<Audio 1>` line.
 - `summary`: one short paragraph beginning with a bracketed task-type prefix, e.g. \
 `[reference generation]` or `[reference generation + style transfer]`. Do not introduce new \
 labels here, and do not describe the source clip as a reference.
 - `retention_analysis`: one line per `<Subject N>` label ONLY — no video or audio line. Use the \
 fixed markers: `fully_preserved` / `partially_preserved` / `attribute_transfer` / \
 `weak_reference`. Format: `<Subject 1> (appears in [Shot 1], [Shot 3]): fully_preserved - ...` \
-and take the shot list verbatim from the registry entry for that subject. Every subject the \
-registry actually tracked must be `fully_preserved` or `partially_preserved` unless the \
-observation report says its appearance changes.
-- `detailed_description`: the main body. One or two sentences of style before `[Shot 1]`. Then \
-`[Shot 1]` with no timestamp, and `[Shot N] At MM:SS.mmm, ...` for later shots. Insert subject \
-labels at first appearance and wherever their role applies. Speakers use `(Sx)` and dialogue uses \
-`<d>[Language] ...</d>`.
-- **Length: keep `detailed_description` under 700 words.** Be dense — spend the budget on \
-concrete visual and physical detail, not on restating the style.
+with the shot list taken verbatim from the registry entry. The reason after the dash must be \
+15 words or fewer. Every tracked subject is `fully_preserved` or `partially_preserved` unless \
+the observation report says its appearance changes.
+- `detailed_description`: the main body, 420 words. One or two sentences of style before \
+`[Shot 1]`. Then `[Shot 1]` with no timestamp, and `[Shot N] At MM:SS.mmm, ...` for later shots. \
+Insert subject labels at first appearance and wherever their role applies. Speakers use `(Sx)` \
+and dialogue uses `<d>[Language] ...</d>`.
 - `overall_soundscape` / `non_diegetic_music`: ambience and physical sound vs. audience-only \
-score. Write `N/A` when a category is absent. Never repeat dialogue here."""
+score, 40 / 25 words. Write `N/A` when a category is absent. Never repeat dialogue here."""
 
 
 _PASS2_SEEDANCE = """{common}
@@ -414,6 +438,74 @@ For each shot, one block:
 observation report (text overlays, watermarks, unwanted artefacts, identity drift, etc.).
 
 Do not add a closing or summary section after the negative prompt."""
+
+
+def build_compress_system(limit: int) -> str:
+    """超长时的压缩指令。
+
+    为什么不靠「生成时就守住预算」：实测模型对字数指令的服从度很差 ——
+    给了逐段预算（定义 15 词/条、正文 420 词）之后仍然写出
+    定义 19 词/条、正文 562 词，整篇 918 词（上限 700）。
+    但「把现成的文本改短」是模型很擅长的编辑任务，比「按预算生成」可靠得多。
+
+    ⚠️ 这个调用要**开思考**，和其他环节相反。实测（833 词的六段式）：
+        长指令 + 关思考 -> 833 词（原样返回，模型根本没改）
+        短指令 + 关思考 -> 759 词（只砍 74 词，不达标）
+        短指令 + 开思考 -> 581 词（砍 252 词，达标）
+    编辑需要先想清楚「哪些能砍」，思考过程在这里是有用的。
+    生成环节才需要关思考（那是照结构填内容，思考纯属浪费）。
+    """
+    return f"""You are a ruthless text editor. Shorten the prompt the user sends to \
+under {limit} words.
+
+Keep: the six section names in order, every `<Subject N>` label, every `[Shot N]` marker, \
+all retention markers, all dialogue verbatim, and `N/A` where present.
+Cut: adjectives, filler, repeated descriptions, hedging.
+
+Output only the shortened prompt."""
+
+
+def build_compress_user(prompt: str, limit: int) -> str:
+    words = len(prompt.split())
+    return (
+        f"The following prompt is {words} words. Compress it to under {limit} words.\n\n"
+        f"--- BEGIN PROMPT ---\n{prompt}\n--- END PROMPT ---"
+    )
+
+
+def check_prompt_integrity(original: str, compressed: str) -> tuple[bool, str]:
+    """压缩后校验关键结构没丢。返回 (是否可用, 原因)。
+
+    压缩是「编辑」任务，模型偶尔会顺手删掉整节或合并主体 —— 那比超长更糟，
+    所以宁可保留原文也不能接受残缺的结构。
+    """
+    if not compressed.strip():
+        return False, "压缩结果为空"
+
+    required = (
+        "subject_definitions", "summary", "retention_analysis",
+        "detailed_description", "overall_soundscape", "non_diegetic_music",
+    )
+    missing = [s for s in required if f"{s}:" not in compressed]
+    if missing:
+        return False, f"压缩后缺少段落：{', '.join(missing)}"
+
+    n_before = set(re.findall(r"<Subject (\d+)>", original))
+    n_after = set(re.findall(r"<Subject (\d+)>", compressed))
+    if not n_after.issuperset(n_before):
+        lost = sorted(n_before - n_after, key=int)
+        return False, f"主体标签丢失：<Subject {', <Subject '.join(lost)}>"
+
+    shots_before = set(re.findall(r"\[Shot (\d+)\]", original))
+    shots_after = set(re.findall(r"\[Shot (\d+)\]", compressed))
+    if not shots_after.issuperset(shots_before):
+        lost = sorted(shots_before - shots_after, key=int)
+        return False, f"镜头标记丢失：[Shot {', [Shot '.join(lost)}]"
+
+    if "N/A" in original and "N/A" not in compressed:
+        return False, "N/A 段被删掉了"
+
+    return True, ""
 
 
 # ---------------------------------------------------------------------------

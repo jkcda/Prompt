@@ -121,7 +121,9 @@ async def run_pipeline(job: Job, video_path: Path) -> JobResult:
     log.info("镜头 %d 个 → 分块 %d 个", len(shots), total_chunks)
 
     # 按块时长比例分配帧预算
-    per_chunk_budget = _split_budget(chunks, budget, s.max_frames_per_shot, s.long_shot_seconds)
+    per_chunk_budget = _split_budget(
+        chunks, budget, s.max_frames_per_shot, s.long_shot_seconds, s.frame_interval_seconds
+    )
 
     await step("frames", 32, f"抽帧（{total_chunks} 块）")
     frame_root = ff.frame_dir_for(job_id)
@@ -135,6 +137,7 @@ async def run_pipeline(job: Job, video_path: Path) -> JobResult:
             per_chunk_budget[ci],
             max_per_shot=s.max_frames_per_shot,
             long_shot_seconds=s.long_shot_seconds,
+            frame_interval=s.frame_interval_seconds,
         )
         role_of = {round(p.time, 3): p.role for p in plan}
         out_dir = frame_root / f"c{ci:02d}"
@@ -273,6 +276,53 @@ async def run_pipeline(job: Job, video_path: Path) -> JobResult:
     except VLMError as exc:
         raise RuntimeError(f"提示词合成失败：{exc}") from exc
 
+    # 长度检查与压缩。视频生成模型的提示词窗口有限，超长会被截断或忽略 ——
+    # 实测不限长时六段式能写到 1795 词 / 11314 字符。
+    #
+    # 逐段给预算只能压到 918 词（模型对字数指令的服从度很差：给了「每条 15 词」
+    # 仍然写出 26 词）。所以再加一道「压缩」——把超长文本交给模型改短，
+    # 这是编辑任务，比「按预算生成」可靠得多。压缩后要校验结构没丢：
+    # 残缺的提示词比超长的更糟。
+    prompt = prompt.strip()
+    word_count = len(prompt.split())
+    limit = s.prompt_word_limit
+    compressed = False
+    if limit > 0 and word_count > limit:
+        await step("compose", 92, f"提示词 {word_count} 词，压缩到 {limit} 词以内")
+        try:
+            shorter = (
+                await client.complete(
+                    templates.build_compress_system(limit),
+                    templates.build_compress_user(prompt, limit),
+                    images=[],
+                    max_tokens=s.vlm_max_tokens,
+                    # ⚠️ 压缩要**开思考**，和其他环节相反 ——
+                    # 实测关思考时模型只肯砍 74 词（甚至原样返回），
+                    # 开思考能砍 252 词直接达标。编辑需要先想清楚哪些能砍。
+                    disable_thinking=False,
+                )
+            ).strip()
+            ok, why = templates.check_prompt_integrity(prompt, shorter)
+            new_words = len(shorter.split())
+            if ok and new_words < word_count:
+                log.info("提示词压缩：%d 词 → %d 词", word_count, new_words)
+                prompt, word_count, compressed = shorter, new_words, True
+            else:
+                log.warning(
+                    "提示词压缩未采用（%s；%d 词 → %d 词），保留原稿",
+                    why or "没有变短", word_count, new_words,
+                )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("提示词压缩失败，保留原稿：%s", exc)
+
+    if limit > 0 and word_count > limit:
+        log.warning(
+            "提示词仍有 %d 词，超过 %d 词上限 —— 视频模型可能截断或忽略。"
+            "可调小 MAX_FRAMES_PER_SHOT / FRAME_INTERVAL_SECONDS 减少细节量，"
+            "或收窄 PROMPT_WORD_LIMIT 逼模型更精简。",
+            word_count, limit,
+        )
+
     # ---------------- 8. 汇总 ----------------
     frame_urls = [
         f"/api/media/frame/{job_id}/{p.parent.name}/{p.name}"
@@ -281,7 +331,7 @@ async def run_pipeline(job: Job, video_path: Path) -> JobResult:
 
     elapsed = time.time() - t0
     result = JobResult(
-        prompt=prompt.strip(),
+        prompt=prompt,
         observations=merged,
         subjects=subjects,
         media=media,
@@ -300,6 +350,13 @@ async def run_pipeline(job: Job, video_path: Path) -> JobResult:
             "scene_adaptive": adaptive_note or "",
             "subjects": len(subjects),
             "est_tokens": selection.estimate_tokens(total_frames),
+            "prompt_words": word_count,
+            "prompt_chars": len(prompt),
+            "prompt_word_limit": s.prompt_word_limit,
+            "prompt_compressed": compressed,
+            "prompt_over_limit": bool(
+                s.prompt_word_limit > 0 and word_count > s.prompt_word_limit
+            ),
             "format": opts.format,
             "format_label": templates.format_display(opts.format),
             "mode": templates.mode_of(opts.format),
@@ -308,8 +365,9 @@ async def run_pipeline(job: Job, video_path: Path) -> JobResult:
                 selection.plan_frames(
                     [(sh.start, sh.end) for sh in shots],
                     budget,
-                    s.max_frames_per_shot,
-                    s.long_shot_seconds,
+                    max_per_shot=s.max_frames_per_shot,
+                    long_shot_seconds=s.long_shot_seconds,
+                    frame_interval=s.frame_interval_seconds,
                 ),
                 [(sh.start, sh.end) for sh in shots],
             ),
@@ -415,13 +473,16 @@ def _split_budget(
     budget: int,
     max_per_shot: int,
     long_shot_seconds: float,
+    frame_interval: float = 1.0,
 ) -> list[int]:
-    """按各块时长占比分配帧预算，保证每块至少能覆盖自己所有镜头。"""
+    """按各块时长占比分配帧预算，保证每块至少能覆盖自己所有镜头。
+
+    这里只负责「总预算怎么分给各块」，块内每个镜头具体几帧由
+    `plan_frames` 按镜头时长决定。所以容量上限要按每块镜头的**目标帧数**算，
+    不能用固定值 —— 原来硬编码 3，导致 max_frames_per_shot 调到 8 也不生效。
+    """
     if not chunks:
         return []
-
-    durations = [max(0.1, c[-1].end - c[0].start) for c in chunks]
-    sum(durations)
 
     # 每块的硬下限：保证每个镜头至少 1 帧
     floors = [len(c) for c in chunks]
@@ -434,8 +495,12 @@ def _split_budget(
     remaining = budget - sum(floors)
     alloc = list(floors)
 
-    # 按容量上限（每镜头最多 3 帧）加权分配剩余
-    caps = [max(0, min(max_per_shot, 3) * len(c) - floors[i]) for i, c in enumerate(chunks)]
+    # 容量上限：每块内所有镜头的目标帧数之和
+    def _target(shot: Shot) -> int:
+        d = max(0.05, shot.end - shot.start)
+        return max(1, min(max_per_shot, int(round(d / max(0.1, frame_interval))) or 1))
+
+    caps = [max(0, sum(_target(sh) for sh in c) - floors[i]) for i, c in enumerate(chunks)]
     while remaining > 0 and sum(caps) > 0:
         total_cap = sum(caps)
         added = 0

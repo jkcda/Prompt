@@ -17,9 +17,12 @@ from app.services.templates import (
     FORMAT_LABELS,
     MODE_LABELS,
     MODE_VARIANTS,
+    build_compress_system,
+    build_compress_user,
     build_pass1_user,
     build_pass2_system,
     build_pass2_user,
+    check_prompt_integrity,
     format_display,
     merge_observations,
     merge_subjects,
@@ -385,12 +388,40 @@ def test_h3_ref_retention_analysis_excludes_video_and_audio_lines():
     assert "no video or audio line" in system
 
 
-def test_word_limit_is_700_for_h3_modes():
-    """用户明确要求正文限 700 词以内。"""
-    for fmt in ("h3", "h3-ref"):
-        system = build_pass2_system(fmt, "en")
-        assert "under 700 words" in system, f"{fmt} 缺少 700 词上限"
-        assert "350-500 words" not in system, f"{fmt} 还留着旧的 350-500 限制"
+def test_word_limit_is_per_section_not_just_a_global_number():
+    """长度必须**逐段**给预算，不能只给一个全局上限。
+
+    踩过：原来只写「keep the description under 700 words」，
+    实测模型写出 779 词正文、整篇 1795 词 / 11314 字符 —— 视频模型吃不下。
+    模型不会自己把全局上限分配到各段，得逐段给数字。
+    """
+    system = build_pass2_system("h3", "en")
+    assert "420 words or fewer" in system
+    assert "LENGTH BUDGET" in system
+
+    ref = build_pass2_system("h3-ref", "en")
+    assert "under 700 words" in ref, "整篇上限要写清楚"
+    assert "420 words" in ref
+    assert "at most 6 entries" in ref, "subject_definitions 要限条数"
+    assert "15 words each" in ref
+    assert "40 words" in ref
+    assert "25 words" in ref
+    # 旧的全局写法不该再出现
+    for sysp in (system, ref):
+        assert "350-500 words" not in sysp
+
+
+def test_h3_ref_tells_which_subjects_to_drop_when_too_many():
+    """登记表超过 6 条时要给出取舍优先级，否则模型会平均用力写得又臭又长。"""
+    system = build_pass2_system("h3-ref", "en")
+    assert "people > wardrobe/props > environment > style/grade" in system
+    assert "Drop the least important ones entirely" in system
+
+
+def test_h3_ref_says_where_to_cut_when_over_budget():
+    """超预算时先砍定义和分析，绝不砍正文 —— 正文才是生成要用的。"""
+    system = build_pass2_system("h3-ref", "en")
+    assert "never from `detailed_description`" in system
 
 
 def test_seedance_mode_has_no_h3_markup():
@@ -640,3 +671,109 @@ def test_pass2_rule_distinguishes_content_from_spectrum():
     assert "distinguish CONTENT from SPECTRUM" in system
     assert "voice-dominant" in system
     assert "does not license" in system
+
+
+# ---------------------------------------------------------------------------
+# 超长压缩
+# ---------------------------------------------------------------------------
+
+LONG_PROMPT = """subject_definitions:
+<Subject 1> - a very detailed long winded description of the boy with many redundant adjectives.
+<Subject 2> - another extremely verbose definition full of filler words and padding.
+
+summary:
+[reference generation] A long summary that goes on and on about the source clip.
+
+retention_analysis:
+<Subject 1> (appears in [Shot 1]): fully_preserved - lots of redundant justification here.
+<Subject 2> (appears in [Shot 2]): fully_preserved - more redundant justification here.
+
+detailed_description:
+[Shot 1] A very long description with many unnecessary adjectives and adverbial padding.
+[Shot 2] At 00:03.400, another long description that repeats the style once again.
+
+overall_soundscape:
+A long winded ambience description.
+
+non_diegetic_music:
+N/A"""
+
+
+def test_compress_instruction_is_short_and_direct():
+    """压缩指令要短而直接 —— 长篇指令实测反而让模型原样返回。
+
+    踩过：写了一大段「MUST preserve / Cut aggressively」的指令，
+    模型直接原样返回（833 词 → 833 词，字节相同）。
+    换成一句「Shorten the prompt the user sends to under N words」+ 两条 keep/cut 就管用。
+    """
+    system = build_compress_system(700)
+    assert "under 700 words" in system
+    assert "<Subject N>" in system
+    assert "[Shot N]" in system
+    assert "verbatim" in system, "台词必须逐字保留"
+    assert len(system.split()) < 90, f"指令太长（{len(system.split())} 词），模型会偷懒"
+
+
+def test_compress_uses_thinking():
+    """压缩要开思考 —— 这是与其他环节相反的例外。
+
+    实测 833 词的六段式：
+      关思考 -> 759 词（只砍 74）
+      开思考 -> 581 词（砍 252，达标）
+    编辑需要先想清楚哪些能砍。有测试断言调用处传了 disable_thinking=False。
+    """
+    import inspect
+
+    from app.services import pipeline
+
+    src = inspect.getsource(pipeline.run_pipeline)
+    assert "disable_thinking=False" in src
+    # 而且要在压缩那一段里，不能是别的地方
+    idx = src.index("build_compress_system")
+    assert "disable_thinking=False" in src[idx:idx + 900]
+
+
+def test_compress_user_includes_word_count():
+    text = build_compress_user("a b c d e", 3)
+    assert "5 words" in text and "under 3 words" in text
+    assert "--- BEGIN PROMPT ---" in text and "--- END PROMPT ---" in text
+
+
+def test_integrity_accepts_good_compression():
+    ok, why = check_prompt_integrity(LONG_PROMPT, LONG_PROMPT)
+    assert ok, why
+
+
+def test_integrity_rejects_missing_section():
+    broken = LONG_PROMPT.replace("overall_soundscape:", "audio_notes:")
+    ok, why = check_prompt_integrity(LONG_PROMPT, broken)
+    assert not ok
+    assert "overall_soundscape" in why
+
+
+def test_integrity_rejects_dropped_subject():
+    """压缩时把主体合并/删掉比超长更糟 —— 用户没法挂参考图了。"""
+    broken = LONG_PROMPT.replace("<Subject 2>", "<Subject 1>")
+    ok, why = check_prompt_integrity(LONG_PROMPT, broken)
+    assert not ok
+    assert "主体标签丢失" in why
+
+
+def test_integrity_rejects_dropped_shot():
+    broken = LONG_PROMPT.replace("[Shot 2]", "[Shot 1]")
+    ok, why = check_prompt_integrity(LONG_PROMPT, broken)
+    assert not ok
+    assert "镜头标记丢失" in why
+
+
+def test_integrity_rejects_dropped_na():
+    broken = LONG_PROMPT.replace("N/A", "none")
+    ok, why = check_prompt_integrity(LONG_PROMPT, broken)
+    assert not ok
+    assert "N/A" in why
+
+
+def test_integrity_rejects_empty():
+    ok, why = check_prompt_integrity(LONG_PROMPT, "   ")
+    assert not ok
+    assert "为空" in why

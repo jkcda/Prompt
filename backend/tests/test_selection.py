@@ -107,3 +107,89 @@ def test_describe_plan_is_readable():
     text = describe_plan(plan, shots)
     assert "镜头 2 个" in text
     assert "抽帧" in text
+
+
+# ---------------------------------------------------------------------------
+# 按镜头时长定帧数（短片真正的瓶颈）
+# ---------------------------------------------------------------------------
+
+def _counts(plan, n_shots):
+    c = {i: 0 for i in range(n_shots)}
+    for f in plan:
+        c[f.shot_index] = c.get(f.shot_index, 0) + 1
+    return c
+
+
+def test_short_video_uses_duration_not_fixed_cap():
+    """15 秒 / 4 个镜头应该出 15 帧左右，不是固定的 12 帧。
+
+    踩过：原来每个镜头固定最多 3 帧，15 秒视频（4 镜）只有 12 帧，
+    而预算有 48 帧 —— 四倍没用上。用户直接问「你设置了 48 帧最终结果比这少得多啊」。
+    """
+    shots = [(0, 5.43), (5.43, 8.37), (8.37, 11.20), (11.20, 15.0)]
+    plan = plan_frames(shots, budget=96, max_per_shot=8, frame_interval=1.0)
+    assert 13 <= len(plan) <= 18, f"15 秒 4 镜应该 13~18 帧，实际 {len(plan)}"
+    counts = _counts(plan, 4)
+    assert all(v >= 3 for v in counts.values()), f"每个镜头至少 3 帧：{counts}"
+    # 5.43s 的镜头应该比 2.83s 的多
+    assert counts[0] > counts[2]
+
+
+def test_max_frames_per_shot_above_three_is_honoured():
+    """回归：max_per_shot 大于 3 时必须真的生效。
+
+    原来 plan_frames 和 _split_budget 里都硬编码了 min(max_per_shot, 3)，
+    把配置调到 8 也没用。
+    """
+    shots = [(0, 10.0)]
+    plan = plan_frames(shots, budget=96, max_per_shot=8, frame_interval=1.0)
+    assert len(plan) == 8, f"10 秒镜头 + 上限 8 应该出 8 帧，实际 {len(plan)}"
+
+    plan3 = plan_frames(shots, budget=96, max_per_shot=3, frame_interval=1.0)
+    assert len(plan3) == 3
+
+
+def test_frame_interval_controls_density():
+    shots = [(0, 12.0)]
+    assert len(plan_frames(shots, 96, max_per_shot=20, frame_interval=1.0)) == 12
+    assert len(plan_frames(shots, 96, max_per_shot=20, frame_interval=2.0)) == 6
+    assert len(plan_frames(shots, 96, max_per_shot=20, frame_interval=0.5)) == 20  # 夹在上限
+
+
+def test_every_shot_covered_when_budget_allows():
+    """预算够时要保证每个镜头都被看到。
+
+    踩过：46 个镜头 / 96 帧预算时，旧策略给 32 个镜头各 3 帧，
+    剩下 14 个镜头拿到 0 帧 —— 模型根本看不到它们。
+    """
+    shots = [(i * 4.6, (i + 1) * 4.6) for i in range(46)]
+    plan = plan_frames(shots, budget=96, max_per_shot=8, frame_interval=1.0)
+    counts = _counts(plan, 46)
+    uncovered = [i + 1 for i, v in counts.items() if v == 0]
+    assert not uncovered, f"这些镜头一帧都没分到：{uncovered}"
+    assert len(plan) <= 96
+
+
+def test_budget_still_bounds_long_videos():
+    """长视频里预算仍然是硬上限。"""
+    shots = [(i * 4.6, (i + 1) * 4.6) for i in range(46)]
+    plan = plan_frames(shots, budget=48, max_per_shot=8, frame_interval=1.0)
+    assert len(plan) <= 48
+    counts = _counts(plan, 46)
+    assert all(v >= 1 for v in counts.values()), "48 帧也够覆盖 46 个镜头"
+
+
+def test_extreme_shot_count_falls_back_to_even_picking():
+    """镜头数比预算还多时无解，只能均匀挑 —— 但要能跑不崩。"""
+    shots = [(i * 1.5, (i + 1) * 1.5) for i in range(200)]
+    plan = plan_frames(shots, budget=96, max_per_shot=8, frame_interval=1.0)
+    assert len(plan) <= 96
+    assert len({f.shot_index for f in plan}) == 96
+
+
+def test_single_long_shot_gets_dense_frames():
+    """单镜头视频（长镜头访谈）以前只能拿 3 帧，现在按秒数给。"""
+    plan = plan_frames([(0, 15.0)], budget=96, max_per_shot=8, frame_interval=1.0)
+    assert len(plan) == 8
+    times = sorted(f.time for f in plan)
+    assert times[0] < 2.0 and times[-1] > 13.0, "应该铺满整个镜头"

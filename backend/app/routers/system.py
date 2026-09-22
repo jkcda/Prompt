@@ -25,6 +25,7 @@ ENV_WHITELIST = {
     "VLM_AUDIO_INPUT", "VLM_MAX_TOKENS", "VLM_DISABLE_THINKING",
     "ASR_API_KEY", "ASR_BASE_URL", "ASR_MODEL",
     "MAX_TOTAL_FRAMES", "MAX_FRAMES_PER_SHOT", "LONG_SHOT_SECONDS",
+    "FRAME_INTERVAL_SECONDS", "PROMPT_WORD_LIMIT",
     "FRAME_LONG_EDGE", "SCENE_THRESHOLD", "MIN_SHOT_SECONDS",
     "CHUNK_THRESHOLD_SECONDS", "CHUNK_SECONDS", "MAX_UPLOAD_MB",
     "FFMPEG_PATH", "COOKIES_FROM_BROWSER", "COOKIES_FILE", "YTDLP_FORMAT",
@@ -102,10 +103,12 @@ async def read_settings(settings: SettingsDep) -> dict[str, Any]:
         "frames": {
             "max_total_frames": settings.max_total_frames,
             "max_frames_per_shot": settings.max_frames_per_shot,
+            "frame_interval_seconds": settings.frame_interval_seconds,
             "long_shot_seconds": settings.long_shot_seconds,
             "long_edge": settings.frame_long_edge,
             "jpeg_quality": settings.frame_jpeg_quality,
         },
+        "prompt": {"word_limit": settings.prompt_word_limit},
         "scene": {
             "threshold": settings.scene_threshold,
             "min_shot_seconds": settings.min_shot_seconds,
