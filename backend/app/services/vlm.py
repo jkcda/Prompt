@@ -137,6 +137,52 @@ class VLMClient:
             ).strip()
         return ""
 
+    @staticmethod
+    def _diagnose_empty(payload: dict, n_images: int) -> str:
+        """HTTP 200 但内容为空时，把原因说清楚。
+
+        最常见的两种「空」：
+          1. `choices: null` + `usage` 全为 0 —— 请求根本没被处理。
+             典型原因是模型不支持图片输入，或该模型在当前账号下没有开通推理服务。
+             这个特征很好认，但只报「模型返回空内容」会让人往网络、超时方向查。
+          2. `finish_reason: content_filter` / `length` —— 被截断或拦截。
+
+        报错必须可操作，否则等于没报。
+        """
+        choices = payload.get("choices")
+        usage = payload.get("usage") or {}
+        prompt_tokens = usage.get("prompt_tokens") or 0
+        model = payload.get("model") or "(未知)"
+
+        if choices is None or (isinstance(choices, list) and not choices):
+            if prompt_tokens == 0:
+                hint = (
+                    f"模型 {model} 返回了空 choices，且 usage 显示 0 tokens——"
+                    "请求没有被真正处理。通常是：\n"
+                    "  1) 该模型不支持图片输入（不是视觉语言模型）；\n"
+                    "  2) 该模型在当前账号下没有开通推理服务（服务未部署/未订阅）；\n"
+                    "  3) 模型名拼写有误。\n"
+                    "建议：换一个确认支持图片输入的 VL 模型，或先用 GET /api/health/vlm 自检。"
+                )
+                if n_images:
+                    hint += f"\n本次请求带了 {n_images} 张图片。"
+                return hint
+            return f"模型 {model} 返回空 choices（usage: {usage}）"
+
+        if isinstance(choices, list) and choices:
+            reason = choices[0].get("finish_reason")
+            if reason == "content_filter":
+                return f"模型 {model} 的内容过滤拦截了本次请求（finish_reason=content_filter）"
+            if reason == "length":
+                return (
+                    f"模型 {model} 的输出被 max_tokens 截断（finish_reason=length）。"
+                    "调大 max_tokens 或减少输入帧数。"
+                )
+            if reason:
+                return f"模型 {model} 返回空内容（finish_reason={reason}）"
+
+        return f"模型 {model} 返回空内容"
+
     # -- 调用 --------------------------------------------------------------
 
     async def complete(
@@ -188,10 +234,11 @@ class VLMClient:
                 continue
 
             if resp.status_code == 200:
-                text = self._extract_text(resp.json(), self.protocol)
+                data = resp.json()
+                text = self._extract_text(data, self.protocol)
                 if not text:
                     if attempt >= retries:
-                        raise VLMError("模型返回空内容")
+                        raise VLMError(self._diagnose_empty(data, len(working)))
                     await asyncio.sleep(2 ** attempt)
                     continue
                 return text

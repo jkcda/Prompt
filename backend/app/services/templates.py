@@ -36,6 +36,11 @@ accessories react to gravity. Movement that has no physical description reads as
 3. Use MOTION VERBS, never static verbs. Write "she rises and turns", "the camera tracks left", \
 "his shoulders roll with the step". Never write "she stays", "the pose holds", "remains still", \
 "hands rest" — those words make generated video freeze.
+   Also never declare that one motion is the ONLY motion in frame (e.g. "the only motion is the \
+shifting bar"). Everything you do not mention as moving stops moving, including the mouth. \
+Your `global_notes` is passed verbatim into the next stage, so forbidden phrasing written here \
+contaminates the final prompt. If little is moving, say what IS moving — do not rank it as the \
+sole motion.
 4. Estimate camera movement from how the framing changes between frames (subject position, \
 background parallax, horizon tilt). Distinguish: static / pan / tilt / dolly-in / dolly-out / \
 truck / crane / handheld shake / orbit / whip.
@@ -235,10 +240,15 @@ Never paraphrase dialogue.
 6. Do not mention watermarks, logos, platform UI, or the fact that this is a reverse-engineered \
 prompt. If the observation notes on-screen text, either transcribe it as diegetic text when it \
 is part of the scene, or omit it.
-7. Keep each subject's appearance wording IDENTICAL across shots. A character described as "a \
+7. If the audio report says the audio content was NOT transcribed, you do not know what the audio \
+contains. In that case NEVER write dialogue, lyrics, music instrumentation, tempo, or specific \
+sound-effect types — not even hedged ("as if", "appears to be"). Volume and silence information \
+is all you have, so either state that a track exists without describing it, or write `N/A`. \
+Fabricated sound is worse than an empty field: the generated video will not match the source.
+8. Keep each subject's appearance wording IDENTICAL across shots. A character described as "a \
 performer in a dark quilted jacket" in shot 1 must not become "a woman in a leather coat" in \
 shot 3 — inconsistent wording is read as a different person and the identity drifts.
-8. Write in {language_instruction}."""
+9. Write in {language_instruction}."""
 
 
 _PASS2_H3 = """{common}

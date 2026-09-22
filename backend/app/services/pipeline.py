@@ -388,7 +388,7 @@ def _split_budget(
 def _audio_slice(audio: AudioReport, start: float, end: float) -> str:
     """截取落在该时间窗内的转写片段，附给对应分块。"""
     if not audio.has_audio:
-        return "【音频】该视频没有音轨。"
+        return "【音频】该视频没有音轨。所有音频字段请写 N/A。"
 
     lines = [f"【本段语音转写 {start:.2f}s - {end:.2f}s】"]
     hit = [s for s in audio.segments if s.end >= start - 0.5 and s.start <= end + 0.5]
@@ -399,7 +399,11 @@ def _audio_slice(audio: AudioReport, start: float, end: float) -> str:
         lines.append("  （无逐句时间戳，以下为整片转写，请按语义对齐到镜头）")
         lines.append("  " + audio.transcript[:3000])
     else:
-        lines.append("  （无语音内容，可能是纯音乐或无对白视频）")
+        # 这里必须明说「你听不到」，否则模型会照着画面编出
+        # 「电子提示音与数字跳变同步」这类听起来合理的声音描述。
+        lines.append("  （未做语音识别，或识别结果为空。）")
+        lines.append("  ⚠ 音轨存在但音频内容未知：禁止写台词、歌词、BGM 乐器、")
+        lines.append("    具体音效类型。音频字段只能留空或写 N/A。")
 
     meta: list[str] = []
     if audio.mean_volume_db is not None:

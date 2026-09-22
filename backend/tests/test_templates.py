@@ -419,3 +419,95 @@ def test_common_rules_forbid_wording_drift():
     """同一个主体在不同镜头换措辞，模型会当成两个人。"""
     system = build_pass2_system("h3", "en")
     assert "IDENTICAL across shots" in system
+
+
+def test_pass1_also_forbids_exclusive_motion_claims():
+    """Pass1 的 global_notes 会原样进 Pass2，禁忌措辞不能只堵一处。
+
+    真实模型在 Pass1 写下过 "The only motion is the shifting rainbow gradient bar"，
+    而那句会经 build_pass2_user 的 `segment notes` 直接注入 Pass2 的输入。
+    """
+    from app.services.templates import PASS1_SYSTEM
+
+    assert "ONLY motion" in PASS1_SYSTEM
+    assert "global_notes" in PASS1_SYSTEM and "verbatim" in PASS1_SYSTEM
+
+
+def test_pass1_forbids_static_verbs_too():
+    from app.services.templates import PASS1_SYSTEM
+
+    for word in ("holds", "remains still", "hands rest"):
+        assert word in PASS1_SYSTEM, f"Pass1 里缺少对 {word} 的禁令"
+
+
+def test_pass1_asks_for_subject_registry():
+    from app.services.templates import PASS1_SYSTEM
+
+    assert '"subjects"' in PASS1_SYSTEM
+    assert "SUBJECT REGISTRY" in PASS1_SYSTEM
+    assert "must be ONE entry" in PASS1_SYSTEM
+
+
+# ---------------------------------------------------------------------------
+# 音频未知时禁止编造
+# ---------------------------------------------------------------------------
+
+def test_audio_report_forbids_fabrication_when_not_transcribed():
+    """真实模型在 enable_asr=False 时编出过「电子提示音与数字跳变同步」。
+
+    只写一句中性的「未获得文本内容」，模型会照着画面把声音补齐。
+    必须显式禁止，否则反推出来的 BGM / 台词全是假的。
+    """
+    from app.services.asr import format_transcript_for_prompt
+
+    report = AudioReport(has_audio=True, mean_volume_db=-21.0, silence_ratio=0.0)
+    text = format_transcript_for_prompt(report)
+
+    assert "未知" in text
+    assert "禁止描述任何具体的声音" in text
+    assert "不要写台词或歌词" in text
+    assert "不要写 BGM" in text
+    assert "N/A" in text
+    # 音量信息仍然要保留，这是唯一已知的
+    assert "-21.0dB" in text
+
+
+def test_audio_report_with_transcript_does_not_warn():
+    from app.services.asr import format_transcript_for_prompt
+
+    report = AudioReport(has_audio=True, transcript="la la la")
+    text = format_transcript_for_prompt(report)
+    assert "la la la" in text
+    assert "禁止描述任何具体的声音" not in text
+    assert "【重申】" not in text
+
+
+def test_audio_report_no_track_says_na():
+    from app.services.asr import format_transcript_for_prompt
+
+    text = format_transcript_for_prompt(AudioReport(has_audio=False))
+    assert "无音轨" in text
+    assert "N/A" in text
+
+
+def test_pass2_rules_forbid_fabricated_sound():
+    system = build_pass2_system("h3", "en")
+    assert "NOT transcribed" in system
+    assert "Fabricated sound is worse than an empty field" in system
+    assert "not even hedged" in system, "要堵住「似乎/仿佛」这种模糊编造"
+
+
+def test_pipeline_audio_slice_warns_when_no_transcript():
+    from app.services.pipeline import _audio_slice
+
+    text = _audio_slice(AudioReport(has_audio=True), 0.0, 10.0)
+    assert "音频内容未知" in text
+    assert "禁止写台词" in text
+
+
+def test_pipeline_audio_slice_no_track():
+    from app.services.pipeline import _audio_slice
+
+    text = _audio_slice(AudioReport(has_audio=False), 0.0, 10.0)
+    assert "没有音轨" in text
+    assert "N/A" in text

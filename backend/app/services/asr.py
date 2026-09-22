@@ -196,11 +196,19 @@ def analyze_audio(video_path: str | Path, enable_asr: bool = True) -> AudioRepor
 
 
 def format_transcript_for_prompt(report: AudioReport) -> str:
-    """把转写整理成带时间戳的文本，供模型对齐到镜头。"""
+    """把转写整理成带时间戳的文本，供模型对齐到镜头。
+
+    没做转写时**必须显式禁止编造声音内容**。只写一句「未获得文本内容」，
+    模型会自己补出「电子提示音与数字跳变同步」「一段缓慢的合成器铺底」这类
+    听起来很合理的声音描述——它根本听不到音频。反推出来的 BGM / 台词是编的，
+    整条提示词就废了。
+    """
     if not report.has_audio:
-        return "【音频】该视频无音轨。"
+        return "【音频】该视频无音轨。所有音频字段请写 N/A。"
 
     lines: list[str] = []
+    transcribed = bool(report.segments or report.transcript)
+
     if report.segments:
         lines.append("【语音转写（时间戳 → 文本）】")
         for seg in report.segments[:200]:
@@ -209,7 +217,15 @@ def format_transcript_for_prompt(report: AudioReport) -> str:
         lines.append("【语音转写（无时间戳）】")
         lines.append("  " + report.transcript)
     else:
-        lines.append("【语音转写】未获得文本内容。")
+        lines.append("【语音转写】未做语音识别，识别结果为空。")
+        lines.append(
+            "  ⚠ 音轨存在，但音频内容对你完全未知。禁止描述任何具体的声音：\n"
+            "    - 不要写台词或歌词（哪怕只是「似乎在说」）\n"
+            "    - 不要写 BGM 的乐器、节奏、情绪\n"
+            "    - 不要写具体的音效类型（提示音、脚步、风声、衣料声等）\n"
+            "    音频相关字段只能写「存在音轨但内容未分析」，或直接写 N/A。\n"
+            "    编造声音比留空更糟——生成出来会和原片完全对不上。"
+        )
 
     meta: list[str] = []
     if report.mean_volume_db is not None:
@@ -226,5 +242,11 @@ def format_transcript_for_prompt(report: AudioReport) -> str:
 
     if report.note:
         lines.append(f"【备注】{report.note}")
+
+    if not transcribed:
+        lines.append(
+            "【重申】以上只有音量信息，没有任何声音内容信息。"
+            "音频字段留空或写 N/A，不要凭画面猜声音。"
+        )
 
     return "\n".join(lines)
