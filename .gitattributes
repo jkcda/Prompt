@@ -1,0 +1,30 @@
+# 统一换行为 LF，避免 Windows/Linux 协作时整文件 diff
+* text=auto eol=lf
+
+# 二进制文件不做换行转换
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.webp binary
+*.mp4 binary
+*.mov binary
+*.exe binary
+*.db binary
+*.woff binary
+*.woff2 binary
+
+# 文本类显式声明
+*.py text diff=python
+*.ts text diff=typescript
+*.vue text
+*.md text
+*.toml text
+*.json text
+*.yml text
+*.yaml text
+
+# 语言统计时排除
+data/** linguist-vendored
+frontend/dist/** linguist-generated

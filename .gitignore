@@ -1,0 +1,65 @@
+# ---------------- Python ----------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+.venv/
+venv/
+env/
+.python-version
+
+# ---------------- 环境变量（含密钥，绝不入库） ----------------
+.env
+.env.*
+!.env.example
+
+# ---------------- 运行时数据 ----------------
+# 上传的视频、抽帧图片、临时文件、SQLite 数据库
+data/
+!data/.gitkeep
+backend/runtime/
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+
+# ---------------- Node / 前端 ----------------
+node_modules/
+frontend/dist/
+frontend/dist-ssr/
+frontend/.vite/
+frontend/auto-imports.d.ts
+frontend/components.d.ts
+*.local
+.vite/
+
+# ---------------- 日志与缓存 ----------------
+logs/
+*.log
+npm-debug.log*
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+.ruff_cache/
+.cache/
+
+# ---------------- 编辑器 / 系统 ----------------
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---------------- 构建产物 ----------------
+release/
+*.tsbuildinfo
