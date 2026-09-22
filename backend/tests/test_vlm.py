@@ -6,12 +6,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
+import json
 from pathlib import Path
 
 import pytest
 
-from app.services.vlm import VLMClient
+from app.services.vlm import VLMClient, VLMError
 
 
 @pytest.fixture
@@ -214,6 +216,92 @@ def test_diagnose_says_multimodal_may_be_image_only():
     payload = {"model": "m", "choices": None, "usage": {"prompt_tokens": 0}}
     msg = VLMClient._diagnose_empty(payload, n_images=1, n_audio=0)
     assert "只支持图片" in msg
+
+
+# ---------------------------------------------------------------------------
+# 音频不被支持时自动降级
+# ---------------------------------------------------------------------------
+
+class _FakeResponse:
+    def __init__(self, payload: dict, status: int = 200):
+        self.status_code = status
+        self._payload = payload
+        self.text = json.dumps(payload)
+
+    def json(self) -> dict:
+        return self._payload
+
+
+class _FakeAsyncClient:
+    """第一次带音频返回空 choices，第二次不带音频返回正常内容。"""
+
+    calls: list[dict] = []
+
+    def __init__(self, *a, **kw):
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def post(self, url, headers=None, json=None):  # noqa: A002
+        content = json["messages"][1]["content"]
+        has_audio = any(c.get("type") == "input_audio" for c in content)
+        _FakeAsyncClient.calls.append({"has_audio": has_audio})
+        if has_audio:
+            # 这就是实测中 DeepSeek-V4.1-Flash 的行为：
+            # HTTP 200 + choices: null + usage 全 0，不报错但请求没被处理
+            return _FakeResponse(
+                {"model": "m", "choices": None,
+                 "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}}
+            )
+        return _FakeResponse({
+            "model": "m",
+            "choices": [{"message": {"content": "described fine"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 900},
+        })
+
+
+def test_audio_dropped_and_retried_on_empty_response(monkeypatch, jpeg: Path, tmp_path: Path):
+    """模型不认音频时，要自动丢掉音频重试，而不是让整个任务失败。
+
+    实测：DeepSeek-V4.1-Flash 单发图片正常，图片+音频则整个请求失效
+    （HTTP 200 + choices: null）。如果这里直接报错，用户开着
+    VLM_AUDIO_INPUT 就会每次反推都失败，而且看不出原因。
+    """
+    import httpx
+
+    _FakeAsyncClient.calls = []
+    monkeypatch.setattr(httpx, "AsyncClient", _FakeAsyncClient)
+
+    wav = tmp_path / "a.wav"
+    wav.write_bytes(b"RIFF" + b"\x00" * 2048)
+
+    client = VLMClient(api_key="k", base_url="http://x/v1", model="m")
+    text = asyncio.run(client.complete("sys", "usr", images=[jpeg], audio=[wav]))
+
+    assert text == "described fine", "应该丢掉音频后成功，而不是失败"
+    assert len(_FakeAsyncClient.calls) == 2
+    assert _FakeAsyncClient.calls[0]["has_audio"] is True
+    assert _FakeAsyncClient.calls[1]["has_audio"] is False, "重试时必须不带音频"
+
+
+def test_no_audio_means_no_retry(monkeypatch, jpeg: Path):
+    """本来就没带音频时，空响应要正常报错，不能假装能重试。"""
+    import httpx
+
+    class _AlwaysEmpty(_FakeAsyncClient):
+        async def post(self, url, headers=None, json=None):  # noqa: A002
+            return _FakeResponse(
+                {"model": "m", "choices": None, "usage": {"prompt_tokens": 0}}
+            )
+
+    monkeypatch.setattr(httpx, "AsyncClient", _AlwaysEmpty)
+    client = VLMClient(api_key="k", base_url="http://x/v1", model="m")
+    with pytest.raises(VLMError):
+        asyncio.run(client.complete("sys", "usr", images=[jpeg], retries=1))
 
 
 def test_anthropic_payload_uses_image_blocks(jpeg: Path):

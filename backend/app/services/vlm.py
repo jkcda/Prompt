@@ -297,6 +297,19 @@ class VLMClient:
                 data = resp.json()
                 text = self._extract_text(data, self.protocol)
                 if not text:
+                    # 带了音频却拿到空响应 → 很可能这个模型根本不认音频。
+                    # 有些服务不报错，直接返回 HTTP 200 + choices: null + 0 tokens
+                    # （实测 DeepSeek-V4.1-Flash 就是这样：单发图片正常，
+                    # 图片+音频就整个请求失效，连图片都不处理了）。
+                    # 音频只是可选增强，不能因为它一个人把任务打死 ——
+                    # 先丢掉音频重试一次。
+                    if working_audio and not (data.get("choices") or []):
+                        log.warning(
+                            "模型对含音频的请求返回空响应，丢弃 %d 个音频片段后重试"
+                            "（该模型可能不支持音频输入）", len(working_audio)
+                        )
+                        working_audio = []
+                        continue
                     if attempt >= retries:
                         raise VLMError(self._diagnose_empty(data, len(working), len(working_audio)))
                     await asyncio.sleep(2 ** attempt)
