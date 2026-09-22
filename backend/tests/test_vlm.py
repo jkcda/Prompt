@@ -304,6 +304,39 @@ def test_no_audio_means_no_retry(monkeypatch, jpeg: Path):
         asyncio.run(client.complete("sys", "usr", images=[jpeg], retries=1))
 
 
+def test_audio_unsupported_is_remembered_across_clients(monkeypatch, jpeg: Path, tmp_path: Path):
+    """「这个模型不认音频」要跨任务记住，否则每个任务都白跑一次。
+
+    Pass1 的分块是并发发出的，同一批会同时撞墙；而 VLMClient 每个任务
+    新建一次，只记在实例上等于每个任务都要重新踩一遍。
+    """
+    import httpx
+
+    from app.services import vlm as vlm_mod
+
+    vlm_mod._AUDIO_UNSUPPORTED_MODELS.clear()
+    _FakeAsyncClient.calls = []
+    monkeypatch.setattr(httpx, "AsyncClient", _FakeAsyncClient)
+
+    wav = tmp_path / "a.wav"
+    wav.write_bytes(b"RIFF" + b"\x00" * 2048)
+
+    # 第一个客户端：带音频 → 空响应 → 丢音频重试成功
+    c1 = VLMClient(api_key="k", base_url="http://x/v1", model="m")
+    assert asyncio.run(c1.complete("s", "u", images=[jpeg], audio=[wav])) == "described fine"
+    assert [c["has_audio"] for c in _FakeAsyncClient.calls] == [True, False]
+
+    # 第二个客户端（模拟下一个任务）：不该再试音频
+    _FakeAsyncClient.calls = []
+    c2 = VLMClient(api_key="k", base_url="http://x/v1", model="m")
+    assert asyncio.run(c2.complete("s", "u", images=[jpeg], audio=[wav])) == "described fine"
+    assert [c["has_audio"] for c in _FakeAsyncClient.calls] == [False], "又白跑了一次带音频的请求"
+
+    # 不同模型不受影响
+    assert vlm_mod.audio_supported("other-model") is True
+    vlm_mod._AUDIO_UNSUPPORTED_MODELS.clear()
+
+
 def test_anthropic_payload_uses_image_blocks(jpeg: Path):
     client = VLMClient(api_key="k", base_url="http://x/v1", model="m", protocol="anthropic")
     payload = client._anthropic_payload("sys", "usr", [jpeg], 100)

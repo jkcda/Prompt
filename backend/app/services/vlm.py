@@ -57,6 +57,25 @@ def _audio_block(path: Path) -> dict:
     return {"data": base64.b64encode(raw).decode("ascii"), "format": fmt}
 
 
+# 已知不接受音频输入的模型。进程级缓存，跨任务生效。
+#
+# 为什么要跨任务：Pass1 的分块是**并发**发出的，同一批里所有分块会同时
+# 撞上「带音频就返回空」这件事 —— 实例级标记救不了同批。而且 VLMClient
+# 每个任务新建一次，只记在实例上等于每个任务都要重新踩一遍。
+# 记在进程上，第一次踩过之后，后面所有请求都不再附带音频。
+_AUDIO_UNSUPPORTED_MODELS: set[str] = set()
+
+
+def audio_supported(model: str) -> bool:
+    return model not in _AUDIO_UNSUPPORTED_MODELS
+
+
+def mark_audio_unsupported(model: str) -> None:
+    if model not in _AUDIO_UNSUPPORTED_MODELS:
+        _AUDIO_UNSUPPORTED_MODELS.add(model)
+        log.warning("已记录「%s 不支持音频输入」，本次进程内后续请求不再附带音频", model)
+
+
 class VLMClient:
     """带并发限流的视觉模型客户端。"""
 
@@ -76,6 +95,9 @@ class VLMClient:
         self.timeout = timeout or s.vlm_timeout
         self.protocol = protocol
         self._sem = asyncio.Semaphore(max(1, concurrency or s.vlm_concurrency))
+        # 一旦确认这个模型不认音频，后面的请求就别再试了。
+        # 否则长视频每个分块都要「先失败一次再重试」，白白多花一倍请求。
+        self._audio_unsupported = False
 
     # -- 基础可用性 --------------------------------------------------------
 
@@ -272,7 +294,10 @@ class VLMClient:
     ) -> str:
         attempt = 0
         working = list(images)
-        working_audio = list(audio or [])
+        working_audio = (
+            [] if self._audio_unsupported or not audio_supported(self.model)
+            else list(audio or [])
+        )
 
         while True:
             attempt += 1
@@ -306,9 +331,12 @@ class VLMClient:
                     if working_audio and not (data.get("choices") or []):
                         log.warning(
                             "模型对含音频的请求返回空响应，丢弃 %d 个音频片段后重试"
-                            "（该模型可能不支持音频输入）", len(working_audio)
+                            "（该模型可能不支持音频输入，本次任务后续不再附带音频）",
+                            len(working_audio)
                         )
                         working_audio = []
+                        self._audio_unsupported = True
+                        mark_audio_unsupported(self.model)
                         continue
                     if attempt >= retries:
                         raise VLMError(self._diagnose_empty(data, len(working), len(working_audio)))
