@@ -22,7 +22,7 @@ router = APIRouter(prefix="/api", tags=["system"])
 # 允许通过接口写入 .env 的键白名单
 ENV_WHITELIST = {
     "VLM_API_KEY", "VLM_BASE_URL", "VLM_MODEL", "VLM_CONCURRENCY", "VLM_TIMEOUT",
-    "VLM_AUDIO_INPUT", "VLM_MAX_TOKENS",
+    "VLM_AUDIO_INPUT", "VLM_MAX_TOKENS", "VLM_DISABLE_THINKING",
     "ASR_API_KEY", "ASR_BASE_URL", "ASR_MODEL",
     "MAX_TOTAL_FRAMES", "MAX_FRAMES_PER_SHOT", "LONG_SHOT_SECONDS",
     "FRAME_LONG_EDGE", "SCENE_THRESHOLD", "MIN_SHOT_SECONDS",
@@ -89,6 +89,7 @@ async def read_settings(settings: SettingsDep) -> dict[str, Any]:
             "model": settings.vlm_model,
             "concurrency": settings.vlm_concurrency,
             "max_tokens": settings.vlm_max_tokens,
+            "disable_thinking": settings.vlm_disable_thinking,
             "audio_input": settings.vlm_audio_input,
             "api_key_masked": _mask(settings.vlm_api_key),
         },

@@ -87,6 +87,7 @@ class VLMClient:
         timeout: float | None = None,
         concurrency: int | None = None,
         protocol: str = "openai",
+        disable_thinking: bool | None = None,
     ) -> None:
         s = get_settings()
         self.api_key = api_key if api_key is not None else s.vlm_api_key
@@ -98,6 +99,11 @@ class VLMClient:
         # 一旦确认这个模型不认音频，后面的请求就别再试了。
         # 否则长视频每个分块都要「先失败一次再重试」，白白多花一倍请求。
         self._audio_unsupported = False
+        # 关掉推理模型的思考过程。有些服务商不认这个参数会报 400，
+        # 那时置为 False 并摘掉字段重试。
+        self.disable_thinking = (
+            s.vlm_disable_thinking if disable_thinking is None else disable_thinking
+        )
         # complete_many 用：每块失败的具体原因，供调用方组装可操作的报错
         self.last_errors: list[str] = []
 
@@ -128,7 +134,7 @@ class VLMClient:
             content.append({"type": "image_url", "image_url": {"url": _data_uri(img)}})
         for clip in audio or []:
             content.append({"type": "input_audio", "input_audio": _audio_block(clip)})
-        return {
+        payload: dict = {
             "model": self.model,
             "messages": [
                 {"role": "system", "content": system},
@@ -138,6 +144,12 @@ class VLMClient:
             "temperature": 0.2,
             "stream": False,
         }
+        # 推理模型：关掉思考。实测快近 10 倍，而且正文不会被思考挤空。
+        # 用 `enable_thinking` 这个 OpenAI 生态里最常见的名字；
+        # 不支持的模型会 400，调用方会自动摘掉这个字段重试。
+        if self.disable_thinking:
+            payload["enable_thinking"] = False
+        return payload
 
     def _anthropic_payload(
         self,
@@ -378,6 +390,19 @@ class VLMClient:
                 return text
 
             body = resp.text[:600]
+
+            # 服务商不认 enable_thinking 这个字段（各家扩展参数不一致）
+            # → 摘掉它重试。不处理的话，默认开着这个开关会让一部分模型直接不可用。
+            if self.disable_thinking and resp.status_code in (400, 422) and (
+                "enable_thinking" in body
+                or "unknown" in body.lower()
+                or "unexpected" in body.lower()
+                or "unrecognized" in body.lower()
+                or "extra" in body.lower()
+            ):
+                log.info("服务商不认 enable_thinking 参数，摘掉后重试：%s", body[:160])
+                self.disable_thinking = False
+                continue
 
             # 服务商嫌 max_tokens 太大（各家输出上限不同）→ 降档重试。
             # 不处理的话，把上限调大反而会让原本能用的模型全部报错。

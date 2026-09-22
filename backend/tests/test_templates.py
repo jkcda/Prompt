@@ -334,7 +334,7 @@ def test_every_mode_has_exactly_one_default_variant():
 
 
 def test_format_display_reads_naturally():
-    assert format_display("h3-ref") == "H3 模式 · Ref2VA 六段式（带参考素材）"
+    assert format_display("h3-ref") == "H3 模式 · Ref2VA 六段式（格式参考）"
     assert format_display("seedance") == "Seedance 模式 · 六要素中文段"
     # 单变体模式下不重复前缀
     assert format_display("generic") == MODE_LABELS["generic"]
@@ -361,6 +361,36 @@ def test_h3_ref_uses_subject_registry_as_source_of_labels():
     system = build_pass2_system("h3-ref", "en")
     assert "SUBJECT REGISTRY" in system
     assert "do not invent" in system
+
+
+def test_h3_ref_does_not_reference_the_source_video():
+    """Ref2VA 的「参考」是**格式**参考，不是让你参考原视频。
+
+    原视频只用来提取主体 —— 定义成 <Subject N> 供用户自己挂参考图。
+    出现 <Video 1> / <Audio 1> 是错的：那会把生成结果绑死在原片上，
+    而用户要的是「用我自己的参考图生成」。
+    """
+    system = build_pass2_system("h3-ref", "en")
+    assert "FORMAT, not the source video" in system
+    assert "Do NOT define or mention `<Video 1>`" in system
+    assert "Do not add a `<Video 1>` or `<Audio 1>` line" in system
+    assert "no video reference and no audio reference" in system
+    # 只允许在禁令语境里出现这两个标签名
+    assert "supply their OWN reference images" in system
+
+
+def test_h3_ref_retention_analysis_excludes_video_and_audio_lines():
+    system = build_pass2_system("h3-ref", "en")
+    assert "one line per `<Subject N>` label ONLY" in system
+    assert "no video or audio line" in system
+
+
+def test_word_limit_is_700_for_h3_modes():
+    """用户明确要求正文限 700 词以内。"""
+    for fmt in ("h3", "h3-ref"):
+        system = build_pass2_system(fmt, "en")
+        assert "under 700 words" in system, f"{fmt} 缺少 700 词上限"
+        assert "350-500 words" not in system, f"{fmt} 还留着旧的 350-500 限制"
 
 
 def test_seedance_mode_has_no_h3_markup():

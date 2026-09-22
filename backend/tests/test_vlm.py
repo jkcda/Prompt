@@ -482,3 +482,60 @@ def test_explain_empty_observations_marks_empty_chunks():
     msg = _explain_empty_observations(["", ""], ["", ""])
     assert msg.count("（空响应）") == 2
     assert "排查顺序" in msg
+
+
+# ---------------------------------------------------------------------------
+# 关闭思考过程
+# ---------------------------------------------------------------------------
+
+def test_payload_disables_thinking_by_default(jpeg):
+    """推理模型的思考过程对反推是纯浪费，且会挤空正文。
+
+    实测 DeepSeek-V4.1-Flash 6 帧 Pass1：
+      开着思考 -> 236s，思考 53169 字，正文 9053 字
+      关掉思考 -> 15.1s，思考 0 字，正文 6576 字，JSON 照样能解析
+    """
+    client = VLMClient(api_key="k", base_url="http://x/v1", model="m")
+    payload = client._openai_payload("s", "u", [jpeg], 1024)
+    assert payload["enable_thinking"] is False
+
+
+def test_payload_can_keep_thinking_when_asked(jpeg):
+    client = VLMClient(api_key="k", base_url="http://x/v1", model="m",
+                       disable_thinking=False)
+    payload = client._openai_payload("s", "u", [jpeg], 1024)
+    assert "enable_thinking" not in payload
+
+
+def test_thinking_param_dropped_when_provider_rejects_it(monkeypatch, jpeg):
+    """服务商不认 enable_thinking 时要自动摘掉，否则默认开着会让部分模型不可用。"""
+    import httpx
+
+    calls: list[dict] = []
+
+    class _RejectThenOk:
+        def __init__(self, *a, **kw):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def post(self, url, headers=None, json=None):  # noqa: A002
+            calls.append({"has_param": "enable_thinking" in json})
+            if "enable_thinking" in json:
+                return _FakeResponse(
+                    {"error": {"message": "unknown field 'enable_thinking'"}}, status=400
+                )
+            return _FakeResponse({
+                "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+            })
+
+    monkeypatch.setattr(httpx, "AsyncClient", _RejectThenOk)
+    client = VLMClient(api_key="k", base_url="http://x/v1", model="m")
+    assert asyncio.run(client.complete("s", "u", images=[jpeg], retries=2)) == "ok"
+
+    assert calls == [{"has_param": True}, {"has_param": False}]
+    assert client.disable_thinking is False, "记住这个服务商不认，别每次都重试"

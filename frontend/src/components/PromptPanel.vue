@@ -17,7 +17,7 @@ const prompt = computed(() => store.prompt)
 /** 结果里记的 format 优先（历史任务可能不是当前选的模式）。 */
 const activeFormat = computed(() => (store.job?.options.format ?? store.options.format) as string)
 
-/** 「H3 模式 · Ref2VA 六段式（带参考素材）」这样的完整称呼，与历史列表保持一致。 */
+/** 「H3 模式 · Ref2VA 六段式（格式参考）」这样的完整称呼，与历史列表保持一致。 */
 const formatLabel = computed(() => store.labelOfFormat(activeFormat.value))
 
 const wordCount = computed(() => (prompt.value ? prompt.value.split(/\s+/).filter(Boolean).length : 0))

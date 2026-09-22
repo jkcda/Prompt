@@ -294,7 +294,8 @@ T2VA and will be read as literal text.
 - Assign speakers stable IDs `(S1)`, `(S2)` in order of first vocal event. Write dialogue and \
 lyrics as `<d>[Language] the exact words</d>`. When a speaker is on camera, state their mouth \
 movement in the same shot.
-- Length: 350-500 words. Distribute detail by information load, not evenly.
+- **Length: keep the description under 700 words.** Be dense — spend the budget on concrete \
+visual and physical detail, not on restating the style.
 - The description must not end with any closing or resolution marker. It ends on the last \
 described action, mid-flow.
 
@@ -309,8 +310,17 @@ observation report indicates there is no score."""
 
 _PASS2_H3_REF = """{common}
 
-TARGET MODE — MiniMax H3 full-reference (Ref2VA) rewrite. The uploaded video is the single \
-reference asset, labelled `<Video 1>`; if its audio is actually reused, that track is `<Audio 1>`.
+TARGET MODE — MiniMax H3 full-reference (Ref2VA) FORMAT. "Reference" here means the prompt \
+FORMAT, not the source video. The source video is only being MINED for content — it is NOT a \
+reference asset and must NOT be cited as one.
+
+That means:
+- Do NOT define or mention `<Video 1>` or `<Audio 1>`. There is no video reference and no audio \
+reference in this task.
+- The `<Subject N>` labels are the reusable content you extracted from the footage (people, \
+wardrobe, props, environments, the look). The user will supply their OWN reference images for \
+these labels when generating, so each definition must be self-contained enough to identify the \
+thing from the text alone.
 
 A SUBJECT REGISTRY is provided in the user message: it lists every subject the observer found, \
 with the shots each one appears in. Use it as the authoritative source for labels — do not invent \
@@ -328,24 +338,24 @@ non_diegetic_music:
 
 Rules:
 - `subject_definitions`: one line per registry entry, numbered in registry order as `<Subject 1>`, \
-`<Subject 2>`, ... Each line states what the label denotes, its reference role, and the features \
-that must be followed. Registry entries whose `kind` is `style` should be defined as the look and \
-grade to carry across, not as an object. Always define `<Video 1>` as the source video. Define \
-`<Audio 1>` only if its audio is actually reused.
+`<Subject 2>`, ... Each line states what the label denotes and the features that must be followed. \
+Registry entries whose `kind` is `style` should be defined as the look and grade to carry across, \
+not as an object. Do not add a `<Video 1>` or `<Audio 1>` line.
 - `summary`: one short paragraph beginning with a bracketed task-type prefix, e.g. \
-`[video continuation + reference generation]` or `[reference generation + audio reference]`. \
-Do not introduce new labels here.
-- `retention_analysis`: one line per label, using the fixed markers — visible content: \
-`fully_preserved` / `partially_preserved` / `attribute_transfer` / `weak_reference`; audio: \
-`fully_copy` / `partially_copy` / `reference` / `weak_reference`. Format: \
-`<Subject 1> (appears in [Shot 1], [Shot 3]): fully_preserved - ...` and take the shot list \
-verbatim from the registry entry for that subject. Only `<Video 1>` may be `weak_reference` — \
-every subject the registry actually tracked must be `fully_preserved` or `partially_preserved` \
-unless the observation report says its appearance changes.
+`[reference generation]` or `[reference generation + style transfer]`. Do not introduce new \
+labels here, and do not describe the source clip as a reference.
+- `retention_analysis`: one line per `<Subject N>` label ONLY — no video or audio line. Use the \
+fixed markers: `fully_preserved` / `partially_preserved` / `attribute_transfer` / \
+`weak_reference`. Format: `<Subject 1> (appears in [Shot 1], [Shot 3]): fully_preserved - ...` \
+and take the shot list verbatim from the registry entry for that subject. Every subject the \
+registry actually tracked must be `fully_preserved` or `partially_preserved` unless the \
+observation report says its appearance changes.
 - `detailed_description`: the main body. One or two sentences of style before `[Shot 1]`. Then \
-`[Shot 1]` with no timestamp, and `[Shot N] At MM:SS.mmm, ...` for later shots. Insert reference \
+`[Shot 1]` with no timestamp, and `[Shot N] At MM:SS.mmm, ...` for later shots. Insert subject \
 labels at first appearance and wherever their role applies. Speakers use `(Sx)` and dialogue uses \
-`<d>[Language] ...</d>`. 350-500 words.
+`<d>[Language] ...</d>`.
+- **Length: keep `detailed_description` under 700 words.** Be dense — spend the budget on \
+concrete visual and physical detail, not on restating the style.
 - `overall_soundscape` / `non_diegetic_music`: ambience and physical sound vs. audience-only \
 score. Write `N/A` when a category is absent. Never repeat dialogue here."""
 
@@ -459,18 +469,19 @@ _PASS2_BY_FORMAT = {
 
 FORMAT_LABELS = {
     "h3": "T2VA 三字段（从零生成）",
-    "h3-ref": "Ref2VA 六段式（带参考素材）",
+    "h3-ref": "Ref2VA 六段式（格式参考）",
     "seedance": "六要素中文段",
     "generic": "通用分镜表",
 }
 
 FORMAT_NOTES = {
-    "h3": "手里没有参考图、纯靠文字从零生成时用。三个字段："
-          "integrated_multimodal_description / overall_soundscape / non_diegetic_music，"
-          "带 [Shot N] 切点时间戳，不出现任何参考标签。",
-    "h3-ref": "要拿这段视频当参考素材继续改时用。六段式：subject_definitions / summary / "
-              "retention_analysis / detailed_description / overall_soundscape / "
-              "non_diegetic_music，把上传的视频作为 <Video 1>，并按主体登记表逐个写保留等级。",
+    "h3": "三字段：integrated_multimodal_description / overall_soundscape / "
+          "non_diegetic_music，带 [Shot N] 切点时间戳，不出现任何参考标签。",
+    "h3-ref": "六段式：subject_definitions / summary / retention_analysis / "
+              "detailed_description / overall_soundscape / non_diegetic_music。"
+              "这里的「参考」指的是**格式**，不是让你参考原视频 —— "
+              "原视频只用来提取主体，会定义成 <Subject N> 供你自己挂参考图；"
+              "不会出现 <Video 1> / <Audio 1>。",
     "seedance": "Seedance 2.0 / 即梦。中文连贯段落，按 主体→动作→环境→风格→镜头→声音 顺序，"
                 "不用字段名，镜头节拍覆盖全部镜头，末尾附负面指令。",
     "generic": "工具无关的分镜脚本，含整体风格、逐镜分镜表、声音设计、负面提示词。",

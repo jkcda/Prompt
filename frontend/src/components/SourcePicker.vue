@@ -178,7 +178,7 @@ function onDragLeave() {
           </button>
         </div>
 
-        <!-- H3 有两个变体：有没有参考素材，写法完全不同，所以必须显式选 -->
+        <!-- H3 有两个变体：T2VA 要自洽、Ref2VA 要出参考标签，写法不同，必须显式选 -->
         <div v-if="store.currentVariants.length > 1" class="variants">
           <button
             v-for="v in store.currentVariants"

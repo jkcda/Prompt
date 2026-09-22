@@ -59,6 +59,13 @@ class Settings(BaseSettings):
     # 看起来像不支持图片，其实只是预算不够。
     # 这只是上限，非推理模型提前结束不会多花钱。
     vlm_max_tokens: int = 16384
+    # 关掉推理模型的思考过程（DeepSeek-V4.x / Qwen3 这类）。
+    # 实测 DeepSeek-V4.1-Flash：开着思考 88s / 思考 24871 字 / 正文 0 字；
+    # 关掉后 9.9s / 思考 0 字 / 正文 490 字 —— 快近 10 倍，而且正文不再被挤掉。
+    # 反推要的是「照结构填内容」，不是解数学题，思考过程基本是浪费。
+    # 参数名用 OpenAI 生态里最常见的 `enable_thinking`；不支持的模型会报 400，
+    # 代码会自动摘掉这个参数重试，所以默认开着是安全的。
+    vlm_disable_thinking: bool = True
     # 把音频片段直接附给模型（OpenAI 的 input_audio 内容块）。
     # 默认关：能收音频的模型很少，很多「多模态」模型只支持图片，
     # 开了但模型不支持会返回 choices:null（代码会明确报出来）。
