@@ -337,7 +337,10 @@ python -m app.selfcheck path/to/video.mp4
 | `VLM_API_KEY` | — | **必填** |
 | `VLM_BASE_URL` | `https://api-inference.modelscope.cn/v1` | 兼容 OpenAI 格式的服务地址 |
 | `VLM_MODEL` | `Qwen/Qwen2.5-VL-72B-Instruct` | 必须支持视觉输入 |
+| 变量 | 默认值 | 说明 |
+|---|---|---|
 | `VLM_CONCURRENCY` | `3` | Pass1 分块并行数 |
+| `VLM_AUDIO_INPUT` | `false` | 把音频直接附给模型。**能收音频的模型很少**，见 [音频维度](#音频维度三条路能力不同) |
 | `VLM_TIMEOUT` | `180` | 单次请求超时（秒） |
 
 ### 抽帧预算（质量与成本的主要旋钮）
@@ -379,8 +382,66 @@ python -m app.selfcheck path/to/video.mp4
 |---|---|
 | `ASR_BASE_URL` / `ASR_API_KEY` / `ASR_MODEL` | 任意 OpenAI 兼容的 `/audio/transcriptions` |
 
-留空则跳过音频维度。也可以装 `pip install -e ".[local-asr]"` 用本地 faster-whisper，
+留空则跳过语音识别。也可以装 `pip install -e ".[local-asr]"` 用本地 faster-whisper，
 代码会优先走本地。
+
+**但要反推有台词/唱歌的视频，ASR 基本是必需的** —— 画面帧推不出逐字台词和口型，
+而 H3 的 `<d>[Language] ...</d>` 要求原文逐字。没有 ASR 时这些字段只能是 `N/A`。
+
+### 音频维度：三条路，能力不同
+
+很多人以为「多模态模型能传音频」，这个说法对了一半。实际上音频有三条路，
+它们解决的问题**不一样**：
+
+| 路径 | 给你什么 | 能填的字段 |
+|---|---|---|
+| **ASR**（`ASR_*`） | 逐句时间戳 + 逐字原文 | 台词、口型对齐、`<d>` 段落 |
+| **模型听音频**（`VLM_AUDIO_INPUT`） | 一段听觉描述 | `overall_soundscape`、`non_diegetic_music` |
+| **频谱实测**（永远可用，无需配置） | 频段能量分布 | 倾向性描述，如「疑似有节奏性音乐编排」 |
+
+**三条不能互相替代。** ASR 给文字但不告诉你有没有鼓；模型听能给描述但给不出逐字原文。
+
+#### 频谱实测（不配任何东西就有）
+
+没配 ASR 时音频维度**不会只剩 N/A**。ffmpeg 会测两个频段的相对能量：
+
+- 语音频段 300–3400Hz 相对能量 → 能量是否集中在人声频段
+- 低频 <200Hz 相对能量 → 是否疑似有节奏性音乐编排
+
+实测校准：
+
+| 素材 | 语音频段 | 低频 | 解读 |
+|---|---|---|---|
+| 流行 MV（人声+配器） | -5.6dB | -4.3dB | 混有配器 + 疑似有节奏性音乐编排 |
+| 纯 440Hz 正弦 | -1.7dB | -27.7dB | 窄带音调，低频很弱 |
+
+两个坑记在这：
+
+1. **滤波链要串两遍。** ffmpeg 的 highpass/lowpass 是单极点 6dB/oct，太缓 ——
+   单极点 `lowpass=f=200` 挡不住 440Hz，纯正弦的低频相对能量实测 -13.8dB
+   （明显是泄漏，会误判成「有中等低频」）；串两遍 12dB/oct 后降到 -27.7dB。
+2. **频谱分不出人声和窄带音调。** 纯 440Hz 正弦的语音频段能量（-1.7dB）和说话一样高。
+   所以措辞只能停在「能量高度集中在该频段」，**不能写「疑似以人声为主」**。
+
+#### 模型听音频（`VLM_AUDIO_INPUT`，默认关）
+
+协议上走 OpenAI 的 `input_audio` 内容块，音频以 base64 附带（单声道 16kHz，60 秒约 1.8MB）。
+
+⚠️ **能收音频的模型很少。** 很多「多模态」模型只支持图片。2026-09 实测：
+
+| 模型 | 结果 |
+|---|---|
+| `Qwen/Qwen3.5-27B` | ❌ `choices` 空 —— 静默忽略音频 |
+| `Qwen/Qwen3-Omni-30B-A3B-Instruct` | ❌ `has no provider supported` |
+| `Qwen/Qwen2.5-Omni-7B` | ❌ 同上 |
+| `Qwen/Qwen2-Audio-7B-Instruct` | ❌ 同上 |
+
+`has no provider supported` = 模型在目录里有，但该账号下没部署推理服务。
+**目录里有 ≠ 你能用。** 换到确实能听的模型（Gemini / GPT-4o-audio / 其他平台的
+Qwen-Omni）再把这个开关打开。
+
+开了但模型不支持会返回 `choices: null`，代码会明确报出来并提示关掉这个开关。
+音频只是增强：模型明确拒绝时会先丢音频重试，不会因为它一个人把整个任务打死。
 
 ### 抓取（可选）
 
@@ -529,7 +590,7 @@ YTDLP_FORMAT=bv*[height<=720][ext=mp4]+ba[ext=m4a]/bv*[height<=720]+ba/b[height<
 
 ```bash
 cd backend
-pytest                    # 全部 161 个
+pytest                    # 全部 180 个
 pytest -q tests/test_selection.py     # 只跑选帧策略
 pytest -q tests/test_pipeline_e2e.py  # 只跑端到端
 ruff check app tests                  # 静态检查
@@ -540,10 +601,10 @@ ruff check app tests                  # 静态检查
 | 文件 | 数量 | 覆盖内容 |
 |---|---|---|
 | `test_selection.py` | 13 | 预算不超、每镜保底、超预算时均匀降采样、长镜头优先、时间有序 |
-| `test_ffmpeg.py` | 22 | 真实视频跑探测 / 场景检测 / 抽帧 / 缩放 / 音频 / 切分 |
-| `test_templates.py` | 32 | Pass1 JSON 宽容解析（围栏 / 前后缀 / 尾随逗号 / 垃圾输入）、多块镜号重排、主体登记表解析与跨块合并、两种模式的模板硬约束、占位符替换干净 |
+| `test_ffmpeg.py` | 27 | 真实视频跑探测 / 场景检测 / 抽帧 / 缩放 / 音频 / 切分 / **频段能量** / **音频片段抽取** |
+| `test_templates.py` | 41 | Pass1 JSON 宽容解析（围栏 / 前后缀 / 尾随逗号 / 垃圾输入）、多块镜号重排、主体登记表解析与跨块合并、两种模式的模板硬约束、占位符替换干净、**音频未知时的编造禁令**、**频谱描述的措辞边界** |
 | `test_downloader.py` | 24 | 中文分享文案取链接、平台识别、aweme_id、yt-dlp 选项（**含 `ffmpeg_location` 回归**）、清晰度封顶、失败原因上传 |
-| `test_vlm.py` | 20 | 请求体构造（data URI / Anthropic 块）、响应解析（含 `choices: null`）、**空响应原因诊断**、base_url 带不带 `/v1` 都能用 |
+| `test_vlm.py` | 28 | 请求体构造（data URI / Anthropic 块 / **`input_audio` 音频块**）、响应解析（含 `choices: null`）、**空响应原因诊断**、音频格式白名单与体积上限、base_url 带不带 `/v1` 都能用 |
 | `test_api.py` | 26 | 接口契约、模式分组、上传校验、Range 流、SQLite 往返、缺列自愈、提示词库 |
 | `test_pipeline_e2e.py` | 15 | **完整管线**：帧数对齐、预算生效、四种格式、主体登记表贯通到 Pass2、模式不串味、进度事件、分块、无 key 报错 |
 
@@ -598,7 +659,7 @@ fastapi dev
 | **真实模型端到端** | `Qwen/Qwen3.5-27B`，10s 测试图案 | 112 秒出完整六段式 Ref2VA，结构、时间戳格式、retention 标记全对 |
 | 前端构建 | `vue-tsc + vite build` | 通过，112 模块 |
 | 静态检查 | `ruff check app tests` | 通过 |
-| 测试 | — | **161 passed** |
+| 测试 | — | **180 passed** |
 
 **模型真的在看图**：喂 SMPTE 彩条帧，它正确识别出彩条布局，并读出了画面里的
 实际数字（6.0s 那帧是 `'6'`，9.5s 是 `'9'`）。
@@ -668,9 +729,16 @@ fastapi dev
 11. **「未知」要显式标注为未知，并禁止推测。** 只写中性陈述（「未获得文本内容」）
     等于留白，模型一定会去填。实测 `enable_asr=False` 时，模型照着画面编出了
     「电子提示音与数字跳变同步」并标成 `fully_copy`——听起来完全合理，但全是假的。
-    现在音频未转写时会明确写「音频内容对你完全未知」+ 逐条禁令，
-    并在绝对规则里堵住「似乎/仿佛」这类模糊措辞。三处都要堵，缺一处就漏。
+    已实测出**三条**编造路径，每条都要单独堵：① 未知维度被留白；② 测量数据被越权解读
+    （「能量集中语音频段」→「有人在唱歌」）；③ **视觉事件被转成声音事件**
+    （看到走路写 `footsteps`、看到衣料写 `cloth rustle`）。
+    第三条最隐蔽——它不是凭空编，而是「合理地推」，推的正是未知的那个维度，
+    所以规则里必须点出具体反例，抽象禁令拦不住。
 
 12. **排他性运动禁令两阶段都要写。** Pass2 早就禁止「the only motion is X」，
     但 Pass1 没有——而 Pass1 的 `global_notes` 会原样喂进 Pass2。
     只堵一处等于没堵。
+
+13. **音频三条路不能互相替代。** ASR 给逐句时间戳 + 逐字原文；
+    模型听给一段描述；频谱实测给能量分布。目标格式要求台词逐字原文，描述做不到；
+    ASR 给文字但不会告诉你有没有鼓。所以三个都要留，各自填不同的字段。
