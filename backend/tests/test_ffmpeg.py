@@ -254,3 +254,90 @@ def test_frame_dir_for_creates_dir():
     d = ff.frame_dir_for("testjob")
     assert d.is_dir()
     ff.cleanup(d)
+
+
+# ---------------------------------------------------------------------------
+# 自适应镜头检测
+# ---------------------------------------------------------------------------
+
+def test_adaptive_no_retry_for_normal_cutting(sample_video: Path):
+    """正常剪辑（平均镜头 3 秒左右）不该触发重试。"""
+    info = ff.probe(sample_video)
+    shots, cuts, th, note = ff.detect_shots_adaptive(sample_video, info.duration)
+    assert len(shots) >= 2
+    assert note == "", "正常视频不该触发自适应"
+    assert th == ff.get_settings().scene_threshold
+    assert cuts >= 1
+
+
+def test_adaptive_skips_short_videos(sample_video: Path):
+    """短于 8 秒不重试 —— 短视频本来就可能只有一个镜头。"""
+    shots, _, _, note = ff.detect_shots_adaptive(sample_video, 5.0)
+    assert note == ""
+
+
+def test_adaptive_retries_when_detection_is_coarse(monkeypatch, sample_video: Path):
+    """平均镜头长度异常长 = 疑似漏检，要降阈值重试。
+
+    实测：13.3s 特效视频在阈值 0.30 下只检出 1 个切点（2 镜头，平均 6.7s），
+    降到 0.15 检出 10 个切点（4 镜头）—— 抽帧从 6 张变成 12 张。
+    """
+    calls: list[float] = []
+
+    def fake_detect(src, threshold=None, max_duration=None):
+        calls.append(threshold)
+        if threshold == 0.30:
+            return [8.27]                      # 只检出 1 个切点
+        return [4.60, 5.43, 7.93, 8.27, 11.20, 12.73]   # 降阈值后检出更多
+
+    monkeypatch.setattr(ff, "detect_scene_cuts", fake_detect)
+    shots, cuts, th, note = ff.detect_shots_adaptive(
+        sample_video, 13.33, threshold=0.30, min_shot_seconds=0.8
+    )
+
+    assert calls == [0.30, 0.15], "应该用配置阈值检一次，再降一半重试"
+    assert len(shots) > 2, "应该采用重试结果"
+    assert th == 0.15
+    assert "自适应" in note
+
+
+def test_adaptive_keeps_original_when_retry_is_not_better(monkeypatch, sample_video: Path):
+    """重试结果没有明显更多时，保留原结果 —— 降阈值容易引入噪声切点。"""
+    def fake_detect(src, threshold=None, max_duration=None):
+        if threshold == 0.30:
+            return [8.27]
+        return [8.27, 8.30]   # 多了一个但没到 1.5 倍
+
+    monkeypatch.setattr(ff, "detect_scene_cuts", fake_detect)
+    shots, cuts, th, note = ff.detect_shots_adaptive(
+        sample_video, 13.33, threshold=0.30, min_shot_seconds=0.8
+    )
+    assert note == "", "不该为噪声抖动换结果"
+    assert th == 0.30
+
+
+def test_adaptive_handles_no_cuts_at_all(monkeypatch, sample_video: Path):
+    """纯色/测试图案类视频没有切点，要返回空而不是崩。"""
+    monkeypatch.setattr(ff, "detect_scene_cuts", lambda *a, **kw: [])
+    shots, cuts, th, note = ff.detect_shots_adaptive(sample_video, 10.0)
+    assert shots == []
+    assert cuts == 0
+    assert note == ""
+
+
+def test_adaptive_min_shot_raised_on_retry(monkeypatch, sample_video: Path):
+    """降阈值重试时最短镜头时长要提到 1.0s，用来滤掉噪声切点。"""
+    seen: list[float] = []
+    real = ff.cuts_to_shots
+
+    def spy(cuts, duration, min_shot_seconds=None):
+        seen.append(min_shot_seconds)
+        return real(cuts, duration, min_shot_seconds)
+
+    monkeypatch.setattr(ff, "cuts_to_shots", spy)
+    monkeypatch.setattr(ff, "detect_scene_cuts",
+                        lambda *a, **kw: [8.27] if kw.get("threshold") == 0.30
+                        else [4.6, 5.4, 7.9, 8.3, 11.2, 12.7])
+    ff.detect_shots_adaptive(sample_video, 13.33, threshold=0.30, min_shot_seconds=0.5)
+    assert seen[0] == 0.5
+    assert seen[1] >= 1.0, "重试时应该收紧最短镜头时长"

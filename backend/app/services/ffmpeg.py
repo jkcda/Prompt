@@ -261,6 +261,71 @@ def uniform_shots(duration: float, target_count: int) -> list[tuple[float, float
     return [(i * step, min((i + 1) * step, duration)) for i in range(count)]
 
 
+# 平均镜头长度超过这个值，就怀疑是漏检了
+_COARSE_AVG_SHOT = 6.0
+# 降阈值重试时用的倍率（相对配置阈值）
+_ADAPTIVE_FACTORS = (0.5,)
+# 降阈值时最短镜头时长的下限，用来抑制噪声切点
+_ADAPTIVE_MIN_SHOT = 1.0
+
+
+def detect_shots_adaptive(
+    src: str | Path,
+    duration: float,
+    threshold: float | None = None,
+    min_shot_seconds: float | None = None,
+) -> tuple[list[tuple[float, float]], int, float, str]:
+    """自适应镜头检测。返回 (镜头列表, 切点数, 实际用的阈值, 说明)。
+
+    为什么不能只用固定阈值：高阈值对**硬切**很准，但会漏掉**渐变转场**。
+    VFX / 特效类内容（能量爆发、闪白、溶解、粒子过渡）大量使用软转场。
+    实测一段 13.3 秒的特效视频：
+
+        阈值 0.30（默认）→ 只检出 1 个切点，2 个镜头 → 只抽到 6 帧
+        阈值 0.20       → 6 个切点，3 个镜头
+        阈值 0.15       → 10 个切点，4 个镜头 → 抽到 12 帧
+
+    镜头少 → 抽帧少 → 模型看到的信息就少，反推质量直接受影响。
+    而漏检的特征很好认：**平均镜头长度异常长**。
+
+    策略：先按配置阈值检一次；如果平均镜头长度超过 6 秒且视频不短于 8 秒
+    （正常剪辑不会这样），就降一半阈值重试一次，同时把最短镜头时长提到
+    1.0 秒 —— 降阈值会引入噪声切点，收紧最短时长把它们滤掉。
+    只有当重试结果**明显更多**（至少 1.5 倍）时才采用，避免为噪声抖动买单。
+
+    返回空镜头列表是正常的（纯色/测试图案类视频本来就没有切换），
+    由调用方决定是否退化为均匀分镜。
+    """
+    s = get_settings()
+    threshold = s.scene_threshold if threshold is None else threshold
+    min_shot_seconds = s.min_shot_seconds if min_shot_seconds is None else min_shot_seconds
+
+    cuts = detect_scene_cuts(src, threshold=threshold, max_duration=duration)
+    shots = cuts_to_shots(cuts, duration, min_shot_seconds) if cuts else []
+    best = (shots, len(cuts), threshold, "")
+
+    avg = (duration / len(shots)) if shots else duration
+    suspicious = duration >= 8.0 and (not shots or avg > _COARSE_AVG_SHOT)
+    if not suspicious:
+        return best
+
+    for factor in _ADAPTIVE_FACTORS:
+        alt_th = round(threshold * factor, 4)
+        alt_min = max(min_shot_seconds, _ADAPTIVE_MIN_SHOT)
+        alt_cuts = detect_scene_cuts(src, threshold=alt_th, max_duration=duration)
+        alt = cuts_to_shots(alt_cuts, duration, alt_min) if alt_cuts else []
+
+        # 必须明显更多才换，否则宁可用原结果（降阈值容易引入噪声切点）
+        if len(alt) >= max(2, int(len(shots) * 1.5)):
+            log.info(
+                "镜头检测偏粗（平均 %.1fs / %d 个镜头），阈值 %.2f → %.2f 重检出 %d 个镜头",
+                avg, len(shots), threshold, alt_th, len(alt),
+            )
+            return alt, len(alt_cuts), alt_th, f"自适应：阈值 {threshold:.2f} → {alt_th:.2f}"
+
+    return best
+
+
 # ---------------------------------------------------------------------------
 # 抽帧
 # ---------------------------------------------------------------------------

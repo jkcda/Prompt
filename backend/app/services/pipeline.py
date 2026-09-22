@@ -83,13 +83,13 @@ async def run_pipeline(job: Job, video_path: Path) -> JobResult:
     await step("scenes", 8, "检测镜头切换点")
 
     scene_task = asyncio.create_task(asyncio.to_thread(
-        _safe_scene_detect, video_path, s.scene_threshold, eff_duration
+        _safe_detect_shots, video_path, eff_duration, s.scene_threshold, s.min_shot_seconds
     ))
     audio_task = asyncio.create_task(asyncio.to_thread(
         _safe_audio, video_path, opts.enable_asr
     ))
 
-    cuts = await scene_task
+    raw_shots, cut_count, used_threshold, adaptive_note = await scene_task
     store.raise_if_cancelled(job_id)
     await step("audio", 20, "转写语音与音量分析")
 
@@ -97,17 +97,17 @@ async def run_pipeline(job: Job, video_path: Path) -> JobResult:
     store.raise_if_cancelled(job_id)
 
     # ---------------- 3. 镜头切分 ----------------
-    if opts.enable_scene_split and cuts:
-        raw_shots = ff.cuts_to_shots(cuts, eff_duration, s.min_shot_seconds)
-    else:
+    if not opts.enable_scene_split:
         raw_shots = []
+    elif adaptive_note:
+        log.info("镜头检测：%s", adaptive_note)
 
     if len(raw_shots) < 2:
-        # 没有明显切换（单镜头 / 长镜头访谈）→ 退化为均匀逻辑镜头，
+        # 没有明显切换（单镜头 / 长镜头访谈 / 纯色测试图案）→ 退化为均匀逻辑镜头，
         # 否则整段只能抽到 1~3 帧，信息量不足。
         target = max(2, min(12, int(eff_duration / 4) or 2))
         raw_shots = ff.uniform_shots(eff_duration, target)
-        log.info("未检测到场景切换，退化为 %d 个均匀逻辑镜头", len(raw_shots))
+        log.info("未检测到足够的场景切换，退化为 %d 个均匀逻辑镜头", len(raw_shots))
 
     shots = [Shot(index=i, start=a, end=b) for i, (a, b) in enumerate(raw_shots)]
 
@@ -295,7 +295,9 @@ async def run_pipeline(job: Job, video_path: Path) -> JobResult:
             "shots": len(shots),
             "frames": total_frames,
             "chunks": total_chunks,
-            "scene_cuts": len(cuts),
+            "scene_cuts": cut_count,
+            "scene_threshold": used_threshold,
+            "scene_adaptive": adaptive_note or "",
             "subjects": len(subjects),
             "est_tokens": selection.estimate_tokens(total_frames),
             "format": opts.format,
@@ -352,12 +354,17 @@ def _explain_empty_observations(raw_outputs: list[str], errors: list[str]) -> st
     return "\n".join(lines)
 
 
-def _safe_scene_detect(path: Path, threshold: float, duration: float) -> list[float]:
+def _safe_detect_shots(
+    path: Path, duration: float, threshold: float, min_shot_seconds: float
+) -> tuple[list[tuple[float, float]], int, float, str]:
+    """自适应镜头检测，失败时返回空（由调用方退化为均匀分镜）。"""
     try:
-        return ff.detect_scene_cuts(path, threshold=threshold, max_duration=duration)
+        return ff.detect_shots_adaptive(
+            path, duration, threshold=threshold, min_shot_seconds=min_shot_seconds
+        )
     except Exception as exc:  # noqa: BLE001
         log.warning("场景检测失败，将退化为均匀分镜: %s", exc)
-        return []
+        return [], 0, threshold, ""
 
 
 def _safe_audio(path: Path, enable_asr: bool) -> AudioReport:
