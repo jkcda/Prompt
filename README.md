@@ -376,7 +376,35 @@ python -m app.selfcheck path/to/video.mp4
 | `VLM_MODEL` | `Qwen/Qwen3.5-27B` | 必须支持视觉输入，见上面的测试方法 |
 | `VLM_CONCURRENCY` | `3` | Pass1 分块并行数 |
 | `VLM_AUDIO_INPUT` | `false` | 把音频直接附给模型。**能收音频的模型很少**，见 [音频维度](#音频维度三条路能力不同) |
+| `VLM_MAX_TOKENS` | `16384` | 单次回复上限。**推理模型必须给大**，见下 |
+| `VLM_DISABLE_THINKING` | `true` | 关掉推理模型的思考过程，见下 |
 | `VLM_TIMEOUT` | `180` | 单次请求超时（秒） |
+
+#### 推理模型：关掉思考，并把上限给足
+
+反推是「照结构填内容」，不是解题 —— 推理模型的思考过程对这类任务基本是浪费，
+而且会**把 token 预算吃光导致正文为空**。
+
+实测 `deepseek-ai/DeepSeek-V4.1-Flash` 跑 6 帧 Pass1：
+
+| 设置 | 耗时 | 思考过程 | 正文 | JSON 解析 |
+|---|---|---|---|---|
+| 开思考 + 6144 | 88s | 24871 字 | **0 字** | ❌ |
+| 开思考 + 16384 | 236s | 53169 字 | 9053 字 | ✅ |
+| **关思考 + 16384** | **15s** | 0 字 | 6576 字 | ✅ |
+
+端到端（13.3s 视频）：**205.7s → 64.3s**。
+
+**参数名各家不一样，必须实测。** 四种里只有一种有效：
+
+| 参数 | 结果 |
+|---|---|
+| **`enable_thinking: false`（顶层）** | ✅ 有效 |
+| `chat_template_kwargs.enable_thinking=false` | ✅ 也有效 |
+| `thinking: false` | ❌ 返回空正文 |
+| `chat_template_kwargs.thinking=false` | ❌ 仍在思考 |
+
+默认开着是安全的 —— 服务商不认这个字段会报 400，代码会自动摘掉重试。
 
 ### 抽帧预算（质量与成本的主要旋钮）
 
@@ -627,7 +655,7 @@ YTDLP_FORMAT=bv*[height<=720][ext=mp4]+ba[ext=m4a]/bv*[height<=720]+ba/b[height<
 
 ```bash
 cd backend
-pytest                    # 全部 190 个
+pytest                    # 全部 220 个
 pytest -q tests/test_selection.py     # 只跑选帧策略
 pytest -q tests/test_pipeline_e2e.py  # 只跑端到端
 ruff check app tests                  # 静态检查
@@ -696,7 +724,7 @@ fastapi dev
 | **真实模型端到端** | `Qwen/Qwen3.5-27B`，10s 测试图案 | 112 秒出完整六段式 Ref2VA，结构、时间戳格式、retention 标记全对 |
 | 前端构建 | `vue-tsc + vite build` | 通过，112 模块 |
 | 静态检查 | `ruff check app tests` | 通过 |
-| 测试 | — | **190 passed** |
+| 测试 | — | **220 passed** |
 
 **模型真的在看图**：喂 SMPTE 彩条帧，它正确识别出彩条布局，并读出了画面里的
 实际数字（6.0s 那帧是 `'6'`，9.5s 是 `'9'`）。
