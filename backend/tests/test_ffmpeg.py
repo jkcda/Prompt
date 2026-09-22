@@ -358,20 +358,3 @@ def test_selfcheck_uses_the_same_shot_detection_as_the_pipeline():
     assert "detect_scene_cuts" not in src, "自检还在直接用固定阈值"
     # 选帧也要传 frame_interval，否则帧数和管线对不上
     assert "frame_interval=s.frame_interval_seconds" in src
-
-
-def test_selfcheck_uses_the_same_shot_detection_as_the_pipeline():
-    """自检脚本必须和真实管线走同一条路径。
-
-    踩过：自检用固定阈值检出 2 个镜头，管线因为自适应检出 4 个 ——
-    用户照自检结果调参会调错方向。诊断工具和实际行为不一致比没有更糟。
-    """
-    import inspect
-
-    from app import selfcheck
-
-    src = inspect.getsource(selfcheck)
-    assert "detect_shots_adaptive" in src, "自检没走自适应检测，结果会和管线不一致"
-    assert "detect_scene_cuts" not in src, "自检还在直接用固定阈值"
-    # 选帧也要传 frame_interval，否则帧数和管线对不上
-    assert "frame_interval=s.frame_interval_seconds" in src
