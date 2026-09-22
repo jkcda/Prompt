@@ -98,6 +98,8 @@ class VLMClient:
         # 一旦确认这个模型不认音频，后面的请求就别再试了。
         # 否则长视频每个分块都要「先失败一次再重试」，白白多花一倍请求。
         self._audio_unsupported = False
+        # complete_many 用：每块失败的具体原因，供调用方组装可操作的报错
+        self.last_errors: list[str] = []
 
     # -- 基础可用性 --------------------------------------------------------
 
@@ -203,6 +205,19 @@ class VLMClient:
         return ""
 
     @staticmethod
+    def _reasoning_len(payload: dict) -> int:
+        """取推理模型的思考过程长度（不同服务商字段名不一样）。"""
+        choices = payload.get("choices") or []
+        if not choices:
+            return 0
+        msg = choices[0].get("message") or {}
+        for key in ("reasoning_content", "reasoning", "thinking"):
+            val = msg.get(key)
+            if isinstance(val, str) and val:
+                return len(val)
+        return 0
+
+    @staticmethod
     def _diagnose_empty(payload: dict, n_images: int, n_audio: int = 0) -> str:
         """HTTP 200 但内容为空时，把原因说清楚。
 
@@ -250,9 +265,27 @@ class VLMClient:
             if reason == "content_filter":
                 return f"模型 {model} 的内容过滤拦截了本次请求（finish_reason=content_filter）"
             if reason == "length":
+                rlen = VLMClient._reasoning_len(payload)
+                usage = payload.get("usage") or {}
+                if rlen:
+                    # 这是最容易被误判的情形：模型明明在正常工作（思考过程写了一大段），
+                    # 但 token 预算全被思考吃掉，正文一个字没写。
+                    # 报成「不支持图片」会把排查方向带偏。
+                    return (
+                        f"模型 {model} 是推理模型，思考过程占满了 token 预算，"
+                        f"正文没写出来就被截断了。\n"
+                        f"  思考过程长度：{rlen} 字符；本次完成 token："
+                        f"{usage.get('completion_tokens')}（正好等于上限）。\n"
+                        f"  这**不是**模型不支持图片——它确实在处理输入。\n"
+                        f"  处理办法（任选其一）：\n"
+                        f"    1) 调大 VLM_MAX_TOKENS（当前上限见 /api/settings），"
+                        f"实测 6 张图约需 16384；\n"
+                        f"    2) 换非推理模型（如 Qwen/Qwen3.5-27B），快很多；\n"
+                        f"    3) 减少抽帧数（MAX_TOTAL_FRAMES），输入越短思考越短。"
+                    )
                 return (
                     f"模型 {model} 的输出被 max_tokens 截断（finish_reason=length）。"
-                    "调大 max_tokens 或减少输入帧数。"
+                    "调大 VLM_MAX_TOKENS 或减少输入帧数。"
                 )
             if reason:
                 return f"模型 {model} 返回空内容（finish_reason={reason}）"
@@ -346,6 +379,19 @@ class VLMClient:
 
             body = resp.text[:600]
 
+            # 服务商嫌 max_tokens 太大（各家输出上限不同）→ 降档重试。
+            # 不处理的话，把上限调大反而会让原本能用的模型全部报错。
+            if resp.status_code in (400, 413, 422) and max_tokens > 2048 and (
+                "max_tokens" in body.lower()
+                or "max output" in body.lower()
+                or ("output" in body.lower() and "token" in body.lower())
+            ):
+                new_max = max(2048, max_tokens // 2)
+                log.warning("服务商拒绝 max_tokens=%d，降为 %d 重试：%s",
+                            max_tokens, new_max, body[:200])
+                max_tokens = new_max
+                continue
+
             # 音频不被支持时，先丢掉音频再试——音频只是增强，
             # 不该因为它一个人把整个任务打死。
             if working_audio and resp.status_code in (400, 413, 422) and (
@@ -396,6 +442,11 @@ class VLMClient:
         `audio_per_task` 与 tasks 等长时，给每个任务附带自己的音频片段（可选）。
         """
         audios = audio_per_task or [[] for _ in tasks]
+        # 记录每个任务的失败原因。complete_many 为了「一块失败不影响其他块」
+        # 会吞掉异常返回空串，但如果**所有**块都失败，调用方只看得到空结果，
+        # 报出来的错就会是「模型没返回可解析结果」这种含糊话，
+        # 把真正的失败原因（token 超限 / 不支持图片 / 鉴权失败）盖掉。
+        self.last_errors = [""] * len(tasks)
 
         async def _one(
             idx: int, sys_p: str, usr_p: str, imgs: list[Path], aud: list[Path]
@@ -405,6 +456,7 @@ class VLMClient:
                 return idx, text
             except Exception as exc:  # noqa: BLE001
                 log.error("Pass1 分块 %d 失败: %s", idx, exc)
+                self.last_errors[idx] = str(exc)
                 return idx, ""
 
         results = await asyncio.gather(

@@ -448,6 +448,19 @@ def test_pass1_asks_for_subject_registry():
     assert "must be ONE entry" in PASS1_SYSTEM
 
 
+def test_pass1_puts_subjects_before_shots_in_the_shape():
+    """JSON 形状里 subjects 要排在 shots 前面。
+
+    模型是按顺序填的，放最后容易在输出预算用尽时被省掉 ——
+    实测 DeepSeek-V4.1-Flash 就是这样漏掉了整个 subjects 数组。
+    """
+    from app.services.templates import PASS1_SYSTEM
+
+    assert PASS1_SYSTEM.index('"subjects": [') < PASS1_SYSTEM.index('"shots": [')
+    assert "INCOMPLETE" in PASS1_SYSTEM, "要明确说缺了会被拒"
+    assert "BEFORE" in PASS1_SYSTEM and "run out of output budget" in PASS1_SYSTEM
+
+
 # ---------------------------------------------------------------------------
 # 音频未知时禁止编造
 # ---------------------------------------------------------------------------

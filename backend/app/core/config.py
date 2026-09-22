@@ -52,6 +52,13 @@ class Settings(BaseSettings):
     vlm_model: str = "Qwen/Qwen2.5-VL-72B-Instruct"
     vlm_timeout: int = 180
     vlm_concurrency: int = 3
+    # 单次回复的 token 上限。**推理模型必须给大**。
+    # 踩过：DeepSeek-V4.1-Flash 思考过程 5 万多字符，6144 会被思考吃光，
+    # 正文一个字都写不出来（finish_reason=length、content 为空），
+    # 表现为「模型返回空内容」或「未能返回可解析的观察结果」，
+    # 看起来像不支持图片，其实只是预算不够。
+    # 这只是上限，非推理模型提前结束不会多花钱。
+    vlm_max_tokens: int = 16384
     # 把音频片段直接附给模型（OpenAI 的 input_audio 内容块）。
     # 默认关：能收音频的模型很少，很多「多模态」模型只支持图片，
     # 开了但模型不支持会返回 choices:null（代码会明确报出来）。

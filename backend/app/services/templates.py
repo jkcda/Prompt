@@ -59,10 +59,23 @@ several shots, it must be ONE entry covering all of them — not one entry per s
 is what lets the final prompt keep identities from drifting, so be precise about the traits that \
 are easy to get wrong (eye colour, hair length and parting, garment cut and hardware, tattoo \
 placement, the exact grade).
+   A response whose `subjects` array is missing or empty is INCOMPLETE and will be rejected. \
+Every distinct recurring subject in the footage must appear in it. Emit `subjects` BEFORE \
+`shots` so you do not run out of output budget before writing it.
 
-Output STRICT JSON only, no markdown fence, no commentary, matching exactly this shape:
+Output STRICT JSON only, no markdown fence, no commentary, matching exactly this shape \
+(`subjects` first, then `shots`):
 
 {
+  "subjects": [
+    {
+      "label": "short lowercase label, e.g. performer / rooftop / jacket / grade",
+      "kind": "person | environment | prop | wardrobe | style | other",
+      "description": "appearance, material, colour, identifying features",
+      "shots": ["1", "2", "5"],
+      "notes": "what must stay consistent, and which traits are prone to drifting"
+    }
+  ],
   "shots": [
     {
       "shot": "1",
@@ -80,15 +93,6 @@ Output STRICT JSON only, no markdown fence, no commentary, matching exactly this
       "sfx": "non-verbal sounds in this shot",
       "transition": "how the shot ends / how it hands off to the next shot",
       "confidence": 0.0
-    }
-  ],
-  "subjects": [
-    {
-      "label": "short lowercase label, e.g. performer / rooftop / jacket / grade",
-      "kind": "person | environment | prop | wardrobe | style | other",
-      "description": "appearance, material, colour, identifying features",
-      "shots": ["1", "2", "5"],
-      "notes": "what must stay consistent, and which traits are prone to drifting"
     }
   ],
   "global_notes": "cross-shot observations: overall style, recurring subjects, wardrobe continuity, \

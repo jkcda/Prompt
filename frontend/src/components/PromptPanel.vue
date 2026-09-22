@@ -131,11 +131,10 @@ function fmtTime(sec: number): string {
             镜头观察 {{ store.observations.length }}
           </button>
           <button
-            v-if="store.subjects.length"
             :class="['tab', { active: tab === 'subjects' }]"
             @click="tab = 'subjects'"
           >
-            主体 {{ store.subjects.length }}
+            主体 {{ store.subjects.length || '' }}
           </button>
           <button :class="['tab', { active: tab === 'audio' }]" @click="tab = 'audio'">
             音频
@@ -222,31 +221,49 @@ function fmtTime(sec: number): string {
 
         <!-- 主体登记表 -->
         <template v-else-if="tab === 'subjects'">
-          <div class="field-hint" style="margin-bottom: 12px">
-            这些是 Pass1 跨镜头登记的主体。Ref2VA 模式下它们会依次变成
-            &lt;Subject 1..N&gt;，并逐个写进 retention_analysis。
-          </div>
-          <div class="shot-list">
-            <div v-for="(s, i) in store.subjects" :key="i" class="shot-card">
-              <div class="shot-head">
-                <span class="shot-no">&lt;Subject {{ i + 1 }}&gt;</span>
-                <span class="mono faint">{{ s.label }}</span>
-                <span v-if="s.kind" class="badge">{{ s.kind }}</span>
-                <span v-if="s.shots.length" class="badge">
-                  {{ s.shots.map((x) => `[Shot ${x}]`).join(' ') }}
-                </span>
-              </div>
-              <dl class="shot-fields">
-                <template v-for="[label, value] in [
-                  ['外观', s.description],
-                  ['需保持一致', s.notes],
-                ]" :key="label">
-                  <template v-if="value">
-                    <dt>{{ label }}</dt>
-                    <dd>{{ value }}</dd>
+          <template v-if="store.subjects.length">
+            <div class="field-hint" style="margin-bottom: 12px">
+              这些是 Pass1 跨镜头登记的主体。Ref2VA 模式下它们会依次变成
+              &lt;Subject 1..N&gt;，并逐个写进 retention_analysis。
+            </div>
+            <div class="shot-list">
+              <div v-for="(s, i) in store.subjects" :key="i" class="shot-card">
+                <div class="shot-head">
+                  <span class="shot-no">&lt;Subject {{ i + 1 }}&gt;</span>
+                  <span class="mono faint">{{ s.label }}</span>
+                  <span v-if="s.kind" class="badge">{{ s.kind }}</span>
+                  <span v-if="s.shots.length" class="badge">
+                    {{ s.shots.map((x) => `[Shot ${x}]`).join(' ') }}
+                  </span>
+                </div>
+                <dl class="shot-fields">
+                  <template v-for="[label, value] in [
+                    ['外观', s.description],
+                    ['需保持一致', s.notes],
+                  ]" :key="label">
+                    <template v-if="value">
+                      <dt>{{ label }}</dt>
+                      <dd>{{ value }}</dd>
+                    </template>
                   </template>
-                </template>
-              </dl>
+                </dl>
+              </div>
+            </div>
+          </template>
+
+          <!-- 模型漏了 subjects 数组。不致命，但要说清楚，
+               否则用户看到提示词里有 <Subject N> 却在这页找不到，会以为坏了。 -->
+          <div v-else class="empty" style="text-align: left; line-height: 1.8">
+            <div style="font-weight: 500; margin-bottom: 6px">本次没有登记到主体</div>
+            <div class="faint">
+              观察阶段（Pass 1）没有返回主体登记表。这不算失败 ——
+              Ref2VA 的参考标签会由成文阶段从镜头观察里自行推导，
+              本次结果里<strong>仍然有</strong> <code>&lt;Subject N&gt;</code>，
+              只是镜号归属的准确度和跨镜一致性会比有登记表时差一些。
+            </div>
+            <div class="faint" style="margin-top: 8px">
+              想减少这种情况：换一个更听话的模型，或减少抽帧数
+              （输入越长，模型越容易在写到最后时省掉这一节）。
             </div>
           </div>
         </template>

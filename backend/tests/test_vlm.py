@@ -219,6 +219,70 @@ def test_diagnose_says_multimodal_may_be_image_only():
 
 
 # ---------------------------------------------------------------------------
+# 推理模型的 token 预算
+# ---------------------------------------------------------------------------
+
+def test_reasoning_len_reads_common_field_names():
+    for key in ("reasoning_content", "reasoning", "thinking"):
+        payload = {"choices": [{"message": {key: "x" * 42}}]}
+        assert VLMClient._reasoning_len(payload) == 42
+    assert VLMClient._reasoning_len({"choices": [{"message": {"content": "hi"}}]}) == 0
+    assert VLMClient._reasoning_len({"choices": None}) == 0
+
+
+def test_diagnose_reasoning_model_budget_exhausted():
+    """推理模型把预算烧光时，不能报成「不支持图片」。
+
+    踩过：DeepSeek-V4.1-Flash 思考 24871 字符、completion_tokens 正好等于上限、
+    content 为空。原来的报错是「请检查模型是否支持图片输入」，
+    把排查方向完全带偏 —— 它明明在看图。
+    """
+    payload = {
+        "model": "deepseek-ai/DeepSeek-V4.1-Flash",
+        "choices": [{"finish_reason": "length",
+                     "message": {"content": "", "reasoning_content": "x" * 24871}}],
+        "usage": {"completion_tokens": 6144},
+    }
+    msg = VLMClient._diagnose_empty(payload, n_images=6)
+    assert "推理模型" in msg
+    assert "24871" in msg
+    assert "6144" in msg
+    assert "不是" in msg and "不支持图片" in msg, "要明确否掉这个误判"
+    assert "VLM_MAX_TOKENS" in msg, "要给出可操作的下一步"
+
+
+def test_diagnose_plain_length_still_works():
+    """非推理模型的截断，仍然给简单提示。"""
+    payload = {"model": "m", "choices": [{"finish_reason": "length",
+                                          "message": {"content": ""}}]}
+    msg = VLMClient._diagnose_empty(payload, 1)
+    assert "VLM_MAX_TOKENS" in msg
+    assert "推理模型" not in msg
+
+
+def test_max_tokens_setting_is_used_by_pipeline():
+    """管线里的 max_tokens 必须走配置，不能再硬编码。"""
+    import inspect
+
+    from app.core.config import get_settings
+    from app.services import pipeline
+
+    assert get_settings().vlm_max_tokens >= 8192, "推理模型的默认预算不能太小"
+    src = inspect.getsource(pipeline.run_pipeline)
+    assert "max_tokens=6144" not in src
+    assert "max_tokens=8192" not in src
+    assert "s.vlm_max_tokens" in src
+
+
+# ---------------------------------------------------------------------------
+# 音频不被支持时自动降级
+# ---------------------------------------------------------------------------点明这个常见误解。"""
+    payload = {"model": "m", "choices": None, "usage": {"prompt_tokens": 0}}
+    msg = VLMClient._diagnose_empty(payload, n_images=1, n_audio=0)
+    assert "只支持图片" in msg
+
+
+# ---------------------------------------------------------------------------
 # 音频不被支持时自动降级
 # ---------------------------------------------------------------------------
 
@@ -381,3 +445,40 @@ def test_require_configured_raises_actionable_error():
         client.require_configured()
     assert "VLM_API_KEY" in str(exc.value)
     assert "backend/.env" in str(exc.value)
+
+
+# ---------------------------------------------------------------------------
+# Pass1 全军覆没时的报错
+# ---------------------------------------------------------------------------
+
+def test_explain_empty_observations_surfaces_real_errors():
+    """有失败原因时优先展示原因，而不是含糊的「不支持图片」。"""
+    from app.services.pipeline import _explain_empty_observations
+
+    msg = _explain_empty_observations(
+        ["", ""],
+        ["模型 m 是推理模型，思考过程占满了 token 预算", ""],
+    )
+    assert "推理模型" in msg
+    assert "分块 1" in msg
+    assert "VLM_MAX_TOKENS" in msg
+
+
+def test_explain_empty_observations_shows_raw_head_when_no_error():
+    """模型有返回但结构不对时，要给出原文开头，否则无从下手。"""
+    from app.services.pipeline import _explain_empty_observations
+
+    msg = _explain_empty_observations(
+        ["Sure! Here is my analysis of the video: the scene shows...", ""],
+        ["", ""],
+    )
+    assert "Sure! Here is my analysis" in msg
+    assert "空响应" in msg, "空的那块也要标出来"
+
+
+def test_explain_empty_observations_marks_empty_chunks():
+    from app.services.pipeline import _explain_empty_observations
+
+    msg = _explain_empty_observations(["", ""], ["", ""])
+    assert msg.count("（空响应）") == 2
+    assert "排查顺序" in msg

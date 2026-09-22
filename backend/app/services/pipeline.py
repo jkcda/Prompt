@@ -210,7 +210,7 @@ async def run_pipeline(job: Job, video_path: Path) -> JobResult:
         audio_per_task.append(audios)
 
     raw_outputs = await client.complete_many(
-        tasks, max_tokens=6144, audio_per_task=audio_per_task
+        tasks, max_tokens=s.vlm_max_tokens, audio_per_task=audio_per_task
     )
     store.raise_if_cancelled(job_id)
 
@@ -237,13 +237,18 @@ async def run_pipeline(job: Job, video_path: Path) -> JobResult:
 
     merged = templates.merge_observations(observations)
     if not merged:
-        raise RuntimeError(
-            "视觉模型未能返回可解析的镜头观察结果。请检查模型是否支持图片输入，"
-            "或换用更强的视觉模型。"
-        )
+        raise RuntimeError(_explain_empty_observations(raw_outputs, client.last_errors))
 
     subjects = templates.merge_subjects(observations, merged)
     log.info("观察完成：%d 个镜头，%d 个主体", len(merged), len(subjects))
+    if not subjects:
+        # 模型漏了 subjects 数组。不致命（Pass2 能从观察结果自己推参考标签，
+        # 实测推得还行），但要显式记下来 —— 否则前端「主体」页空着，
+        # 而提示词里却有 <Subject N>，看起来像 bug 却查不到原因。
+        log.warning(
+            "Pass1 未返回主体登记表（subjects 为空）。Ref2VA 的参考标签将由 Pass2 "
+            "从镜头观察里自行推导，稳定性和镜号准确度会下降。"
+        )
 
     # ---------------- 7. Pass2：合成目标格式 ----------------
     await step("compose", 82, f"合成 {templates.format_display(opts.format)} 提示词")
@@ -262,7 +267,9 @@ async def run_pipeline(job: Job, video_path: Path) -> JobResult:
     )
 
     try:
-        prompt = await client.complete(pass2_system, pass2_user, images=[], max_tokens=8192)
+        prompt = await client.complete(
+            pass2_system, pass2_user, images=[], max_tokens=s.vlm_max_tokens
+        )
     except VLMError as exc:
         raise RuntimeError(f"提示词合成失败：{exc}") from exc
 
@@ -312,6 +319,38 @@ async def run_pipeline(job: Job, video_path: Path) -> JobResult:
 # ---------------------------------------------------------------------------
 # 内部工具
 # ---------------------------------------------------------------------------
+
+def _explain_empty_observations(raw_outputs: list[str], errors: list[str]) -> str:
+    """Pass1 全军覆没时，拼一条能直接定位问题的报错。
+
+    原来的文案是「请检查模型是否支持图片输入，或换用更强的视觉模型」——
+    但真实原因常常不是这个。踩过：DeepSeek-V4.1-Flash 是推理模型，
+    思考过程 5 万多字符把 token 预算吃光，正文一个字没写出来，
+    结果报成「不支持图片」，方向完全带偏。
+    """
+    lines = ["视觉模型未能返回可解析的镜头观察结果。"]
+
+    real = [e for e in errors if e]
+    if real:
+        lines.append("")
+        lines.append("各分块的失败原因：")
+        for i, e in enumerate(real[:3]):
+            lines.append(f"  分块 {i + 1}: {' '.join(e.split())[:300]}")
+    else:
+        lines.append("")
+        lines.append("模型有返回内容，但不是要求的 JSON 结构。各分块原始返回开头：")
+        for i, raw in enumerate(raw_outputs[:3]):
+            head = " ".join((raw or "").split())[:200] or "（空响应）"
+            lines.append(f"  分块 {i + 1}: {head}")
+
+    lines.append("")
+    lines.append(
+        "排查顺序：① 看上面有没有 finish_reason=length —— 那是 token 预算不够，"
+        "调大 VLM_MAX_TOKENS；② 确认模型支持图片输入（GET /api/health/vlm 会发一张图实测）；"
+        "③ 确认模型能按 JSON 输出，推理模型有时会把答案写成散文。"
+    )
+    return "\n".join(lines)
+
 
 def _safe_scene_detect(path: Path, threshold: float, duration: float) -> list[float]:
     try:
