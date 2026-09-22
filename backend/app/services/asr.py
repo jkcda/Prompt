@@ -183,7 +183,11 @@ def analyze_audio(video_path: str | Path, enable_asr: bool = True) -> AudioRepor
             except Exception as exc:  # noqa: BLE001
                 log.warning("本地 whisper 失败，回退 API: %s", exc)
 
-        if s.asr_enabled or s.vlm_api_key:
+        # 只有 ASR 真的配了才去调。原来这里写的是 `or s.vlm_api_key`，
+        # 结果只要配了视觉模型的 key 就会拿它去调 ASR —— 而 ASR_BASE_URL
+        # 是空的，请求直接报 "URL is missing an 'http://' protocol"。
+        # 视觉模型的 key 跟语音转写是两回事，不能互相顶替。
+        if s.asr_enabled:
             report.transcript, report.segments = _transcribe_api(audio_path, info.duration)
             report.note = "API 转写" if report.transcript else "API 转写返回空结果"
         else:

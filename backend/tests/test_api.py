@@ -342,6 +342,83 @@ def test_settings_whitelist_rejects_unknown_keys(client):
     assert r.json()["ok"] is False
 
 
+def test_mark_interrupted_clears_zombie_jobs(client):
+    """服务被 kill 时留在库里的 running 任务，启动时要收成 failed。
+
+    不然界面上会一直显示「进行中」，其实进程早没了，用户白等。
+    """
+    from app.schemas import AnalyzeOptions, Job, JobResult
+    from app.services import storage
+
+    zombie = Job(id="zombie00000001", state="running", source="upload",
+                 options=AnalyzeOptions())
+    # 真正的成功任务要有产出，否则会被当成「假成功」一起修掉
+    done = Job(id="zombie00000002", state="succeeded", source="upload",
+               options=AnalyzeOptions(),
+               result=JobResult(prompt="a real prompt", frames_used=9))
+    storage.save_job(zombie)
+    storage.save_job(done)
+
+    n = storage.mark_interrupted()
+    assert n >= 1
+
+    reloaded = storage.load_job("zombie00000001")
+    assert reloaded is not None
+    assert reloaded.state == "failed"
+    assert "中断" in reloaded.error
+
+    # 有产出的成功任务不能被误伤
+    ok = storage.load_job("zombie00000002")
+    assert ok is not None and ok.state == "succeeded"
+
+
+def test_mark_interrupted_is_idempotent(client):
+    from app.services import storage
+
+    assert storage.mark_interrupted() == 0
+
+
+def test_mark_interrupted_repairs_fake_success(client):
+    """succeeded 但 prompt 为空 = 假成功，必须修掉。
+
+    服务关闭时 asyncio 任务被取消，旧逻辑把「无结果」判成成功，
+    界面显示「完成」但点进去没提示词 —— 比报失败更难查。
+    """
+    from app.schemas import AnalyzeOptions, Job, JobResult
+    from app.services import storage
+
+    ghost = Job(id="ghost000000001", state="succeeded", source="upload",
+                options=AnalyzeOptions(),
+                result=JobResult(prompt="", frames_used=0))
+    storage.save_job(ghost)
+
+    storage.mark_interrupted()
+
+    reloaded = storage.load_job("ghost000000001")
+    assert reloaded is not None
+    assert reloaded.state == "failed"
+    assert "未产出结果" in reloaded.error
+
+
+def test_finish_without_result_is_not_success(client):
+    """核心回归：finish(id, None, "") 不能判成 succeeded。"""
+    import asyncio
+
+    from app.schemas import AnalyzeOptions, Job
+    from app.services.jobs import store
+
+    async def scenario():
+        job = await store.create(Job(id="noresult000001", source="upload",
+                                     options=AnalyzeOptions()))
+        await store.finish(job.id, None, "")
+        return store.get(job.id)
+
+    got = asyncio.run(scenario())
+    assert got is not None
+    assert got.state == "failed", "没有结果却记成了成功"
+    assert got.error
+
+
 # ---------------------------------------------------------------------------
 # 模型热切换（用户要「自主切换模型」）
 # ---------------------------------------------------------------------------

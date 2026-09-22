@@ -141,11 +141,21 @@ class JobStore:
         job = self._jobs.get(job_id)
         if not job:
             return
-        if job_id in self._cancelled and not error:
+        # 判定顺序有讲究：显式取消优先，其次有错误就是失败，
+        # 再次「没有结果」也算失败。
+        if job_id in self._cancelled:
             job.state = "cancelled"
         elif error:
             job.state = "failed"
             job.error = error
+        elif result is None:
+            # 没产出结果就不算成功。
+            # 踩过：服务关闭时 asyncio 任务被取消，CancelledError 分支调的是
+            # finish(id, None, "")，按原来的逻辑会落到 succeeded ——
+            # 界面上显示「完成」，点进去提示词是空的。这比直接报失败更难查，
+            # 因为用户以为成功了。
+            job.state = "failed"
+            job.error = job.error or "任务被中断，未产出结果"
         else:
             job.state = "succeeded"
         job.result = result
@@ -154,7 +164,7 @@ class JobStore:
             stage=job.state,
             stage_label={"succeeded": "完成", "failed": "失败", "cancelled": "已取消"}.get(job.state, job.state),
             percent=100 if job.state == "succeeded" else job.progress.percent,
-            message=error or "反推完成",
+            message=job.error or ("反推完成" if job.state == "succeeded" else "已取消"),
         )
         self._persist(job)
         await self.emit(job_id, {

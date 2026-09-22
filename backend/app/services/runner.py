@@ -107,10 +107,19 @@ def _spawn(job: Job, path: Path | None, source_url: str) -> None:
             await store.finish(job.id, result)
 
         except asyncio.CancelledError:
-            await store.finish(job.id, None, "")
+            # 用户主动取消 → store 里有记录，会被判成 cancelled；
+            # 服务关闭导致的取消 → 判成 failed，不能记成「完成」。
+            await store.finish(job.id, None, "任务被中断（服务关闭或取消）")
         except Exception as exc:  # noqa: BLE001
             log.exception("任务 %s 失败", job.id)
             await store.finish(job.id, None, str(exc))
+        except BaseException as exc:  # noqa: BLE001
+            # 兜底：`SystemExit` / `KeyboardInterrupt` 这类不是 `Exception` 的子类，
+            # 上面那个 except 拦不住。曾经有一次清理临时目录被环境的删除保护拦下，
+            # 抛出的 SystemExit 一路逃到 uvicorn，把整个服务带走了 —— 任务级的问题
+            # 绝不该升级成进程级的事故。
+            log.exception("任务 %s 被非常规异常中断", job.id)
+            await store.finish(job.id, None, f"{type(exc).__name__}: {exc}")
 
     task = asyncio.create_task(_runner())
     store.attach_task(job.id, task)

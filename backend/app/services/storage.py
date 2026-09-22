@@ -137,6 +137,49 @@ def delete_job(job_id: str) -> bool:
         return True
 
 
+def mark_interrupted() -> int:
+    """启动时对账，修掉两类「僵尸」记录。
+
+    1. 还挂在 `running` / `pending` 的 —— 任务状态只在内存里活着，终态才落库。
+       服务被 kill、崩溃、断电时，最后那个任务会永远停在 running，
+       界面上看起来一直在跑，其实进程早没了。
+    2. `succeeded` 但 prompt 是空的 —— 这是「假成功」。服务关闭时 asyncio
+       任务被取消，旧逻辑会把「无结果」判成成功，界面上显示「完成」，
+       点进去提示词是空的。比直接报失败更难查，因为用户以为成功了。
+
+    第 2 类按理不该再产生（`JobStore.finish` 已修），这里是对历史数据的兜底。
+    """
+    fixed = 0
+    with Session(get_engine()) as session:
+        stale = list(session.exec(
+            select(JobRecord).where(JobRecord.state.in_(("running", "pending")))  # type: ignore[attr-defined]
+        ))
+        for record in stale:
+            record.state = "failed"
+            record.error = "服务重启，任务被中断"
+            record.finished_at = record.finished_at or time.time()
+            session.add(record)
+
+        ghosts = [
+            r for r in session.exec(
+                select(JobRecord).where(JobRecord.state == "succeeded")  # type: ignore[arg-type]
+            )
+            if not (r.prompt or "").strip()
+        ]
+        for record in ghosts:
+            record.state = "failed"
+            record.error = "任务被中断，未产出结果（历史数据修复）"
+            record.finished_at = record.finished_at or time.time()
+            session.add(record)
+
+        fixed = len(stale) + len(ghosts)
+        if fixed:
+            session.commit()
+            log.warning("启动对账：收掉 %d 个被中断的任务，修掉 %d 条假成功记录",
+                        len(stale), len(ghosts))
+        return fixed
+
+
 def cleanup_old(days: int) -> int:
     """删除超过 N 天的历史任务。days<=0 时不清理。"""
     if days <= 0:

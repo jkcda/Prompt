@@ -25,7 +25,7 @@ from .core.db import init_db
 from .core.logging import setup_logging
 from .routers import api_router
 from .services.jobs import store
-from .services.storage import cleanup_old
+from .services.storage import cleanup_old, mark_interrupted
 
 setup_logging()
 log = logging.getLogger("main")
@@ -56,6 +56,10 @@ async def lifespan(app: FastAPI):
                     "或在 backend/.env 设置 FFMPEG_PATH。")
 
     init_db()
+    # 上一次进程如果是被 kill 的，库里会留下永远 running 的僵尸任务
+    stale = mark_interrupted()
+    if stale:
+        log.info("已收掉 %d 个被中断的任务", stale)
     removed = cleanup_old(s.history_keep_days)
     if removed:
         log.info("已清理 %d 条过期历史", removed)

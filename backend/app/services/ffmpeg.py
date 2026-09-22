@@ -598,14 +598,24 @@ def make_contact_sheet(
 
 
 def cleanup(path: str | Path) -> None:
+    """尽力删除临时文件。**任何情况下都不许抛异常。**
+
+    这里刻意捕获 BaseException 而不是 OSError：清理是收尾动作，
+    失败了最多留几个临时文件，绝不该把整个服务带走。
+
+    踩过的坑：某些运行环境会在 `shutil.rmtree` 里塞进删除保护
+    （拦截大量文件的递归删除），抛的是 `SystemExit`——它继承 `BaseException`
+    而不是 `Exception`，所以 `except OSError` 和调用方的 `except Exception`
+    都拦不住，一次清理就把 uvicorn 进程干掉了。
+    """
     p = Path(path)
     try:
         if p.is_dir():
             shutil.rmtree(p, ignore_errors=True)
         elif p.is_file():
             p.unlink(missing_ok=True)
-    except OSError:
-        pass
+    except BaseException as exc:  # noqa: BLE001
+        log.warning("清理 %s 失败（已忽略）：%s", p, exc)
 
 
 def frame_dir_for(job_id: str) -> Path:

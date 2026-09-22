@@ -191,6 +191,53 @@ def test_segment_video_empty_when_no_duration(sample_video: Path, tmp_path: Path
     assert ff.segment_video(sample_video, tmp_path, total_duration=0.0) == []
 
 
+# ---------------------------------------------------------------------------
+# cleanup 必须绝对安全
+# ---------------------------------------------------------------------------
+
+def test_cleanup_survives_base_exception(monkeypatch, tmp_path: Path):
+    """清理失败绝不能把服务带走。
+
+    踩过：某些运行环境会在 shutil.rmtree 里塞删除保护，
+    抛的是 SystemExit —— 它继承 BaseException 而不是 Exception，
+    所以 `except OSError` 和调用方的 `except Exception` 都拦不住，
+    一次清理就把 uvicorn 进程干掉了。
+    """
+    import shutil as _shutil
+
+    def boom(*a, **kw):
+        raise SystemExit(1)
+
+    monkeypatch.setattr(_shutil, "rmtree", boom)
+    d = tmp_path / "junk"
+    d.mkdir()
+    ff.cleanup(d)  # 不抛异常即通过
+
+
+def test_cleanup_survives_keyboard_interrupt(monkeypatch, tmp_path: Path):
+    import shutil as _shutil
+
+    def boom(*a, **kw):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(_shutil, "rmtree", boom)
+    d = tmp_path / "junk"
+    d.mkdir()
+    ff.cleanup(d)
+
+
+def test_cleanup_survives_permission_error(monkeypatch, tmp_path: Path):
+    import shutil as _shutil
+
+    def boom(*a, **kw):
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(_shutil, "rmtree", boom)
+    d = tmp_path / "junk"
+    d.mkdir()
+    ff.cleanup(d)
+
+
 def test_ffmpeg_available():
     assert ff.ffmpeg_available() is True
 
