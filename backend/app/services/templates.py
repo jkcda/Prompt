@@ -62,6 +62,10 @@ placement, the exact grade).
    A response whose `subjects` array is missing or empty is INCOMPLETE and will be rejected. \
 Every distinct recurring subject in the footage must appear in it. Emit `subjects` BEFORE \
 `shots` so you do not run out of output budget before writing it.
+   Do NOT register watermarks, platform logos, channel bugs, UI overlays, subtitles or \
+burned-in captions as subjects. They are artefacts of the source file, not content to \
+reproduce — registering them invites the generator to render them into the new video. \
+Mention them only in `on_screen_text`, never in `subjects`.
 
 Output STRICT JSON only, no markdown fence, no commentary, matching exactly this shape \
 (`subjects` first, then `shots`):

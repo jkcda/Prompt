@@ -461,6 +461,20 @@ def test_pass1_puts_subjects_before_shots_in_the_shape():
     assert "BEFORE" in PASS1_SYSTEM and "run out of output budget" in PASS1_SYSTEM
 
 
+def test_pass1_excludes_watermarks_from_subject_registry():
+    """水印/台标/UI 不该进登记表。
+
+    实测 DeepSeek 把 bilibili-watermark 登记成了主体。虽然 Pass2 自己
+    过滤掉了没写进提示词，但登记表本身不该收 —— 万一模型照抄，
+    生成的视频里就会出现别人的水印。
+    """
+    from app.services.templates import PASS1_SYSTEM
+
+    assert "Do NOT register watermarks" in PASS1_SYSTEM
+    assert "platform logos" in PASS1_SYSTEM
+    assert "never in `subjects`" in PASS1_SYSTEM
+
+
 # ---------------------------------------------------------------------------
 # 音频未知时禁止编造
 # ---------------------------------------------------------------------------
