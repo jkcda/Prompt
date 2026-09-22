@@ -52,6 +52,11 @@ class Settings(BaseSettings):
     vlm_model: str = "Qwen/Qwen2.5-VL-72B-Instruct"
     vlm_timeout: int = 180
     vlm_concurrency: int = 3
+    # 把音频片段直接附给模型（OpenAI 的 input_audio 内容块）。
+    # 默认关：能收音频的模型很少，很多「多模态」模型只支持图片，
+    # 开了但模型不支持会返回 choices:null（代码会明确报出来）。
+    # 只在没有 ASR 转写时才附——已经有转写文本就没必要再送音频。
+    vlm_audio_input: bool = False
 
     # ---- 语音转写 ----
     asr_api_key: str = ""

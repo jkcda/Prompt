@@ -240,11 +240,19 @@ Never paraphrase dialogue.
 6. Do not mention watermarks, logos, platform UI, or the fact that this is a reverse-engineered \
 prompt. If the observation notes on-screen text, either transcribe it as diegetic text when it \
 is part of the scene, or omit it.
-7. If the audio report says the audio content was NOT transcribed, you do not know what the audio \
-contains. In that case NEVER write dialogue, lyrics, music instrumentation, tempo, or specific \
-sound-effect types — not even hedged ("as if", "appears to be"). Volume and silence information \
-is all you have, so either state that a track exists without describing it, or write `N/A`. \
-Fabricated sound is worse than an empty field: the generated video will not match the source.
+7. Audio: distinguish CONTENT from SPECTRUM. If the audio report says the audio was not \
+transcribed, you do not know what the audio contains — never write dialogue, lyrics, music \
+instrumentation, tempo, or specific sound-effect types, not even hedged ("as if", "appears to \
+be"). Spectral measurements (band energy, volume, silence, beat points) ARE valid input: you may \
+write a hedged tendency based on them, e.g. "the track reads as voice-dominant with little \
+low-frequency content", and you must make clear it is inferred from energy distribution, not \
+identified. Never upgrade a spectral tendency into a concrete claim — "voice-dominant energy" \
+does not license "someone is singing".
+   Do NOT convert visual events into sound events either. Seeing a person walk does not license \
+"footsteps"; seeing fabric move does not license "cloth rustle". Those are inferences about audio \
+content, which is exactly what is unknown. Describe the visual action itself and leave the sound \
+unspecified.
+   Fabricated sound is worse than an empty field: the generated video will not match the source.
 8. Keep each subject's appearance wording IDENTICAL across shots. A character described as "a \
 performer in a dark quilted jacket" in shot 1 must not become "a woman in a leather coat" in \
 shot 3 — inconsistent wording is read as a different person and the identity drifts.

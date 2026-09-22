@@ -151,13 +151,15 @@ def analyze_audio(video_path: str | Path, enable_asr: bool = True) -> AudioRepor
 
     report.has_audio = True
 
-    # --- 音量 / 静音 ---
+    # --- 音量 / 静音 / 频段能量 ---
     try:
         levels = ff.analyze_audio_levels(video_path)
         report.mean_volume_db = levels.get("mean_volume_db")
         report.peak_volume_db = levels.get("peak_volume_db")
         report.silence_ratio = levels.get("silence_ratio")
         report.loudness_points = levels.get("loudness_points") or []
+        report.speech_band_db = levels.get("speech_band_db")
+        report.low_band_db = levels.get("low_band_db")
     except Exception as exc:  # noqa: BLE001
         log.warning("音量分析失败: %s", exc)
 
@@ -195,6 +197,54 @@ def analyze_audio(video_path: str | Path, enable_asr: bool = True) -> AudioRepor
     return report
 
 
+def describe_spectrum(report: AudioReport) -> list[str]:
+    """把频段能量翻译成**谨慎的**倾向性描述。
+
+    措辞的边界很重要。频谱能量**分不出**「人声」和「独奏乐器/窄带音调」——
+    实测一个纯 440Hz 正弦波的能量几乎全落在语音频段里，读起来和人声一样。
+    所以只能说「能量集中在语音频段」，不能升级成「有人说话」。
+    同理低频强只能说「有低频成分」，不能说「有鼓点」。
+    """
+    lines: list[str] = []
+    speech, low = report.speech_band_db, report.low_band_db
+
+    if speech is not None:
+        if speech >= -2.0:
+            lines.append(
+                f"  语音频段(300-3400Hz)相对能量 {speech:+.1f}dB"
+                "  → 能量高度集中在这一频段（人声、独奏乐器、窄带音调都可能落在这里，"
+                "频谱无法区分）"
+            )
+        elif speech >= -8.0:
+            lines.append(
+                f"  语音频段(300-3400Hz)相对能量 {speech:+.1f}dB"
+                "  → 该频段占比较高，但混有其他频段成分（典型情况：人声 + 配器）"
+            )
+        else:
+            lines.append(
+                f"  语音频段(300-3400Hz)相对能量 {speech:+.1f}dB"
+                "  → 能量大部分在该频段之外，**不太像以人声为主**"
+                "（更可能是纯音乐、环境声或宽频噪声）"
+            )
+
+    if low is not None:
+        if low >= -10.0:
+            lines.append(
+                f"  低频(<200Hz)相对能量 {low:+.1f}dB"
+                "  → 低频成分显著，**疑似有节奏性的音乐编排**（鼓/贝斯类），"
+                "但也可能是低频环境噪声"
+            )
+        elif low >= -20.0:
+            lines.append(f"  低频(<200Hz)相对能量 {low:+.1f}dB  → 有中等低频成分")
+        else:
+            lines.append(
+                f"  低频(<200Hz)相对能量 {low:+.1f}dB"
+                "  → 低频很弱，不太像有节奏性的音乐编排"
+            )
+
+    return lines
+
+
 def format_transcript_for_prompt(report: AudioReport) -> str:
     """把转写整理成带时间戳的文本，供模型对齐到镜头。
 
@@ -202,6 +252,8 @@ def format_transcript_for_prompt(report: AudioReport) -> str:
     模型会自己补出「电子提示音与数字跳变同步」「一段缓慢的合成器铺底」这类
     听起来很合理的声音描述——它根本听不到音频。反推出来的 BGM / 台词是编的，
     整条提示词就废了。
+
+    频谱特征是可以给的：那是实测数字，不是内容。但必须标明它的边界。
     """
     if not report.has_audio:
         return "【音频】该视频无音轨。所有音频字段请写 N/A。"
@@ -240,13 +292,23 @@ def format_transcript_for_prompt(report: AudioReport) -> str:
     if meta:
         lines.append("【音频能量】" + "；".join(meta))
 
+    spectrum = describe_spectrum(report)
+    if spectrum:
+        lines.append("【音频频谱特征（ffmpeg 实测，不是内容识别）】")
+        lines.extend(spectrum)
+        lines.append(
+            "  ↑ 这些是能量分布数据，只能用来做**倾向性**描述"
+            "（例如「音轨疑似以人声为主，低频成分弱」）。\n"
+            "    不得据此断言具体内容（不能说「有人在唱歌」「有一段合成器铺底」）。"
+        )
+
     if report.note:
         lines.append(f"【备注】{report.note}")
 
     if not transcribed:
         lines.append(
-            "【重申】以上只有音量信息，没有任何声音内容信息。"
-            "音频字段留空或写 N/A，不要凭画面猜声音。"
+            "【重申】以上只有音量与频谱数据，没有任何声音内容信息。"
+            "音频字段留空、写 N/A、或只做倾向性描述，不要凭画面猜声音。"
         )
 
     return "\n".join(lines)

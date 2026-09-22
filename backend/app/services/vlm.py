@@ -34,6 +34,28 @@ def _data_uri(path: Path) -> str:
     return f"data:{mime};base64,{b64}"
 
 
+# OpenAI 协议的音频内容块只认这几种格式，其余要报错而不是硬塞
+_AUDIO_FORMATS = {"wav", "mp3", "m4a", "flac", "ogg", "webm", "aac"}
+_AUDIO_MAX_BYTES = 20 * 1024 * 1024   # 官方上限 25MB，留点余量
+
+
+def _audio_block(path: Path) -> dict:
+    """构造 OpenAI 的 input_audio 内容块。
+
+    格式字段只接受官方白名单里的值；超出体积上限时直接抛错，
+    让调用方降级——静默发一个必然失败的请求，比明确报错更难排查。
+    """
+    fmt = path.suffix.lstrip(".").lower()
+    if fmt not in _AUDIO_FORMATS:
+        raise ValueError(f"不支持的音频格式 {fmt!r}，可选：{sorted(_AUDIO_FORMATS)}")
+    raw = path.read_bytes()
+    if len(raw) > _AUDIO_MAX_BYTES:
+        raise ValueError(
+            f"音频片段 {len(raw) / 1048576:.1f}MB 超过 {_AUDIO_MAX_BYTES // 1048576}MB 上限"
+        )
+    return {"data": base64.b64encode(raw).decode("ascii"), "format": fmt}
+
+
 class VLMClient:
     """带并发限流的视觉模型客户端。"""
 
@@ -68,10 +90,19 @@ class VLMClient:
 
     # -- 请求体构造 --------------------------------------------------------
 
-    def _openai_payload(self, system: str, user: str, images: list[Path], max_tokens: int) -> dict:
+    def _openai_payload(
+        self,
+        system: str,
+        user: str,
+        images: list[Path],
+        max_tokens: int,
+        audio: list[Path] | None = None,
+    ) -> dict:
         content: list[dict] = [{"type": "text", "text": user}]
         for img in images:
             content.append({"type": "image_url", "image_url": {"url": _data_uri(img)}})
+        for clip in audio or []:
+            content.append({"type": "input_audio", "input_audio": _audio_block(clip)})
         return {
             "model": self.model,
             "messages": [
@@ -83,7 +114,18 @@ class VLMClient:
             "stream": False,
         }
 
-    def _anthropic_payload(self, system: str, user: str, images: list[Path], max_tokens: int) -> dict:
+    def _anthropic_payload(
+        self,
+        system: str,
+        user: str,
+        images: list[Path],
+        max_tokens: int,
+        audio: list[Path] | None = None,
+    ) -> dict:
+        if audio:
+            # Anthropic 的 messages 协议目前没有音频内容块。
+            # 静默丢弃比报错好——音频只是增强，不该让整个任务失败。
+            log.warning("Anthropic 协议不支持音频输入，已忽略 %d 个音频片段", len(audio))
         blocks: list[dict] = [{"type": "text", "text": user}]
         for img in images:
             mime = mimetypes.guess_type(img.name)[0] or "image/jpeg"
@@ -138,12 +180,12 @@ class VLMClient:
         return ""
 
     @staticmethod
-    def _diagnose_empty(payload: dict, n_images: int) -> str:
+    def _diagnose_empty(payload: dict, n_images: int, n_audio: int = 0) -> str:
         """HTTP 200 但内容为空时，把原因说清楚。
 
         最常见的两种「空」：
           1. `choices: null` + `usage` 全为 0 —— 请求根本没被处理。
-             典型原因是模型不支持图片输入，或该模型在当前账号下没有开通推理服务。
+             典型原因是模型不支持该模态的输入，或该模型在当前账号下没有开通推理服务。
              这个特征很好认，但只报「模型返回空内容」会让人往网络、超时方向查。
           2. `finish_reason: content_filter` / `length` —— 被截断或拦截。
 
@@ -159,13 +201,24 @@ class VLMClient:
                 hint = (
                     f"模型 {model} 返回了空 choices，且 usage 显示 0 tokens——"
                     "请求没有被真正处理。通常是：\n"
-                    "  1) 该模型不支持图片输入（不是视觉语言模型）；\n"
+                    "  1) 该模型不支持本次请求用到的输入模态"
+                    "（图片或音频——注意很多「多模态」模型只支持图片，不支持音频）；\n"
                     "  2) 该模型在当前账号下没有开通推理服务（服务未部署/未订阅）；\n"
                     "  3) 模型名拼写有误。\n"
-                    "建议：换一个确认支持图片输入的 VL 模型，或先用 GET /api/health/vlm 自检。"
+                    "建议：换一个确认支持所需模态的模型，或先用 GET /api/health/vlm 自检。"
                 )
+                parts = []
                 if n_images:
-                    hint += f"\n本次请求带了 {n_images} 张图片。"
+                    parts.append(f"{n_images} 张图片")
+                if n_audio:
+                    parts.append(f"{n_audio} 段音频")
+                if parts:
+                    hint += f"\n本次请求带了 {' 和 '.join(parts)}。"
+                    if n_audio:
+                        hint += (
+                            "\n如果这个模型本来能读图，那问题很可能出在音频上——"
+                            "试试关掉 VLM_AUDIO_INPUT。"
+                        )
                 return hint
             return f"模型 {model} 返回空 choices（usage: {usage}）"
 
@@ -192,14 +245,18 @@ class VLMClient:
         images: list[Path] | None = None,
         max_tokens: int = 4096,
         retries: int = 3,
+        audio: list[Path] | None = None,
     ) -> str:
         """单次调用。失败自动重试；请求体过大时自动减半图片重试。"""
         self.require_configured()
         images = list(images or [])
+        audio = list(audio or [])
 
         url, headers = self._endpoint_and_headers()
         async with self._sem:
-            return await self._complete_inner(url, headers, system, user, images, max_tokens, retries)
+            return await self._complete_inner(
+                url, headers, system, user, images, max_tokens, retries, audio
+            )
 
     async def _complete_inner(
         self,
@@ -210,16 +267,18 @@ class VLMClient:
         images: list[Path],
         max_tokens: int,
         retries: int,
+        audio: list[Path] | None = None,
     ) -> str:
         attempt = 0
         working = list(images)
+        working_audio = list(audio or [])
 
         while True:
             attempt += 1
             payload = (
-                self._anthropic_payload(system, user, working, max_tokens)
+                self._anthropic_payload(system, user, working, max_tokens, working_audio)
                 if self.protocol == "anthropic"
-                else self._openai_payload(system, user, working, max_tokens)
+                else self._openai_payload(system, user, working, max_tokens, working_audio)
             )
 
             try:
@@ -238,12 +297,24 @@ class VLMClient:
                 text = self._extract_text(data, self.protocol)
                 if not text:
                     if attempt >= retries:
-                        raise VLMError(self._diagnose_empty(data, len(working)))
+                        raise VLMError(self._diagnose_empty(data, len(working), len(working_audio)))
                     await asyncio.sleep(2 ** attempt)
                     continue
                 return text
 
             body = resp.text[:600]
+
+            # 音频不被支持时，先丢掉音频再试——音频只是增强，
+            # 不该因为它一个人把整个任务打死。
+            if working_audio and resp.status_code in (400, 413, 422) and (
+                "audio" in body.lower()
+                or "modality" in body.lower()
+                or "unsupported" in body.lower()
+            ):
+                log.warning("模型不接受音频输入，丢弃 %d 个片段后重试：%s",
+                            len(working_audio), body[:200])
+                working_audio = []
+                continue
 
             # 请求体过大 / 上下文超限 → 减帧重试
             if resp.status_code in (400, 413, 422) and working and (
@@ -275,21 +346,28 @@ class VLMClient:
         self,
         tasks: list[tuple[str, str, list[Path]]],
         max_tokens: int = 4096,
+        audio_per_task: list[list[Path]] | None = None,
     ) -> list[str]:
         """并发执行多个 (system, user, images) 任务，返回等长结果列表。
 
         单个任务失败不会中断其他任务——失败位置返回错误标记文本。
+        `audio_per_task` 与 tasks 等长时，给每个任务附带自己的音频片段（可选）。
         """
-        async def _one(idx: int, sys_p: str, usr_p: str, imgs: list[Path]) -> tuple[int, str]:
+        audios = audio_per_task or [[] for _ in tasks]
+
+        async def _one(
+            idx: int, sys_p: str, usr_p: str, imgs: list[Path], aud: list[Path]
+        ) -> tuple[int, str]:
             try:
-                text = await self.complete(sys_p, usr_p, imgs, max_tokens=max_tokens)
+                text = await self.complete(sys_p, usr_p, imgs, max_tokens=max_tokens, audio=aud)
                 return idx, text
             except Exception as exc:  # noqa: BLE001
                 log.error("Pass1 分块 %d 失败: %s", idx, exc)
                 return idx, ""
 
         results = await asyncio.gather(
-            *(_one(i, s, u, im) for i, (s, u, im) in enumerate(tasks))
+            *(_one(i, s, u, im, audios[i] if i < len(audios) else [])
+              for i, (s, u, im) in enumerate(tasks))
         )
         out = [""] * len(tasks)
         for idx, text in results:

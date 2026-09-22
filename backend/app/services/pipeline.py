@@ -166,7 +166,14 @@ async def run_pipeline(job: Job, video_path: Path) -> JobResult:
     client = VLMClient()
     client.require_configured()
 
+    # 是否给模型附上音频片段。只在「开了开关」且「ASR 没给出转写」时才附——
+    # 已经有逐句转写文本时再送音频纯属浪费 token，而且模型未必比转写更准。
+    attach_audio = bool(s.vlm_audio_input) and audio.has_audio and not audio.segments
+    if attach_audio:
+        log.info("VLM_AUDIO_INPUT 已开启且无 ASR 转写，将为每块附上音频片段")
+
     tasks: list[tuple[str, str, list[Path]]] = []
+    audio_per_task: list[list[Path]] = []
     for ci, items in enumerate(chunk_frames):
         cstart = chunks[ci][0].start
         cend = chunks[ci][-1].end
@@ -175,18 +182,36 @@ async def run_pipeline(job: Job, video_path: Path) -> JobResult:
         prev_notes = ""
         if ci > 0:
             prev_notes = "\n\nContext from the previous segment (already analysed, do not repeat it):\n"
+
+        audio_text = _audio_slice(audio, cstart, cend)
+        audios: list[Path] = []
+        if attach_audio:
+            seg = await asyncio.to_thread(
+                ff.extract_audio_segment, video_path, cstart, cend
+            )
+            if seg:
+                audios = [seg]
+                audio_text += (
+                    f"\n【本段音频已随请求附上（{cend - cstart:.1f}s）】"
+                    "你可以直接听。听出来的内容以你的听觉为准，"
+                    "但只描述确实听到的，不确定就说不确定。"
+                )
+
         user = templates.build_pass1_user(
             chunk_start=cstart,
             chunk_end=cend,
             frame_marks=marks,
-            audio_text=_audio_slice(audio, cstart, cend),
+            audio_text=audio_text,
             media=media,
             chunk_index=ci,
             chunk_total=total_chunks,
         )
         tasks.append((templates.PASS1_SYSTEM, prev_notes + user, imgs))
+        audio_per_task.append(audios)
 
-    raw_outputs = await client.complete_many(tasks, max_tokens=6144)
+    raw_outputs = await client.complete_many(
+        tasks, max_tokens=6144, audio_per_task=audio_per_task
+    )
     store.raise_if_cancelled(job_id)
 
     observations: list[ChunkObservation] = []

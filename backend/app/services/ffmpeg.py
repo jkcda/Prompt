@@ -373,18 +373,82 @@ def extract_audio(
     return None
 
 
+def extract_audio_segment(
+    src: str | Path,
+    start: float,
+    end: float,
+    out_path: Path | None = None,
+    sample_rate: int = 16000,
+) -> Path | None:
+    """抽某个时间段的音频（给 Pass1 附音频用，只需该分块的那一段）。
+
+    单声道 16kHz PCM 是为了控制体积：60 秒约 1.9MB，base64 后约 2.6MB，
+    离 OpenAI 的 25MB 上限还很远。用 44.1kHz 立体声会直接放大 5 倍以上。
+    """
+    span = max(0.1, end - start)
+    out_path = out_path or (
+        Path(tempfile.mkdtemp(prefix="aseg-", dir=str(TMP_DIR))) / f"seg_{start:.2f}.wav"
+    )
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    args = [
+        ffmpeg_required(), "-hide_banner", "-nostats", "-loglevel", "error",
+        # -ss 放在 -i 前面走快速定位，长视频上差别很明显
+        "-ss", f"{max(0.0, start):.3f}",
+        "-i", str(src),
+        "-t", f"{span:.3f}",
+        "-vn", "-acodec", "pcm_s16le",
+        "-ar", str(sample_rate), "-ac", "1",
+        "-y", str(out_path),
+    ]
+    try:
+        run(args, timeout=300)
+    except subprocess.TimeoutExpired:
+        return None
+
+    if out_path.is_file() and out_path.stat().st_size > 1024:
+        return out_path
+    return None
+
+
 _VOL_RE = re.compile(r"(mean_volume|max_volume):\s*(-?[0-9.]+)\s*dB")
 _SIL_START = re.compile(r"silence_start:\s*(-?[0-9.]+)")
 _SIL_END = re.compile(r"silence_end:\s*(-?[0-9.]+)")
 
 
+def _band_mean_volume(src: str | Path, filters: str) -> float | None:
+    """测某个频段的平均音量（dB）。滤镜链由调用方给，例如 `lowpass=f=200`。"""
+    try:
+        cp = run([
+            ffmpeg_required(), "-hide_banner", "-nostats",
+            "-i", str(src),
+            "-af", f"{filters},volumedetect",
+            "-f", "null", "-",
+        ], timeout=300)
+    except Exception:  # noqa: BLE001
+        return None
+    for name, val in _VOL_RE.findall(_decode(cp.stderr)):
+        if name == "mean_volume":
+            return float(val)
+    return None
+
+
 def analyze_audio_levels(src: str | Path) -> dict:
-    """音量与静音分析：判断是否有 BGM、哪里是安静段/卡点。"""
+    """音量、静音、以及频段能量分布。
+
+    为什么加频段能量：没配 ASR 时音频内容完全未知，但如果只报一句「未转写」，
+    音频维度就彻底废了。频谱能量是 ffmpeg 能直接测出来的**客观量**，
+    它不能告诉你「是什么声音」，但能告诉你「能量集中在哪」——
+    足够让模型写出「疑似以人声为主、低频成分弱」这种**有依据的谨慎描述**，
+    而不是编造，也不是空白。
+    """
     result: dict = {
         "mean_volume_db": None,
         "peak_volume_db": None,
         "silence_ratio": None,
         "loudness_points": [],
+        "speech_band_db": None,
+        "low_band_db": None,
     }
 
     try:
@@ -419,6 +483,21 @@ def analyze_audio_levels(src: str | Path) -> dict:
         result["loudness_points"] = [round(x, 2) for x in ends[:40]]
     except Exception:  # noqa: BLE001
         pass
+
+    # 频段能量：语音频段（人声/对白主要落在这里）与低频段（鼓、贝斯、音乐铺底）
+    #
+    # 滤波链都串两遍：ffmpeg 的 highpass/lowpass 是单极点（6dB/oct），太缓。
+    # 单极点 lowpass=f=200 挡不住 440Hz —— 实测纯 440Hz 正弦的低频相对能量
+    # 是 -13.8dB（明显是泄漏），串成 12dB/oct 后降到 -27.7dB，区分度才够。
+    full = result["mean_volume_db"]
+    if full is not None:
+        speech = _band_mean_volume(src, "highpass=f=300,highpass=f=300,"
+                                        "lowpass=f=3400,lowpass=f=3400")
+        if speech is not None:
+            result["speech_band_db"] = round(speech - full, 1)
+        low = _band_mean_volume(src, "lowpass=f=200,lowpass=f=200")
+        if low is not None:
+            result["low_band_db"] = round(low - full, 1)
 
     return result
 

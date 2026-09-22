@@ -492,9 +492,17 @@ def test_audio_report_no_track_says_na():
 
 def test_pass2_rules_forbid_fabricated_sound():
     system = build_pass2_system("h3", "en")
-    assert "NOT transcribed" in system
+    assert "not transcribed" in system
     assert "Fabricated sound is worse than an empty field" in system
     assert "not even hedged" in system, "要堵住「似乎/仿佛」这种模糊编造"
+
+
+def test_pass2_rules_forbid_inferring_sound_from_visuals():
+    """看到人走路就写 footsteps，本质还是编声音——真实模型这么写过。"""
+    system = build_pass2_system("h3", "en")
+    assert "Do NOT convert visual events into sound events" in system
+    assert "footsteps" in system and "cloth rustle" in system
+    assert "leave the sound unspecified" in system
 
 
 def test_pipeline_audio_slice_warns_when_no_transcript():
@@ -511,3 +519,67 @@ def test_pipeline_audio_slice_no_track():
     text = _audio_slice(AudioReport(has_audio=False), 0.0, 10.0)
     assert "没有音轨" in text
     assert "N/A" in text
+
+
+# ---------------------------------------------------------------------------
+# 频谱特征（无 ASR 时唯一可用的音频信息）
+# ---------------------------------------------------------------------------
+
+def test_spectrum_speech_dominant():
+    from app.services.asr import describe_spectrum
+
+    lines = describe_spectrum(AudioReport(has_audio=True, speech_band_db=-1.0, low_band_db=-25.0))
+    joined = "\n".join(lines)
+    assert "能量高度集中在这一频段" in joined
+    assert "频谱无法区分" in joined, "纯音调也会落在这个频段，必须说明分不出来"
+    assert "低频很弱" in joined
+    # 不能升级成内容断言
+    assert "有人说话" not in joined
+    assert "对白为主" not in joined
+
+
+def test_spectrum_music_like():
+    from app.services.asr import describe_spectrum
+
+    lines = describe_spectrum(AudioReport(has_audio=True, speech_band_db=-12.0, low_band_db=-4.0))
+    joined = "\n".join(lines)
+    assert "不太像以人声为主" in joined
+    assert "疑似有节奏性的音乐编排" in joined
+    assert "但也可能是低频环境噪声" in joined, "低频强不等于一定有鼓点"
+
+
+def test_spectrum_mixed_case():
+    """典型情况：人声 + 配器，两个频段都有能量。"""
+    from app.services.asr import describe_spectrum
+
+    lines = describe_spectrum(AudioReport(has_audio=True, speech_band_db=-4.5, low_band_db=-4.3))
+    joined = "\n".join(lines)
+    assert "混有其他频段成分" in joined
+    assert "人声 + 配器" in joined
+
+
+def test_spectrum_missing_values_are_skipped():
+    from app.services.asr import describe_spectrum
+
+    assert describe_spectrum(AudioReport(has_audio=True)) == []
+
+
+def test_spectrum_is_included_in_prompt_but_bounded():
+    """频谱数据可以给，但必须标明边界——它是能量分布，不是内容识别。"""
+    from app.services.asr import format_transcript_for_prompt
+
+    report = AudioReport(has_audio=True, speech_band_db=-1.2, low_band_db=-19.0)
+    text = format_transcript_for_prompt(report)
+    assert "音频频谱特征" in text
+    assert "不是内容识别" in text
+    assert "不得据此断言具体内容" in text
+    # 禁令仍然在
+    assert "禁止描述任何具体的声音" in text
+
+
+def test_pass2_rule_distinguishes_content_from_spectrum():
+    """规则要允许频谱倾向描述，否则和频谱数据自相矛盾。"""
+    system = build_pass2_system("h3", "en")
+    assert "distinguish CONTENT from SPECTRUM" in system
+    assert "voice-dominant" in system
+    assert "does not license" in system

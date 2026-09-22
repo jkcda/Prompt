@@ -66,7 +66,7 @@ def test_diagnose_null_choices_zero_tokens():
     }
     msg = VLMClient._diagnose_empty(payload, n_images=3)
     assert "Vendor/Some-VL-Model" in msg
-    assert "不支持图片输入" in msg
+    assert "不支持本次请求用到的输入模态" in msg
     assert "没有开通推理服务" in msg
     assert "3 张图片" in msg
     assert "/api/health/vlm" in msg, "要给出下一步动作"
@@ -132,6 +132,88 @@ def test_openai_payload_without_images_has_only_text(jpeg: Path):
     content = client._openai_payload("sys", "usr", [], 100)["messages"][1]["content"]
     assert len(content) == 1
     assert content[0]["type"] == "text"
+
+
+# ---------------------------------------------------------------------------
+# 音频输入
+# ---------------------------------------------------------------------------
+
+def test_openai_payload_embeds_audio_as_input_audio(tmp_path: Path):
+    """OpenAI 协议的音频块是 input_audio，不是 image_url。"""
+    wav = tmp_path / "a.wav"
+    wav.write_bytes(b"RIFF" + b"\x00" * 2048)
+
+    client = VLMClient(api_key="k", base_url="http://x/v1", model="m")
+    payload = client._openai_payload("sys", "usr", [], 100, audio=[wav])
+    content = payload["messages"][1]["content"]
+
+    assert content[0]["type"] == "text"
+    assert content[1]["type"] == "input_audio"
+    assert content[1]["input_audio"]["format"] == "wav"
+    assert base64.b64decode(content[1]["input_audio"]["data"]).startswith(b"RIFF")
+
+
+def test_audio_and_image_can_coexist(tmp_path: Path, jpeg: Path):
+    wav = tmp_path / "a.mp3"
+    wav.write_bytes(b"ID3" + b"\x00" * 1024)
+
+    client = VLMClient(api_key="k", base_url="http://x/v1", model="m")
+    content = client._openai_payload("s", "u", [jpeg], 100, audio=[wav])["messages"][1]["content"]
+    types = [c["type"] for c in content]
+    assert types == ["text", "image_url", "input_audio"]
+
+
+def test_audio_block_rejects_unknown_format(tmp_path: Path):
+    """格式白名单之外要明确报错，而不是发一个必然失败的请求。"""
+    from app.services.vlm import _audio_block
+
+    bad = tmp_path / "a.txt"
+    bad.write_bytes(b"hello")
+    with pytest.raises(ValueError, match="不支持的音频格式"):
+        _audio_block(bad)
+
+
+def test_audio_block_rejects_oversized_clip(tmp_path: Path):
+    from app.services.vlm import _AUDIO_MAX_BYTES, _audio_block
+
+    big = tmp_path / "big.wav"
+    big.write_bytes(b"\x00" * (_AUDIO_MAX_BYTES + 1))
+    with pytest.raises(ValueError, match="超过"):
+        _audio_block(big)
+
+
+def test_anthropic_payload_drops_audio_without_failing(tmp_path: Path, jpeg: Path):
+    """Anthropic 协议没有音频块，应该丢掉音频继续跑，而不是让整个任务失败。"""
+    wav = tmp_path / "a.wav"
+    wav.write_bytes(b"RIFF" + b"\x00" * 1024)
+
+    client = VLMClient(api_key="k", base_url="http://x/v1", model="m", protocol="anthropic")
+    payload = client._anthropic_payload("s", "u", [jpeg], 100, audio=[wav])
+    blocks = payload["messages"][0]["content"]
+    assert [b["type"] for b in blocks] == ["text", "image"]
+
+
+def test_diagnose_mentions_audio_when_audio_attached():
+    """带音频却空响应时，要提示可能是音频不被支持，而不是笼统说图片问题。"""
+    payload = {"model": "m", "choices": None, "usage": {"prompt_tokens": 0}}
+    msg = VLMClient._diagnose_empty(payload, n_images=3, n_audio=1)
+    assert "1 段音频" in msg
+    assert "VLM_AUDIO_INPUT" in msg, "要给出下一步动作"
+
+
+def test_diagnose_omits_audio_hint_without_audio():
+    """没带音频时不要出现音频相关的排查提示（会误导排查方向）。"""
+    payload = {"model": "m", "choices": None, "usage": {"prompt_tokens": 0}}
+    msg = VLMClient._diagnose_empty(payload, n_images=3, n_audio=0)
+    assert "段音频" not in msg
+    assert "VLM_AUDIO_INPUT" not in msg
+
+
+def test_diagnose_says_multimodal_may_be_image_only():
+    """「多模态」不等于支持音频，报错里要点明这个常见误解。"""
+    payload = {"model": "m", "choices": None, "usage": {"prompt_tokens": 0}}
+    msg = VLMClient._diagnose_empty(payload, n_images=1, n_audio=0)
+    assert "只支持图片" in msg
 
 
 def test_anthropic_payload_uses_image_blocks(jpeg: Path):

@@ -144,6 +144,41 @@ def test_analyze_audio_levels(sample_video: Path):
     assert levels["silence_ratio"] is not None
 
 
+def test_analyze_audio_levels_includes_band_energy(sample_video: Path):
+    """频段能量是没配 ASR 时唯一能拿到的音频信息，必须测出来。
+
+    sample_video 的音轨是 440Hz 正弦波，落在语音频段(300-3400Hz)内，
+    所以 speech_band_db 应该接近 0（能量几乎全在这一频段）。
+    """
+    levels = ff.analyze_audio_levels(sample_video)
+    assert levels["speech_band_db"] is not None
+    assert levels["low_band_db"] is not None
+    assert levels["speech_band_db"] > -6, f"440Hz 正弦应集中在语音频段，实测 {levels['speech_band_db']}"
+    assert levels["low_band_db"] < levels["speech_band_db"], "440Hz 在 200Hz 以下应该没有能量"
+
+
+def test_extract_audio_segment_isolates_time_range(sample_video: Path, tmp_path: Path):
+    """Pass1 附音频时只送该分块那一段，不该送整片。"""
+    seg = ff.extract_audio_segment(sample_video, 2.0, 5.0, tmp_path / "s.wav")
+    assert seg is not None and seg.is_file()
+    assert seg.read_bytes()[:4] == b"RIFF"
+    info = ff.probe(seg)
+    assert 2.5 < info.duration < 3.5, f"期望约 3 秒，实测 {info.duration}"
+
+
+def test_extract_audio_segment_is_small_enough_for_api(sample_video: Path, tmp_path: Path):
+    """16kHz 单声道是为了控制体积：60 秒约 1.8MB，远低于接口上限。"""
+    seg = ff.extract_audio_segment(sample_video, 0.0, 9.5, tmp_path / "long.wav")
+    assert seg is not None
+    per_second = seg.stat().st_size / 9.5
+    assert per_second * 60 < 5 * 1024 * 1024, f"60 秒会到 {per_second * 60 / 1048576:.1f}MB，太大"
+
+
+def test_extract_audio_segment_clamps_negative_start(sample_video: Path, tmp_path: Path):
+    seg = ff.extract_audio_segment(sample_video, -3.0, 2.0, tmp_path / "neg.wav")
+    assert seg is not None and seg.is_file()
+
+
 def test_segment_video_produces_chunks(sample_video: Path, tmp_path: Path):
     segs = ff.segment_video(sample_video, tmp_path, chunk_seconds=4.0, total_duration=10.0)
     assert len(segs) == 3

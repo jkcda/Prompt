@@ -65,4 +65,11 @@ class AudioReport(BaseModel):
     peak_volume_db: float | None = None
     silence_ratio: float | None = None
     loudness_points: list[float] = Field(default_factory=list)
+
+    # ---- 频谱能量特征（ffmpeg 实测，不需要任何模型）----
+    # 没有 ASR 时，这几个数字是唯一能拿到的音频信息。
+    # 它们只能说明「能量分布在哪」，不能说明「是什么声音」——
+    # 所以措辞必须停在「疑似以人声为主」，绝不能说成「有对白」。
+    speech_band_db: float | None = None   # 300-3400Hz 相对全频段的能量（dB，越接近 0 越集中于人声频段）
+    low_band_db: float | None = None      # <200Hz 相对全频段的能量（dB，越接近 0 低频越强）
     note: str = ""
