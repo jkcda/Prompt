@@ -156,8 +156,11 @@ export const useAnalyzeStore = defineStore('analyze', () => {
   const stageMessage = computed(() => job.value?.progress.message ?? '')
 
   /** 结果页要显示的视频地址：优先任务的，其次本地预览。 */
+  // 优先级：刚上传/下载的 > 本地预览 > 任务里的地址。
+  // 旧任务放最后 —— 换素材时虽然已经 clearJobState() 了，但多一层保险：
+  // 万一某条路径漏了清理，也不会让预览显示上一个视频。
   const videoUrl = computed(
-    () => job.value?.video_url || uploadResult.value?.video_url || localPreviewUrl.value || '',
+    () => uploadResult.value?.video_url || localPreviewUrl.value || job.value?.video_url || '',
   )
 
   const prompt = computed(() => job.value?.result?.prompt ?? '')
@@ -215,8 +218,10 @@ export const useAnalyzeStore = defineStore('analyze', () => {
 
   function setFile(f: File | null) {
     clearPreview()
+    clearJobState()          // 换了素材，上一个任务的结果就不属于它了
     file.value = f
     uploadResult.value = null
+    trimRange.value = null
     if (f) {
       localPreviewUrl.value = URL.createObjectURL(f)
     }
@@ -260,6 +265,8 @@ export const useAnalyzeStore = defineStore('analyze', () => {
    */
   async function prepare() {
     error.value = ''
+    // 准备新素材 = 上一个任务的结论作废。不清的话它的 video_url 会盖住新的。
+    clearJobState()
     preparing.value = true
     try {
       if (mode.value === 'upload') {
@@ -285,7 +292,25 @@ export const useAnalyzeStore = defineStore('analyze', () => {
     }
   }
 
+  /**
+   * 清掉上一次分析的状态。**换素材时必须调。**
+   *
+   * 踩过：`videoUrl` 里 `job.value?.video_url` 优先级最高，换素材后旧任务的
+   * 地址仍然盖着新素材 —— 表现是「上传了新视频，预览里还是上一个」。
+   * 不刷新页面就一直错。
+   */
+  function clearJobState() {
+    detach()
+    stopTimer()
+    job.value = null
+    jobId.value = ''
+    events.value = []
+    elapsed.value = 0
+    error.value = ''
+  }
+
   function resetSource() {
+    clearJobState()
     uploadResult.value = null
     trimRange.value = null
   }
@@ -424,19 +449,13 @@ export const useAnalyzeStore = defineStore('analyze', () => {
   }
 
   function reset() {
-    detach()
-    stopTimer()
+    clearJobState()
     clearPreview()
     file.value = null
     uploadResult.value = null
     uploadPercent.value = 0
     linkUrl.value = ''
     probeResult.value = null
-    jobId.value = ''
-    job.value = null
-    events.value = []
-    error.value = ''
-    elapsed.value = 0
   }
 
   function clearError() {
@@ -453,7 +472,7 @@ export const useAnalyzeStore = defineStore('analyze', () => {
     // 来源
     mode, file, localPreviewUrl, uploadResult, uploadPercent, uploading,
     linkUrl, probeResult, probing, trimRange, knownDuration,
-    ready, preparing, prepare, resetSource,
+    ready, preparing, prepare, resetSource, clearJobState,
     // 任务
     jobId, job, events, starting, error, elapsed, history, historyLoading,
     // 派生

@@ -1,0 +1,34 @@
+{
+  "model": "deepseek-ai/DeepSeek-V4.1-Flash",
+  "messages": [
+    {
+      "role": "system",
+      "content": "<PASS1_SYSTEM 见 pass1_system.txt>"
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "<用户消息文本>"
+        },
+        {
+          "type": "image_url",
+          "image_url": {
+            "url": "data:image/jpeg;base64,<每帧一张，约 75KB → base64 后约 100KB>"
+          }
+        },
+        {
+          "type": "image_url",
+          "image_url": {
+            "url": "data:image/jpeg;base64,<第二帧...>"
+          }
+        }
+      ]
+    }
+  ],
+  "max_tokens": 16384,
+  "temperature": 0.2,
+  "stream": false,
+  "enable_thinking": false
+}

@@ -1145,3 +1145,36 @@ def test_collapse_noop_for_single_shot():
 
     one = [ShotObservation(shot="1", action="a")]
     assert collapse_continuous_shots(one, "continuous") == one
+
+
+def test_dump_prompts_exports_everything(tmp_path):
+    """提示词导出工具要能跑通，且覆盖全部格式。
+
+    提示词是这个项目的核心资产，改一个字都影响产出。
+    导出成文本对照着读，比在 9000 字的 Python 字符串里翻快得多。
+    """
+    from app import dump_prompts
+
+    files = dump_prompts.dump(tmp_path)
+    names = {f.name for f in files}
+    assert "pass1_system.txt" in names
+    assert "pass1_user.txt" in names
+    assert "pass2_user.txt" in names
+    assert "payload.json" in names
+    for fmt in ("h3", "h3-ref", "seedance", "generic"):
+        assert f"pass2_system_{fmt}.txt" in names, f"缺 {fmt}"
+
+    for f in files:
+        assert f.stat().st_size > 0, f"{f.name} 是空的"
+
+    # 导出的 Pass1 用户消息里要能看到帧时间戳列表和说明注入
+    p1u = (tmp_path / "pass1_user.txt").read_text(encoding="utf-8")
+    assert "Image 1 -> timestamp" in p1u
+    assert "sampling aid, not the edit structure" in p1u
+    assert "CONTEXT FROM THE PERSON WHO SUBMITTED" in p1u
+
+    # payload 骨架要能当 JSON 读回来，且图片是占位符
+    payload = json.loads((tmp_path / "payload.json").read_text(encoding="utf-8"))
+    assert payload["messages"][0]["role"] == "system"
+    assert payload["messages"][1]["role"] == "user"
+    assert any(p.get("type") == "image_url" for p in payload["messages"][1]["content"])
