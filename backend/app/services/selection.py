@@ -55,20 +55,39 @@ class PlannedFrame:
     role: str  # head | mid | tail | uniform
 
 
-def _positions_in_shot(start: float, end: float, count: int) -> list[tuple[float, str]]:
+def _positions_in_shot(
+    start: float, end: float, count: int, is_first_shot: bool = False
+) -> list[tuple[float, str]]:
     """在镜头内部挑选 count 个时间点，返回 (时间, 角色)。
 
-    内缩 8% 或 0.12 秒，避免取到转场混合帧/重复帧。
+    内缩只为避开「切点本身那一帧」—— 场景检测报的 pts_time 就是新镜头的
+    第一帧，理论上直接取 start 就对。但检测值可能有几十毫秒误差，误差偏前
+    就会取到上一个镜头的最后一帧，所以留一点点余量。
+
+    ⚠️ 余量必须**很小**。原来内缩 `min(dur*8%, 0.35)`，8 秒镜头的首帧跑到
+    0.35s 去了 —— 用户直接反馈「首帧你不拿」。现在收到 `min(dur*2%, 0.08)`，
+    8 秒镜头首帧在 0.08s。
+
+    **全片第一个镜头不内缩**：它前面没有上一个镜头，不存在取错帧的问题，
+    而「视频的第一帧」本身就是要看的东西。
     """
     dur = max(0.0, end - start)
     if dur <= 0.0:
         return [(start, "mid")]
 
-    inset = min(dur * 0.08, 0.35)
-    if dur < 0.5:
-        inset = 0.0
+    if is_first_shot:
+        lo = max(0.0, start)
+    else:
+        inset = min(dur * 0.02, 0.08)
+        if dur < 0.5:
+            inset = 0.0
+        lo = start + inset
 
-    lo, hi = start + inset, end - inset
+    inset_tail = min(dur * 0.02, 0.08)
+    if dur < 0.5:
+        inset_tail = 0.0
+    hi = end - inset_tail
+
     if hi <= lo:
         lo = hi = start + dur / 2
 
@@ -205,7 +224,8 @@ def plan_frames(
 
     out = []
     for i, (a, b) in enumerate(shots):
-        for t, role in _positions_in_shot(a, b, alloc[i]):
+        # 全片第一个镜头不内缩 —— 视频的第一帧本身就是要看的东西
+        for t, role in _positions_in_shot(a, b, alloc[i], is_first_shot=(i == 0)):
             out.append(PlannedFrame(i, t, role))
 
     out.sort(key=lambda f: f.time)

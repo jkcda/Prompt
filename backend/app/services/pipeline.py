@@ -294,22 +294,28 @@ async def run_pipeline(job: Job, video_path: Path) -> JobResult:
 
     observations: list[ChunkObservation] = []
     for ci, raw in enumerate(raw_outputs):
-        shots_obs, subjects_obs, notes = templates.parse_pass1_json(raw)
+        parsed = templates.parse_pass1_json(raw)
         chunk = chunks[ci]
         observations.append(ChunkObservation(
             chunk_index=ci,
             start=chunk[0].start,
             end=chunk[-1].end,
-            shots=shots_obs,
-            subjects=subjects_obs,
-            global_notes=notes,
+            shots=parsed.shots,
+            subjects=parsed.subjects,
+            global_notes=parsed.global_notes,
+            # 模型自己判断的剪辑结构 —— 我们的场景检测只是抽帧采样单位，
+            # 不是剪辑事实，一镜到底经常被它切碎（用户反馈过）。
+            edit_structure=parsed.edit_structure,
+            cut_points=parsed.cut_points,
+            continuity_notes=parsed.continuity_notes,
             raw=raw,
         ))
         await store.emit(job_id, {
             "type": "chunk",
             "index": ci,
-            "shots": len(shots_obs),
-            "subjects": len(subjects_obs),
+            "shots": len(parsed.shots),
+            "subjects": len(parsed.subjects),
+            "edit_structure": parsed.edit_structure,
             "total": total_chunks,
         })
 

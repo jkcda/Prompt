@@ -6,6 +6,8 @@ Pass1 的 JSON 解析必须足够宽容——模型经常包 markdown 围栏、�
 
 from __future__ import annotations
 
+import json
+
 from app.schemas import (
     AudioReport,
     ChunkObservation,
@@ -17,6 +19,7 @@ from app.services.templates import (
     FORMAT_LABELS,
     MODE_LABELS,
     MODE_VARIANTS,
+    PASS1_SYSTEM,
     build_compress_system,
     build_compress_user,
     build_pass1_user,
@@ -57,8 +60,14 @@ GOOD_JSON = """
 """
 
 
+
+def _unpack(raw: str):
+    """把 Pass1Parse 拆成 (shots, subjects, notes) —— 沿用原来的断言写法。"""
+    r = parse_pass1_json(raw)
+    return r.shots, r.subjects, r.global_notes
+
 def test_parse_plain_json():
-    shots, subjects, notes = parse_pass1_json(GOOD_JSON)
+    shots, subjects, notes = _unpack(GOOD_JSON)
     assert len(shots) == 1
     assert shots[0].shot_size == "medium"
     assert shots[0].dialogue == "你好"
@@ -67,44 +76,44 @@ def test_parse_plain_json():
 
 
 def test_parse_json_with_markdown_fence():
-    shots, _, _ = parse_pass1_json(f"```json\n{GOOD_JSON}\n```")
+    shots, _, _ = _unpack(f"```json\n{GOOD_JSON}\n```")
     assert len(shots) == 1
 
 
 def test_parse_json_with_preamble_and_trailing_text():
     raw = f"Sure, here is the analysis:\n{GOOD_JSON}\nLet me know if you need more."
-    shots, _, _ = parse_pass1_json(raw)
+    shots, _, _ = _unpack(raw)
     assert len(shots) == 1
 
 
 def test_parse_json_with_trailing_comma():
     broken = GOOD_JSON.replace('"handheld throughout"', '"handheld throughout",')
-    shots, _, _ = parse_pass1_json(broken)
+    shots, _, _ = _unpack(broken)
     assert len(shots) == 1
 
 
 def test_parse_garbage_returns_empty():
-    shots, subjects, notes = parse_pass1_json("I cannot analyze this video.")
+    shots, subjects, notes = _unpack("I cannot analyze this video.")
     assert shots == []
     assert subjects == []
     assert notes == ""
 
 
 def test_parse_empty_string():
-    shots, _, _ = parse_pass1_json("")
+    shots, _, _ = _unpack("")
     assert shots == []
 
 
 def test_parse_ignores_unknown_fields():
     raw = '{"shots":[{"shot":"1","unknown_field":"x","action":"walks"}],"global_notes":""}'
-    shots, _, _ = parse_pass1_json(raw)
+    shots, _, _ = _unpack(raw)
     assert len(shots) == 1
     assert shots[0].action == "walks"
 
 
 def test_parse_skips_non_dict_entries():
     raw = '{"shots":["nope",{"shot":"1","action":"walks"}],"global_notes":""}'
-    shots, _, _ = parse_pass1_json(raw)
+    shots, _, _ = _unpack(raw)
     assert len(shots) == 1
 
 
@@ -130,7 +139,7 @@ SUBJECTS_JSON = """
 
 
 def test_parse_subjects():
-    _, subjects, _ = parse_pass1_json(SUBJECTS_JSON)
+    _, subjects, _ = _unpack(SUBJECTS_JSON)
     assert len(subjects) == 1
     assert subjects[0].label == "performer"
     assert subjects[0].kind == "person"
@@ -141,24 +150,24 @@ def test_parse_subjects():
 def test_parse_subjects_accepts_comma_string_shots():
     """模型有时把 shots 写成逗号串而不是数组，两种都要收。"""
     raw = '{"shots":[],"subjects":[{"label":"x","shots":"1, 2,3"}]}'
-    _, subjects, _ = parse_pass1_json(raw)
+    _, subjects, _ = _unpack(raw)
     assert subjects[0].shots == ["1", "2", "3"]
 
 
 def test_parse_subjects_accepts_chinese_comma():
     raw = '{"shots":[],"subjects":[{"label":"x","shots":"1，2"}]}'
-    _, subjects, _ = parse_pass1_json(raw)
+    _, subjects, _ = _unpack(raw)
     assert subjects[0].shots == ["1", "2"]
 
 
 def test_parse_subjects_drops_empty_entries():
     raw = '{"shots":[],"subjects":[{"label":"","description":"","notes":"","shots":[]}]}'
-    _, subjects, _ = parse_pass1_json(raw)
+    _, subjects, _ = _unpack(raw)
     assert subjects == []
 
 
 def test_parse_subjects_missing_key_is_empty():
-    _, subjects, _ = parse_pass1_json(GOOD_JSON)
+    _, subjects, _ = _unpack(GOOD_JSON)
     assert subjects == []
 
 
@@ -939,3 +948,147 @@ def test_pass2_omits_hint_when_empty():
         shots_summary="1 shot", content_hint="",
     )
     assert "CONTEXT FROM THE USER" not in user
+
+
+# ---------------------------------------------------------------------------
+# 剪辑结构：让模型自己判断切镜，而不是照搬我们的场景检测
+# ---------------------------------------------------------------------------
+
+EDIT_JSON = """{
+  "subjects": [{"label": "boy", "kind": "person", "description": "a boy", "shots": ["1"]}],
+  "shots": [{"shot": "1", "timecode": "00:00.000", "shot_size": "medium",
+             "camera": "slow dolly-in", "subject": "boy", "action": "walks",
+             "setting": "park", "lighting": "daylight", "color": "warm",
+             "motion_energy": "medium", "on_screen_text": "none",
+             "dialogue": "", "sfx": "", "transition": "continues", "confidence": 0.9}],
+  "edit_structure": "continuous",
+  "cut_points": [],
+  "continuity_notes": "one unbroken camera move throughout",
+  "global_notes": "single take"
+}"""
+
+
+def test_parse_reads_edit_structure():
+    r = parse_pass1_json(EDIT_JSON)
+    assert r.edit_structure == "continuous"
+    assert r.cut_points == []
+    assert "unbroken" in r.continuity_notes
+    assert len(r.shots) == 1
+
+
+def test_parse_normalizes_structure_wording():
+    """模型写法五花八门，要归一到 continuous / multi_shot / unknown。"""
+    for raw, want in (
+        ("continuous", "continuous"),
+        ("CONTINUOUS SHOT", "continuous"),
+        ("one take", "continuous"),
+        ("single-take", "continuous"),
+        ("no cuts", "continuous"),
+        ("multi_shot", "multi_shot"),
+        ("multi-shot", "multi_shot"),
+        ("has cuts", "multi_shot"),
+        ("montage", "multi_shot"),
+        ("", "unknown"),
+        ("hard to tell", "unknown"),
+    ):
+        got = parse_pass1_json(json.dumps({"edit_structure": raw})).edit_structure
+        assert got == want, f"{raw!r} 应归一为 {want}，实际 {got}"
+
+
+def test_parse_cut_points_accepts_list_and_string():
+    a = parse_pass1_json('{"cut_points": ["00:03.400", "00:07.900"]}')
+    assert a.cut_points == ["00:03.400", "00:07.900"]
+    b = parse_pass1_json('{"cut_points": "00:03.400, 00:07.900"}')
+    assert b.cut_points == ["00:03.400", "00:07.900"]
+
+
+def test_parse_cut_points_drops_non_timecode():
+    """模型有时会塞进说明文字，只要时间码。"""
+    r = parse_pass1_json('{"cut_points": ["00:03.400", "at the flash", "", "12:00"]}')
+    assert r.cut_points == ["00:03.400", "12:00"]
+
+
+def test_missing_edit_structure_defaults_to_unknown():
+    r = parse_pass1_json('{"shots": []}')
+    assert r.edit_structure == "unknown"
+    assert r.cut_points == []
+
+
+def test_pass1_system_explains_the_detector_is_not_ground_truth():
+    """必须说清「时间戳来自检测器，不等于剪辑结构」。
+
+    踩过：原来只说「按时间戳分组」，模型就把检测器切的每一段当成一个镜头。
+    用户反馈「很多镜头其实是一镜到底的但是被切镜头了」。
+    """
+    s = PASS1_SYSTEM
+    assert "sampling heuristic, not ground truth" in s
+    assert "split a single continuous take" in s
+    assert "emit **ONE** entry in `shots`" in s
+    assert "tells the video model to cut there" in s, "要说清过度切分的后果"
+
+
+def test_pass1_user_says_timestamps_are_a_sampling_aid():
+    from app.services.templates import build_pass1_user
+
+    text = build_pass1_user(
+        chunk_start=0, chunk_end=10, frame_marks=[(0.0, "head"), (0.5, "mid")],
+        audio_text="", media=None, chunk_index=0, chunk_total=1,
+    )
+    assert "sampling aid, not the edit structure" in text
+    assert "edit_structure" in text
+
+
+def test_pass2_tells_writer_not_to_cut_a_continuous_take():
+    """成文阶段要被告知「这是一镜到底」——否则会写出一堆 [Shot N]。
+
+    一镜到底的片子被写成一堆 [Shot N]，生成的视频就会在原本连续的地方硬切。
+    """
+    from app.schemas import AudioReport, ChunkObservation, MediaInfo, ShotObservation
+
+    obs = [ChunkObservation(
+        chunk_index=0, start=0.0, end=10.0,
+        shots=[ShotObservation(shot="1", timecode="00:00.000", shot_size="medium",
+                               subject="boy", action="walks")],
+        edit_structure="continuous",
+        continuity_notes="one unbroken move",
+    )]
+    user = build_pass2_user(
+        observations=obs, audio=AudioReport(), media=MediaInfo(path="x", duration=10.0),
+        shots_summary="1 shot",
+    )
+    assert "EDIT STRUCTURE" in user
+    assert "CONTINUOUS" in user
+    assert "must NOT contain multiple `[Shot N]` markers" in user
+
+
+def test_pass2_lists_real_cut_points_for_multi_shot():
+    from app.schemas import AudioReport, ChunkObservation, MediaInfo, ShotObservation
+
+    obs = [ChunkObservation(
+        chunk_index=0, start=0.0, end=10.0,
+        shots=[ShotObservation(shot="1", timecode="00:00.000", shot_size="medium")],
+        edit_structure="multi_shot", cut_points=["00:03.400"],
+    )]
+    user = build_pass2_user(
+        observations=obs, audio=AudioReport(), media=MediaInfo(path="x", duration=10.0),
+        shots_summary="2 shots",
+    )
+    assert "MULTI_SHOT" in user
+    assert "00:03.400" in user
+    assert "follow THESE cuts" in user, "要用模型判断的切点，不是采样时间戳"
+
+
+def test_pass2_is_conservative_when_structure_unknown():
+    from app.schemas import AudioReport, ChunkObservation, MediaInfo, ShotObservation
+
+    obs = [ChunkObservation(
+        chunk_index=0, start=0.0, end=10.0,
+        shots=[ShotObservation(shot="1", timecode="00:00.000")],
+        edit_structure="unknown",
+    )]
+    user = build_pass2_user(
+        observations=obs, audio=AudioReport(), media=MediaInfo(path="x", duration=10.0),
+        shots_summary="1 shot",
+    )
+    assert "UNKNOWN" in user
+    assert "conservative" in user

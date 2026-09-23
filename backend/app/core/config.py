@@ -106,8 +106,10 @@ class Settings(BaseSettings):
     # 想要更长的单镜也一秒一帧，就把它调到 60 / 120。
     # 想限制**总**帧数请用 MAX_TOTAL_FRAMES，别指望这个。
     max_frames_per_shot: int = 24
-    # 镜头内平均多久取一帧。1.0 表示 8 秒的镜头取 8 帧。
-    frame_interval_seconds: float = 1.0
+    # 镜头内平均多久取一帧。**0.5 = 每秒两帧**（用户明确要求）。
+    # 一秒一帧对快速动作/特效内容偏疏 —— 半秒内发生的变化会被整段漏掉，
+    # 而模型看不到就只能编。一帧约 284 tokens，密度翻倍的成本可以接受。
+    frame_interval_seconds: float = 0.5
     # 单个镜头超过多少秒时额外补帧（保留给长镜头加权用）
     long_shot_seconds: float = 5.0
     # 把帧拼成网格图（contact sheet）再送给模型，0 = 关闭（每帧单独一张图）。

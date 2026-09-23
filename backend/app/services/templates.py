@@ -14,12 +14,49 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import dataclass, field
 
 from ..schemas import AudioReport, ChunkObservation, MediaInfo, ShotObservation, SubjectEntry
 
 # ---------------------------------------------------------------------------
 # Pass 1 —— 结构化镜头观察
 # ---------------------------------------------------------------------------
+
+_PASS1_EDIT_STRUCTURE_RULES = """
+HOW TO DECIDE THE SHOT STRUCTURE — read this carefully
+
+The frame timestamps you receive were chosen by an automated scene-change detector.
+**That detector is a sampling heuristic, not ground truth.** It splits on pixel
+difference, so it will:
+
+  * split a single continuous take into several "shots" whenever the camera moves
+    fast, something large enters frame, or the exposure changes
+  * miss real hard cuts that happen during motion or a flash
+  * fire several times around one soft transition
+
+So do NOT treat the timestamps as the edit structure. **Judge it yourself from what
+you see**, and report it in `edit_structure`:
+
+  * `continuous` — one uninterrupted take. The camera may move, the subject may move,
+    the framing may change — but there is no instant where the image jumps to a
+    different setup. Continuous movement, continuous lighting, continuous subject
+    position across the boundary = still one shot.
+  * `multi_shot` — there are real cuts: an instant where the frame content changes
+    discontinuously (different setup, jump in position, hard change of light).
+
+If it is `continuous`, emit **ONE** entry in `shots` covering the whole segment, even
+if the frames you were given span several detector groups. Then list `cut_points` as
+an empty array. Getting this right matters: a `[Shot N]` marker in the final prompt
+tells the video model to cut there, so over-splitting a continuous take produces a
+choppy result that does not match the source.
+
+If it is `multi_shot`, put the real cut timecodes in `cut_points` (MM:SS.mmm), and
+make the `shots` array follow those cuts — again, not the detector's grouping.
+
+When you genuinely cannot tell, use `unknown`, keep the detector's grouping, and say
+so in `continuity_notes`. Never invent a cut you cannot see.
+"""
+
 
 PASS1_SYSTEM = """You are a senior film analyst and prompt engineer. You will receive a \
 sequence of still frames sampled from ONE continuous video segment, each labelled with its \
@@ -68,6 +105,8 @@ burned-in captions as subjects. They are artefacts of the source file, not conte
 reproduce — registering them invites the generator to render them into the new video. \
 Mention them only in `on_screen_text`, never in `subjects`.
 
+""" + _PASS1_EDIT_STRUCTURE_RULES + """
+
 Output STRICT JSON only, no markdown fence, no commentary, matching exactly this shape \
 (`subjects` first, then `shots`):
 
@@ -100,9 +139,14 @@ Output STRICT JSON only, no markdown fence, no commentary, matching exactly this
       "confidence": 0.0
     }
   ],
+  "edit_structure": "continuous | multi_shot",
+  "cut_points": ["00:03.400", "00:07.900"],
+  "continuity_notes": "why you judge the edit structure this way",
   "global_notes": "cross-shot observations: overall style, recurring subjects, wardrobe continuity, \
 colour consistency, pacing pattern, anything the per-shot fields cannot capture"
 }"""
+
+
 
 
 def build_pass1_user(
@@ -134,8 +178,13 @@ def build_pass1_user(
     for i, (t, role) in enumerate(frame_marks, start=1):
         lines.append(f"  Image {i} -> timestamp {t:.3f}s [role: {role}]")
     lines.append("")
-    lines.append("Use the timestamp list above to group images into shots. A shot boundary is "
-                 "where the framing, subject, location or lighting changes abruptly.")
+    lines.append(
+        "These timestamps come from an automated scene-change detector. **They are a "
+        "sampling aid, not the edit structure** — the detector splits on pixel "
+        "difference, so it routinely breaks one continuous take into several groups "
+        "and can miss real cuts. Decide the actual shot structure yourself from what "
+        "you see, and report it in `edit_structure` / `cut_points`."
+    )
     lines.append("")
     lines.append(audio_text)
 
@@ -165,7 +214,25 @@ def build_pass1_user(
     return "\n".join(lines)
 
 
-def parse_pass1_json(raw: str) -> tuple[list[ShotObservation], list[SubjectEntry], str]:
+@dataclass
+class Pass1Parse:
+    """Pass1 的解析结果。
+
+    做成 dataclass 而不是越来越长的元组 —— 加「剪辑结构」这类字段时
+    不用把所有调用点都改一遍解包顺序。
+    """
+
+    shots: list[ShotObservation] = field(default_factory=list)
+    subjects: list[SubjectEntry] = field(default_factory=list)
+    global_notes: str = ""
+    # 模型自己判断的剪辑结构（不是我们切出来的）：
+    #   continuous = 一镜到底；multi_shot = 有硬切；unknown = 判断不了
+    edit_structure: str = "unknown"
+    cut_points: list[str] = field(default_factory=list)
+    continuity_notes: str = ""
+
+
+def parse_pass1_json(raw: str) -> Pass1Parse:
     """宽容解析 Pass1 的 JSON 输出（模型偶尔会包 markdown 围栏或加前后缀）。
 
     返回 `(逐镜头观察, 主体登记表, 跨镜头备注)`。解析不出来时返回空列表，
@@ -182,7 +249,7 @@ def parse_pass1_json(raw: str) -> tuple[list[ShotObservation], list[SubjectEntry
     start = text.find("{")
     end = text.rfind("}")
     if start == -1 or end == -1 or end <= start:
-        return [], [], ""
+        return Pass1Parse()
 
     try:
         data = json.loads(text[start:end + 1])
@@ -193,11 +260,45 @@ def parse_pass1_json(raw: str) -> tuple[list[ShotObservation], list[SubjectEntry
         try:
             data = json.loads(cleaned)
         except json.JSONDecodeError:
-            return [], [], ""
+            return Pass1Parse()
 
-    shots = _parse_shots(data.get("shots"))
-    subjects = _parse_subjects(data.get("subjects"))
-    return shots, subjects, str(data.get("global_notes") or "")
+    return Pass1Parse(
+        shots=_parse_shots(data.get("shots")),
+        subjects=_parse_subjects(data.get("subjects")),
+        global_notes=str(data.get("global_notes") or ""),
+        edit_structure=_normalize_structure(data.get("edit_structure")),
+        cut_points=_parse_cut_points(data.get("cut_points")),
+        continuity_notes=str(data.get("continuity_notes") or ""),
+    )
+
+
+def _normalize_structure(value: object) -> str:
+    """把模型写的各种说法归一到 continuous / multi_shot / unknown。"""
+    s = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    if not s:
+        return "unknown"
+    if any(k in s for k in ("continuous", "one_take", "single_take", "oners", "oner", "no_cut")):
+        return "continuous"
+    if any(k in s for k in ("multi", "cut", "edited", "montage")):
+        return "multi_shot"
+    return "unknown"
+
+
+def _parse_cut_points(raw: object) -> list[str]:
+    """切点列表。模型可能给字符串数组，也可能给逗号分隔的字符串。"""
+    if isinstance(raw, str):
+        parts = re.split(r"[,;\n]", raw)
+    elif isinstance(raw, list):
+        parts = [str(x) for x in raw]
+    else:
+        return []
+    out: list[str] = []
+    for p in parts:
+        p = p.strip()
+        # 只要看起来像时间码的（MM:SS.mmm / HH:MM:SS.mmm）
+        if p and re.match(r"^\d{1,2}:\d{2}(\.\d{1,3})?$", p):
+            out.append(p)
+    return out
 
 
 def _parse_shots(shots_raw: object) -> list[ShotObservation]:
@@ -723,6 +824,33 @@ def build_pass2_user(
         if chunk.global_notes:
             lines.append(f"  segment notes: {chunk.global_notes}")
         lines.append("")
+
+    # 剪辑结构要单独、显眼地说一遍 —— 它决定成文时要不要输出切点标记。
+    # 一镜到底的片子如果被写成一堆 [Shot N]，生成的视频就会在原本连续的地方
+    # 硬切，和源片完全不是一回事（用户反馈过「镜头连贯性不对」）。
+    lines.append("=== EDIT STRUCTURE (decided by the observer, authoritative) ===")
+    structures = [c.edit_structure for c in observations if c.edit_structure]
+    if "continuous" in structures and "multi_shot" not in structures:
+        lines.append("CONTINUOUS — the footage is ONE uninterrupted take. There are no cuts.")
+        lines.append("Therefore the description must NOT contain multiple `[Shot N]` markers "
+                     "implying cuts. Describe the whole thing as a single continuous shot: "
+                     "use one `[Shot 1]` (or none at all) and carry the camera movement, "
+                     "subject motion and framing changes through as continuous evolution.")
+    elif "multi_shot" in structures:
+        lines.append("MULTI_SHOT — there are real cuts.")
+        for c in observations:
+            if c.cut_points:
+                lines.append(f"  segment {c.chunk_index + 1} cut points: {', '.join(c.cut_points)}")
+        lines.append("Use `[Shot N]` markers that follow THESE cuts — not the sampling "
+                     "timestamps, and not the detector's grouping.")
+    else:
+        lines.append("UNKNOWN — the observer could not tell. Keep the shot markers "
+                     "conservative: only mark a cut where the report describes an "
+                     "abrupt change of setup.")
+    for c in observations:
+        if c.continuity_notes:
+            lines.append(f"  segment {c.chunk_index + 1} reasoning: {c.continuity_notes}")
+    lines.append("")
 
     lines.append("=== AUDIO REPORT ===")
     from .asr import format_transcript_for_prompt

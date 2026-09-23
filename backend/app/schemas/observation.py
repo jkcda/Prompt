@@ -62,4 +62,13 @@ class ChunkObservation(BaseModel):
     shots: list[ShotObservation] = Field(default_factory=list)
     subjects: list[SubjectEntry] = Field(default_factory=list)
     global_notes: str = ""
+    # 剪辑结构：模型自己判断的，不是我们切出来的。
+    #
+    # 为什么单独记：我们的「镜头」是 ffmpeg 场景检测切出来的，那只是**抽帧用的
+    # 采样单位**，不是剪辑事实 —— 一镜到底的连续运镜经常被它切碎。
+    # 用户反馈过「很多镜头其实是一镜到底的但是被切镜头了」。
+    # 让模型从画面判断，成文阶段据此决定要不要输出切点标记。
+    edit_structure: str = ""          # continuous | multi_shot
+    cut_points: list[str] = Field(default_factory=list)   # 真实切点（MM:SS.mmm）
+    continuity_notes: str = ""        # 判断依据
     raw: str = ""
