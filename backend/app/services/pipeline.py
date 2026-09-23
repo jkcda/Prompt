@@ -352,7 +352,7 @@ async def run_pipeline(job: Job, video_path: Path) -> JobResult:
             "scene_threshold": used_threshold,
             "scene_adaptive": adaptive_note or "",
             "subjects": len(subjects),
-            "est_tokens": selection.estimate_tokens(total_frames),
+            "est_tokens": selection.estimate_tokens(total_frames, long_edge=s.frame_long_edge),
             "prompt_words": word_count,
             "prompt_chars": len(prompt),
             "prompt_word_limit": word_limit,

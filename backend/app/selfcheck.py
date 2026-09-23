@@ -68,7 +68,7 @@ def main(argv: list[str]) -> int:
         frame_interval=s.frame_interval_seconds,
     )
     print(f"\n[3] 选帧规划  ({time.time() - t0:.2f}s)")
-    print(f"    {selection.describe_plan(plan, shots)}")
+    print(f"    {selection.describe_plan(plan, shots, s.frame_long_edge)}")
     print(f"    前 8 帧: {[(round(p.time, 2), p.role) for p in plan[:8]]}")
 
     t0 = time.time()

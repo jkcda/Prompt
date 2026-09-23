@@ -17,8 +17,30 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-# 单帧图片（长边 ~900px）在主流多模态模型里的经验 token 成本
-TOKENS_PER_FRAME = 1100
+# 单帧图片的 token 成本。**这是实测值，不要凭感觉写。**
+#
+# 实测 DeepSeek-V4.1-Flash（单帧，16:9，不同长边）：
+#     448px -> 198 tokens     672px -> 198 tokens
+#     896px -> 284 tokens    1344px -> 602 tokens
+#
+# 规律：约等于 max(下限, 像素数 / 1600)。448 和 672 相同是因为模型按 patch
+# 对齐，小图有个约 200 token 的下限。
+#
+# ⚠️ 这里原来写的是 1100 —— 高了近 4 倍，导致 README 里「96 帧 ≈ 10.6 万 tokens」
+# 这种数字虚高到离谱，用户照着它估预算会严重误判（真实约 2.7 万）。
+IMAGE_TOKEN_FLOOR = 200
+PIXELS_PER_TOKEN = 1600
+# 默认按 16:9 估。竖屏 9:16 的像素数一样，不影响结果。
+DEFAULT_ASPECT = 16 / 9
+
+
+def tokens_per_frame(long_edge: int = 896, aspect: float = DEFAULT_ASPECT) -> int:
+    """单帧的 token 成本估算（按长边和画幅比例）。"""
+    long_edge = max(64, int(long_edge))
+    aspect = aspect if aspect > 0.1 else DEFAULT_ASPECT
+    # 长边固定，短边由画幅决定
+    w, h = (long_edge, long_edge / aspect) if aspect >= 1 else (long_edge * aspect, long_edge)
+    return max(IMAGE_TOKEN_FLOOR, int(w * h / PIXELS_PER_TOKEN))
 
 
 @dataclass
@@ -181,16 +203,25 @@ def _evenly_pick(total: int, want: int) -> list[int]:
     return sorted({int(i * total / want) for i in range(want)})
 
 
-def estimate_tokens(frame_count: int, text_chars: int = 0) -> int:
-    """粗略估算这次请求的 token 消耗，用于预算保护。"""
-    return frame_count * TOKENS_PER_FRAME + int(text_chars / 1.6)
+def estimate_tokens(
+    frame_count: int, text_chars: int = 0, long_edge: int = 896
+) -> int:
+    """粗略估算这次请求的 token 消耗，用于预算保护与展示。
+
+    ⚠️ 用实测公式而不是拍脑袋的常数 —— 之前那个常数高了近 4 倍。
+    """
+    return frame_count * tokens_per_frame(long_edge) + int(text_chars / 1.6)
 
 
 def fit_budget(frame_count: int, budget: int) -> int:
     return max(1, min(frame_count, budget))
 
 
-def describe_plan(plan: list[PlannedFrame], shots: list[tuple[float, float]]) -> str:
+def describe_plan(
+    plan: list[PlannedFrame],
+    shots: list[tuple[float, float]],
+    long_edge: int = 896,
+) -> str:
     """生成可读的选帧说明，用于日志和前端展示。"""
     from collections import Counter
 
@@ -203,5 +234,5 @@ def describe_plan(plan: list[PlannedFrame], shots: list[tuple[float, float]]) ->
         f"镜头 {len(shots)} 个 / 抽帧 {len(plan)} 张 / 覆盖 {span:.1f}s"
         f" / 每镜最多 {max(per_shot.values()) if per_shot else 0} 张"
         f" / 角色分布 {dict(roles)}"
-        f" / 预估 {estimate_tokens(len(plan)) / 1000:.1f}k tokens"
+        f" / 预估 {estimate_tokens(len(plan), long_edge=long_edge) / 1000:.1f}k tokens"
     )

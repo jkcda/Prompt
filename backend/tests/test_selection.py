@@ -10,10 +10,10 @@
 from __future__ import annotations
 
 from app.services.selection import (
-    TOKENS_PER_FRAME,
     describe_plan,
     estimate_tokens,
     plan_frames,
+    tokens_per_frame,
 )
 
 
@@ -97,7 +97,35 @@ def test_degenerate_zero_length_shot():
 
 
 def test_estimate_tokens_scales_with_frames():
-    assert estimate_tokens(10) == 10 * TOKENS_PER_FRAME
+    per = tokens_per_frame(896)
+    assert estimate_tokens(10, long_edge=896) == 10 * per
+
+
+def test_tokens_per_frame_matches_measurements():
+    """单帧 token 成本要用实测公式，不能拍脑袋。
+
+    实测 DeepSeek-V4.1-Flash（16:9，单帧）：
+        448px -> 198      672px -> 198      896px -> 284      1344px -> 602
+
+    这里原来硬编码 1100，高了近 4 倍 —— README 里「96 帧 ≈ 10.6 万 tokens」
+    因此虚高，用户照它估预算会严重误判（真实约 2.7 万）。
+    """
+    for edge, measured in ((448, 198), (672, 198), (896, 284), (1344, 602)):
+        got = tokens_per_frame(edge)
+        # 允许 ±25% 误差：模型按 patch 对齐，不同实现会有出入
+        assert abs(got - measured) / measured < 0.25, f"{edge}px: 估 {got}，实测 {measured}"
+
+
+def test_tokens_per_frame_has_a_floor():
+    """小图有个约 200 token 的下限（模型按 patch 对齐）。"""
+    assert tokens_per_frame(200) >= 190
+    assert tokens_per_frame(448) == tokens_per_frame(672)
+
+
+def test_estimate_is_not_wildly_high():
+    """回归：估算不能虚高到离谱 —— 96 帧实际约 2.7 万 tokens，不是 10 万。"""
+    est = estimate_tokens(96, long_edge=896)
+    assert 20_000 < est < 35_000, f"96 帧估成了 {est} tokens"
     assert estimate_tokens(10, 1600) > estimate_tokens(10, 0)
 
 
