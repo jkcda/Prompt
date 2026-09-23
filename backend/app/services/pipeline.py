@@ -295,6 +295,9 @@ async def run_pipeline(job: Job, video_path: Path) -> JobResult:
     observations: list[ChunkObservation] = []
     for ci, raw in enumerate(raw_outputs):
         parsed = templates.parse_pass1_json(raw)
+        # 模型报 unknown 但只给了 1 个条目 = 没找到切点，等同 continuous。
+        # 归一之后成文阶段才能拿到明确的「不许写切点标记」指令。
+        structure = templates.resolve_edit_structure(parsed.edit_structure, parsed.shots)
         chunk = chunks[ci]
         observations.append(ChunkObservation(
             chunk_index=ci,
@@ -302,14 +305,12 @@ async def run_pipeline(job: Job, video_path: Path) -> JobResult:
             end=chunk[-1].end,
             # 模型经常「判断对了但写不对」：报 continuous 却仍按帧给 20 个条目。
             # 判断归模型，后果归代码 —— 这里强制合并。
-            shots=templates.collapse_continuous_shots(
-                parsed.shots, parsed.edit_structure
-            ),
+            shots=templates.collapse_continuous_shots(parsed.shots, structure),
             subjects=parsed.subjects,
             global_notes=parsed.global_notes,
             # 模型自己判断的剪辑结构 —— 我们的场景检测只是抽帧采样单位，
             # 不是剪辑事实，一镜到底经常被它切碎（用户反馈过）。
-            edit_structure=parsed.edit_structure,
+            edit_structure=structure,
             cut_points=parsed.cut_points,
             continuity_notes=parsed.continuity_notes,
             raw=raw,

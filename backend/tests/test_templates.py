@@ -1178,3 +1178,28 @@ def test_dump_prompts_exports_everything(tmp_path):
     assert payload["messages"][0]["role"] == "system"
     assert payload["messages"][1]["role"] == "user"
     assert any(p.get("type") == "image_url" for p in payload["messages"][1]["content"])
+
+
+def test_unknown_with_single_shot_resolves_to_continuous():
+    """报 unknown 但只给 1 个条目 = 没找到切点，等同 continuous。
+
+    实测：一段同画面慢推的 10 秒素材（各阈值下 0 切点），模型报了 unknown、
+    只给了 1 个条目。归一到 continuous 后成文阶段才拿到明确的
+    「不许写切点标记」指令，而不是含糊的保守处理。
+    """
+    from app.services.templates import resolve_edit_structure
+
+    one = [ShotObservation(shot="1", timecode="00:00.000")]
+    assert resolve_edit_structure("unknown", one) == "continuous"
+    assert resolve_edit_structure("unknown", []) == "continuous"
+
+
+def test_resolve_keeps_explicit_labels():
+    from app.services.templates import resolve_edit_structure
+
+    many = [ShotObservation(shot=str(i)) for i in range(5)]
+    one = [ShotObservation(shot="1")]
+    assert resolve_edit_structure("multi_shot", many) == "multi_shot"
+    assert resolve_edit_structure("continuous", one) == "continuous"
+    # unknown + 多个条目 = 真的拿不准，保持保守
+    assert resolve_edit_structure("unknown", many) == "unknown"

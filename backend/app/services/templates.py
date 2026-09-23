@@ -264,6 +264,21 @@ class Pass1Parse:
     continuity_notes: str = ""
 
 
+def resolve_edit_structure(edit_structure: str, shots: list[ShotObservation]) -> str:
+    """把模型报的结构和它实际给的条目数对齐一下。
+
+    模型经常报 `unknown`（拿不准），但同时只给了 1 个条目 —— 那实际上就是
+    「没找到任何切点」，等同于 `continuous`。归一到 `continuous` 之后，
+    成文阶段才能拿到明确的「不许写切点标记」指令，而不是含糊的保守处理。
+
+    实测：一段同画面慢推的 10 秒素材（各阈值下 0 切点），模型报了 `unknown`，
+    只给了 1 个条目。归一到 continuous 后成文阶段才真的不会切。
+    """
+    if edit_structure == "unknown" and len(shots) <= 1:
+        return "continuous"
+    return edit_structure
+
+
 def collapse_continuous_shots(
     shots: list[ShotObservation], edit_structure: str
 ) -> list[ShotObservation]:

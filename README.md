@@ -878,6 +878,110 @@ YTDLP_FORMAT=bv*[height<=720][ext=mp4]+ba[ext=m4a]/bv*[height<=720]+ba/b[height<
 
 ---
 
+## 查看实际用的提示词
+
+提示词是这个项目的核心资产 —— 改一个字都影响产出质量。但 Pass1 的系统提示词
+有 9000 字符，在 Python 字符串里翻没法读。所以有个导出命令：
+
+```bash
+cd backend
+python -m app.dump_prompts prompts-dump
+```
+
+导出 8 个文件：
+
+| 文件 | 内容 |
+|---|---|
+| `pass1_system.txt` | 观察阶段的系统提示词（含镜头结构判断规则） |
+| `pass1_user.txt` | 用户消息样例 —— 能看到帧时间戳列表长什么样 |
+| `pass2_system_h3.txt` | T2VA 成文提示词 |
+| `pass2_system_h3-ref.txt` | Ref2VA 成文提示词 |
+| `pass2_system_seedance.txt` | Seedance 成文提示词 |
+| `pass2_system_generic.txt` | 通用格式 |
+| `pass2_user.txt` | 观察结果是怎么整理给成文阶段的 |
+| `payload.json` | 实际发出去的 HTTP body 骨架 |
+
+导出目录默认 `prompts-dump/`，可以传参数改。已在 `.gitignore` 里 ——
+它是生成物，随时能重新导出。
+
+### 一次请求实际提交了什么
+
+**Pass1（带图）**
+
+```jsonc
+{
+  "model": "...",
+  "messages": [
+    { "role": "system", "content": "<9007 字符的系统提示词>" },
+    { "role": "user", "content": [
+        { "type": "text", "text": "<帧时间戳列表 + 音频 + 用户画面说明>" },
+        { "type": "image_url", "image_url": { "url": "data:image/jpeg;base64,..." } },
+        { "type": "image_url", "image_url": { "url": "data:image/jpeg;base64,..." } }
+    ]}
+  ],
+  "max_tokens": 16384,
+  "enable_thinking": false
+}
+```
+
+**Pass2（无图）** —— 只提交系统提示词和观察结果文本，**不重新看图**。
+这样成文阶段不会因为再看到画面而改写观察结论。
+
+一次请求的体量：2 帧约 194 KB，**其中 100% 是 base64 图片**
+（每帧约 75KB → base64 后约 100KB → 约 284 tokens）。
+
+## 查看实际用的提示词
+
+提示词是这个项目的核心资产 —— 改一个字都影响产出质量。但 Pass1 的系统提示词
+有 9000 字符，在 Python 字符串里翻没法读。所以有个导出命令：
+
+```bash
+cd backend
+python -m app.dump_prompts prompts-dump
+```
+
+导出 8 个文件：
+
+| 文件 | 内容 |
+|---|---|
+| `pass1_system.txt` | 观察阶段的系统提示词（含镜头结构判断规则） |
+| `pass1_user.txt` | 用户消息样例 —— 能看到帧时间戳列表长什么样 |
+| `pass2_system_h3.txt` | T2VA 成文提示词 |
+| `pass2_system_h3-ref.txt` | Ref2VA 成文提示词 |
+| `pass2_system_seedance.txt` | Seedance 成文提示词 |
+| `pass2_system_generic.txt` | 通用格式 |
+| `pass2_user.txt` | 观察结果是怎么整理给成文阶段的 |
+| `payload.json` | 实际发出去的 HTTP body 骨架 |
+
+导出目录默认 `prompts-dump/`，可以传参数改。已在 `.gitignore` 里 ——
+它是生成物，随时能重新导出。
+
+### 一次请求实际提交了什么
+
+**Pass1（带图）**
+
+```jsonc
+{
+  "model": "...",
+  "messages": [
+    { "role": "system", "content": "<9007 字符的系统提示词>" },
+    { "role": "user", "content": [
+        { "type": "text", "text": "<帧时间戳列表 + 音频 + 用户画面说明>" },
+        { "type": "image_url", "image_url": { "url": "data:image/jpeg;base64,..." } },
+        { "type": "image_url", "image_url": { "url": "data:image/jpeg;base64,..." } }
+    ]}
+  ],
+  "max_tokens": 16384,
+  "enable_thinking": false
+}
+```
+
+**Pass2（无图）** —— 只提交系统提示词和观察结果文本，**不重新看图**。
+这样成文阶段不会因为再看到画面而改写观察结论。
+
+一次请求的体量：2 帧约 194 KB，**其中 100% 是 base64 图片**
+（每帧约 75KB → base64 后约 100KB → 约 284 tokens）。
+
 ## 测试
 
 ```bash
