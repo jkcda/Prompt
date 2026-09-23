@@ -272,10 +272,20 @@ ffmpeg -i in.mp4 -vf "select='gt(scene,0.30)',showinfo" -an -f null -
 
 **不需要 ffprobe** —— 缺失时自动改用 `ffmpeg -i` 解析媒体信息。
 
-> 换平台部署（比如 Linux）时，把对应平台的 ffmpeg 放到
-> `backend/vendor/ffmpeg/` 即可，或者用 `FFMPEG_PATH` 指过去。
-> Windows 那份是 `.exe`，Linux 上要找静态构建（如
-> [johnvansickle.com/ffmpeg](https://johnvansickle.com/ffmpeg/) 的 amd64 static）。
+**两个平台的二进制都在仓库里**，部署到哪边就用哪边：
+
+| 平台 | 文件 | 大小 |
+|---|---|---|
+| Windows | `backend/vendor/ffmpeg/ffmpeg.exe` | 79 MB |
+| Linux x64 | `backend/vendor/ffmpeg/ffmpeg` | 76 MB |
+
+查找逻辑会自动按平台加不加 `.exe` 后缀，两份各自会被找到。
+
+> Linux 那份是 6.1.1，和 Windows 同版本（取自 ffmpeg-static b6.1.1 的 linux-x64），
+> 避免两个平台产出不一致。可执行位（100755）已经在 git 里标记好了。
+>
+> 换别的架构（arm64 等）时，把对应平台的 ffmpeg 放进同一目录、或用
+> `FFMPEG_PATH` 指过去即可。
 
 ### 后端
 
@@ -452,7 +462,7 @@ python -m app.selfcheck path/to/video.mp4
 
 | 变量 | 默认值 | 说明 |
 |---|---|---|
-| `MAX_FRAMES_PER_SHOT` | `8` | **短片真正的瓶颈** —— 每个镜头的帧数上限 |
+| `MAX_FRAMES_PER_SHOT` | `24` | 每个镜头的帧数上限（**硬上限**）。见下方「一镜到底」 |
 | `FRAME_INTERVAL_SECONDS` | `1.0` | 镜头内平均多久取一帧 |
 | `MAX_TOTAL_FRAMES` | `96` | 单次请求总帧数上限（**安全网**，只在长视频里起作用） |
 | `LONG_SHOT_SECONDS` | `5.0` | 超过此时长的镜头优先补帧 |
@@ -473,11 +483,28 @@ python -m app.selfcheck path/to/video.mp4
 | | 之前 | 现在 |
 |---|---|---|
 | 15s / 4 镜 | 12 帧（每镜固定 3） | **15 帧**（5.4s 镜拿 5 帧、2.1s 镜拿 3 帧） |
-| 15s / 1 镜（长镜头访谈） | 3 帧 | **8 帧** |
+| 15s / 1 镜（一镜到底） | 3 帧 | **15 帧**（一秒一帧） |
 | 212s / 46 镜 | 48 帧，**14 个镜头一帧都没有** | **96 帧，全覆盖** |
 
 总预算降级成安全网：15 秒的短片只会用到 15 帧左右，把 `MAX_TOTAL_FRAMES`
 调大不影响短片，只保证长视频不失控。
+
+#### 一镜到底的视频：注意单镜上限
+
+「一镜到底」时所有内容都在一个镜头里，帧数完全由 `MAX_FRAMES_PER_SHOT` 决定：
+
+| 视频 | 旧默认（上限 8） | 新默认（上限 24） |
+|---|---|---|
+| 15s / 1 镜 | 8 帧（一帧管 1.9s） | **15 帧**（一秒一帧） |
+| 60s / 1 镜 | 8 帧（一帧管 7.5s） | 24 帧 |
+
+原来默认 8 会让连续镜头严重欠采样，模型看不出中间发生了什么，
+而预算还剩一大半没用。**想让更长的单镜也一秒一帧，就把上限调到对应秒数**
+（比如 60 秒的单镜设 `MAX_FRAMES_PER_SHOT=60`）。
+
+> 试过「镜头少时自动抬高上限」，但那会让这个配置在常见场景下失效
+> （4 镜时上限被抬到 24，设 3 还是 8 效果一样）。**配置项失去意义比不够灵活更糟**，
+> 所以保持硬上限、只改默认值。要限制总帧数请用 `MAX_TOTAL_FRAMES`。
 
 **按上下文选值**：一帧约 284 tokens（长边 896px，实测）。
 
@@ -711,6 +738,7 @@ Qwen-Omni）再把这个开关打开。
   "options": {
     "format": "h3-ref",              // h3 | h3-ref | seedance | generic
     "enable_asr": false,
+    "content_hint": "一镜到底的跟拍运镜；主角是白发少女，赛博朋克冷色调",
     "trim_start": 5.5,               // 只推这一段（秒，相对原片）
     "trim_end": 11.2,                // 两个必须同时给；不给就是整片
     "max_total_frames": null,        // 留空用服务端默认
@@ -719,6 +747,17 @@ Qwen-Omni）再把这个开关打开。
   }
 }
 ```
+
+**关于 `content_hint`**：用户自己写的画面说明，**同时喂给观察阶段和成文阶段**。
+
+静态帧判断不出三件事，而它们直接影响产出质量：
+
+- **这段是一镜到底还是多镜头切换** —— 静态帧里看不出来
+- **主体是谁**（角色 / 作品 / 产品 / 地点）—— 模型不认识冷门 IP
+- **动作的前因后果** —— 只看到中间一段会误判
+
+补一句话比让模型瞎猜强得多。措辞上做了两层约束防止模型拿它当观察结果照抄：
+Pass1 声明「画面与说明冲突时**相信画面**」，Pass2 声明「观察结果才是权威」。
 
 **关于 `trim_*`**：给了就只分析这段区间，返回的时间戳也是**相对这个片段**的
 （从 0 开始），而不是原片的绝对时间 —— 因为你要拿它去生成一段新视频。
@@ -843,7 +882,7 @@ YTDLP_FORMAT=bv*[height<=720][ext=mp4]+ba[ext=m4a]/bv*[height<=720]+ba/b[height<
 
 ```bash
 cd backend
-pytest                    # 全部 290 个
+pytest                    # 全部 307 个
 pytest -q tests/test_selection.py     # 只跑选帧策略
 pytest -q tests/test_pipeline_e2e.py  # 只跑端到端
 ruff check app tests                  # 静态检查
@@ -853,10 +892,11 @@ ruff check app tests                  # 静态检查
 
 | 文件 | 数量 | 覆盖内容 |
 |---|---|---|
-| `test_selection.py` | 22 | 预算不超、每镜保底、**按镜头时长定帧数**、**每镜全覆盖**、`max_per_shot` 大于 3 生效、帧间隔调密度 |
+| `test_selection.py` | 29 | 预算不超、每镜保底、**按镜头时长定帧数**、**每镜全覆盖**、`max_per_shot` 大于 3 生效、帧间隔调密度 |
 | `test_ffmpeg.py` | 45 | 真实视频跑探测 / 场景检测 / 抽帧 / 缩放 / 音频 / 切分 / 频段能量 / 音频片段抽取 / 自适应镜头检测 / 拼图与布局说明 / **片段截取（帧精确）** |
-| `test_templates.py` | 59 | Pass1 JSON 宽容解析、多块镜号重排、主体登记表合并、两种模式的模板硬约束、占位符替换、音频编造禁令、频谱措辞边界、**逐段长度预算**、**压缩指令与结构校验** |
+| `test_templates.py` | 65 | Pass1 JSON 宽容解析、多块镜号重排、主体登记表合并、两种模式的模板硬约束、占位符替换、音频编造禁令、频谱措辞边界、**逐段长度预算**、**压缩指令与结构校验** |
 | `test_downloader.py` | 24 | 中文分享文案取链接、平台识别、aweme_id、yt-dlp 选项（**含 `ffmpeg_location` 回归**）、清晰度封顶、失败原因上传 |
+| `test_ffmpeg_vendor.py` | 7 | ffmpeg 打包位置、跨平台查找优先级、**不硬编码开发机路径** |
 | `test_vlm.py` | 36 | 请求体构造（data URI / Anthropic 块 / **`input_audio` 音频块**）、响应解析（含 `choices: null`）、**空响应原因诊断**、音频格式白名单与体积上限、**关思考与按次覆盖**、base_url 带不带 `/v1` 都能用 |
 | `test_api.py` | 36 | 接口契约、模式分组、上传校验、Range 流、SQLite 往返、缺列自愈、提示词库、**模型热切换**、**测试不污染真实 .env** |
 | `test_pipeline_e2e.py` | 19 | **完整管线**：帧数对齐、预算生效、四种格式、主体登记表贯通到 Pass2、模式不串味、进度事件、分块、无 key 报错、**片段截取只推选中区间** |
@@ -1001,7 +1041,7 @@ location /api/ {
 | **真实模型 + 真实素材** | `DeepSeek-V4.1-Flash`，13.3s / 1080p 特效视频 | 88 秒，切点 10 / 镜头 4 / 抽帧 12 / 主体 8，正文 572 词 |
 | 前端构建 | `vue-tsc + vite build` | 通过，112 模块 |
 | 静态检查 | `ruff check app tests` | 通过 |
-| 测试 | — | **290 passed** |
+| 测试 | — | **307 passed** |
 
 **模型真的在看图**：喂 SMPTE 彩条帧，它正确识别出彩条布局，并读出了画面里的
 实际数字（6.0s 那帧是 `'6'`，9.5s 是 `'9'`）。
