@@ -43,6 +43,7 @@ export const useAnalyzeStore = defineStore('analyze', () => {
     prompt_word_limit: null,
     trim_start: null,
     trim_end: null,
+    content_hint: '',
     extra_instruction: '',
     target_duration: null,
   })

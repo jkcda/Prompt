@@ -873,3 +873,69 @@ def test_integrity_ignores_subject_and_shot_checks_for_t2va():
     )
     ok, why = check_prompt_integrity(T2VA_PROMPT, shorter)
     assert ok, f"T2VA 没有主体标签，不该做主体校验：{why}"
+
+
+# ---------------------------------------------------------------------------
+# 用户画面说明（content_hint）
+# ---------------------------------------------------------------------------
+
+def _pass1(hint: str = "") -> str:
+    return build_pass1_user(
+        chunk_start=0.0, chunk_end=10.0,
+        frame_marks=[(0.5, "head"), (5.0, "mid")],
+        audio_text="【音频】无转写。", media=None,
+        chunk_index=0, chunk_total=1, content_hint=hint,
+    )
+
+
+def test_content_hint_is_injected_into_pass1():
+    """用户的画面说明要进观察阶段。
+
+    静态帧判断不出「一镜到底还是多镜头切换」「这是什么作品/角色」，
+    而这些直接影响产出质量。用户反馈「ai无法认出视频是切镜头还是一镜到底，
+    所以还是需要人工提示词辅助」。
+    """
+    hint = "一镜到底的跟拍运镜，全程没有切镜；主角是白发少女，穿黑色风衣"
+    text = _pass1(hint)
+    assert hint in text
+    assert "CONTEXT FROM THE PERSON WHO SUBMITTED" in text
+    assert "one continuous take or has cuts" in text, "要点明它能补充镜头结构这类信息"
+
+
+def test_content_hint_absent_when_empty():
+    text = _pass1("")
+    assert "CONTEXT FROM THE PERSON WHO SUBMITTED" not in text
+
+
+def test_content_hint_is_whitespace_tolerant():
+    assert "CONTEXT FROM" not in _pass1("   \n  ")
+
+
+def test_content_hint_does_not_override_observation():
+    """说明是辅助，不能取代实际观察 —— 否则模型会照抄用户的描述当观察结果。"""
+    text = _pass1("主角是白发少女")
+    assert "Do NOT copy it verbatim" in text
+    assert "trust the frames" in text, "画面和说明冲突时要相信画面"
+
+
+def test_content_hint_reaches_pass2():
+    """成文阶段也要拿到说明 —— 观察结果可能漏掉或误判的东西要用得上。"""
+    from app.schemas import AudioReport, MediaInfo
+
+    user = build_pass2_user(
+        observations=[], audio=AudioReport(), media=MediaInfo(path="x", duration=10.0),
+        shots_summary="1 shot", content_hint="一镜到底，赛博朋克冷色调",
+    )
+    assert "CONTEXT FROM THE USER" in user
+    assert "一镜到底，赛博朋克冷色调" in user
+    assert "observation report above is authoritative" in user, "观察结果优先"
+
+
+def test_pass2_omits_hint_when_empty():
+    from app.schemas import AudioReport, MediaInfo
+
+    user = build_pass2_user(
+        observations=[], audio=AudioReport(), media=MediaInfo(path="x", duration=10.0),
+        shots_summary="1 shot", content_hint="",
+    )
+    assert "CONTEXT FROM THE USER" not in user

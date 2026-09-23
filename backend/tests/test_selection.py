@@ -35,10 +35,23 @@ def test_every_shot_gets_at_least_one_frame():
     assert covered == set(range(20))
 
 
-def test_per_shot_cap_respected():
-    shots = [(0.0, 60.0)]  # 一个超长镜头
-    plan = plan_frames(shots, budget=48, max_per_shot=3)
-    assert len(plan) == 3
+def test_per_shot_cap_binds_when_shots_are_many():
+    """镜头多的时候，单镜上限要生效（防止少数镜头吃光预算）。
+
+    ⚠️ 单镜场景下这个上限**故意不生效** —— 见
+    test_single_shot_is_not_capped_at_max_per_shot：一镜到底时按预算放开。
+    """
+    shots = [(i * 4.0, (i + 1) * 4.0) for i in range(12)]
+    plan = plan_frames(shots, budget=96, max_per_shot=3, frame_interval=1.0)
+    counts = _counts(plan, 12)
+    assert max(counts.values()) == 3, f"单镜应该正好 3 帧：{counts}"
+    assert all(v >= 1 for v in counts.values()), "每个镜头都要被覆盖"
+
+
+def test_single_shot_uses_the_whole_budget_when_cap_allows():
+    """上限足够时，一镜到底要把预算用满（而不是固定给几帧）。"""
+    plan = plan_frames([(0.0, 60.0)], budget=48, max_per_shot=48, frame_interval=1.0)
+    assert len(plan) == 48, f"应该用满预算 48 帧，实际 {len(plan)}"
 
 
 def test_more_shots_than_budget_downsamples_evenly():
@@ -169,19 +182,24 @@ def test_max_frames_per_shot_above_three_is_honoured():
     原来 plan_frames 和 _split_budget 里都硬编码了 min(max_per_shot, 3)，
     把配置调到 8 也没用。
     """
-    shots = [(0, 10.0)]
-    plan = plan_frames(shots, budget=96, max_per_shot=8, frame_interval=1.0)
-    assert len(plan) == 8, f"10 秒镜头 + 上限 8 应该出 8 帧，实际 {len(plan)}"
+    # 用长镜头，让「每秒一帧」的期望值超过上限，上限才成为约束
+    shots = [(i * 20.0, (i + 1) * 20.0) for i in range(4)]
 
-    plan3 = plan_frames(shots, budget=96, max_per_shot=3, frame_interval=1.0)
-    assert len(plan3) == 3
+    def max_per(plan):
+        return max(_counts(plan, 4).values())
+
+    assert max_per(plan_frames(shots, 96, max_per_shot=8, frame_interval=1.0)) == 8
+    assert max_per(plan_frames(shots, 96, max_per_shot=3, frame_interval=1.0)) == 3
 
 
 def test_frame_interval_controls_density():
     shots = [(0, 12.0)]
-    assert len(plan_frames(shots, 96, max_per_shot=20, frame_interval=1.0)) == 12
-    assert len(plan_frames(shots, 96, max_per_shot=20, frame_interval=2.0)) == 6
-    assert len(plan_frames(shots, 96, max_per_shot=20, frame_interval=0.5)) == 20  # 夹在上限
+    assert len(plan_frames(shots, 96, max_per_shot=24, frame_interval=1.0)) == 12
+    assert len(plan_frames(shots, 96, max_per_shot=24, frame_interval=2.0)) == 6
+    # 间隔 0.5 想要 24 帧，正好等于上限
+    assert len(plan_frames(shots, 96, max_per_shot=24, frame_interval=0.5)) == 24
+    # 上限更小时被夹住
+    assert len(plan_frames(shots, 96, max_per_shot=8, frame_interval=0.5)) == 8
 
 
 def test_every_shot_covered_when_budget_allows():
@@ -217,8 +235,8 @@ def test_extreme_shot_count_falls_back_to_even_picking():
 
 def test_single_long_shot_gets_dense_frames():
     """单镜头视频（长镜头访谈）以前只能拿 3 帧，现在按秒数给。"""
-    plan = plan_frames([(0, 15.0)], budget=96, max_per_shot=8, frame_interval=1.0)
-    assert len(plan) == 8
+    plan = plan_frames([(0, 15.0)], budget=96, max_per_shot=24, frame_interval=1.0)
+    assert len(plan) == 15, f"15 秒单镜应该 15 帧（一秒一帧），实际 {len(plan)}"
     times = sorted(f.time for f in plan)
     assert times[0] < 2.0 and times[-1] > 13.0, "应该铺满整个镜头"
 
@@ -243,3 +261,39 @@ def test_describe_plan_mentions_sheets():
     text = describe_plan(plan, shots, 896, sheet_count=2, sheet_cells=9)
     assert "2 张网格" in text
     assert "每张 9 格" in text
+
+
+def test_default_cap_gives_one_frame_per_second_for_single_shot():
+    """一镜到底时按「一秒一帧」给，别被上限卡住。
+
+    踩过：默认每镜上限是 8，于是 15 秒的连续镜头只有 8 帧（一帧管 1.9 秒），
+    60 秒的只有 8 帧（一帧管 7.5 秒）—— 模型看不出中间发生了什么，
+    而预算还剩一大半没用。用户反馈「单分镜图不够」。
+
+    修法是**把默认上限调到 24**，而不是偷偷放开上限（那会让配置项失效）。
+    """
+    from app.core.config import get_settings
+
+    cap = get_settings().max_frames_per_shot
+    plan = plan_frames([(0.0, 15.0)], budget=96, max_per_shot=cap, frame_interval=1.0)
+    assert len(plan) == 15, f"15 秒单镜应该 15 帧，实际 {len(plan)}（上限 {cap}）"
+
+
+def test_cap_is_still_a_hard_limit():
+    """上限是硬的 —— 设小就真的少给。别为了照顾单镜把它变成空配置。
+
+    试过「镜头少时按 budget/镜头数 抬高上限」，结果 4 个镜头时上限被抬到 24，
+    设 3 还是设 8 效果完全一样，配置项失去意义。
+    """
+    for cap in (3, 8, 12):
+        plan = plan_frames([(0.0, 60.0)], budget=96, max_per_shot=cap, frame_interval=1.0)
+        assert len(plan) == cap, f"上限 {cap} 时应该只给 {cap} 帧，实际 {len(plan)}"
+
+
+def test_four_shots_behaviour_unchanged():
+    """4 个镜头的常规视频行为和原来一致 —— 别为了修单镜把常规场景改坏。"""
+    shots = [(0, 5.43), (5.43, 8.37), (8.37, 11.20), (11.20, 15.0)]
+    plan = plan_frames(shots, budget=96, max_per_shot=24, frame_interval=1.0)
+    assert len(plan) == 15
+    counts = _counts(plan, 4)
+    assert counts[0] == 5 and counts[3] == 4

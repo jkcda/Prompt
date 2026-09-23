@@ -202,6 +202,27 @@ watch(() => store.linkUrl, () => {
         />
       </div>
 
+      <!-- ------------------------------------------------ 画面说明 -->
+      <div class="hint-section">
+        <div class="trim-head">
+          <span class="field-label">画面说明（可选，但很有用）</span>
+          <span class="faint" style="font-size: 12px">
+            静态帧判断不出「一镜到底还是多镜头切换」「这是什么作品/角色」「动作的前因后果」，
+            你写一句就能大幅提升准确度
+          </span>
+        </div>
+        <textarea
+          v-model="store.options.content_hint"
+          class="textarea"
+          rows="3"
+          placeholder="例如：一镜到底的跟拍运镜，全程没有切镜；主角是白发少女，穿黑色风衣；赛博朋克冷色调，霓虹反光；画面里在下雨"
+        />
+        <div class="field-hint">
+          这段会同时喂给「观察」和「成文」两个阶段。写清<b>镜头结构</b>（一镜到底 / 多镜头切换）、
+          <b>主体是谁</b>、<b>在做什么</b> 最有效。不要写「要生成什么样的视频」——那是下面「额外要求」的事。
+        </div>
+      </div>
+
       <!-- ------------------------------------------------ 模式 -->
       <div class="divider" />
 
@@ -560,5 +581,14 @@ watch(() => store.linkUrl, () => {
   display: flex;
   flex-direction: column;
   gap: 4px;
+}
+
+.hint-section {
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border-soft);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
 }
 </style>

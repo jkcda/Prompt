@@ -30,6 +30,8 @@ export interface AnalyzeOptions {
   /** 只反推这段区间（秒，相对原片）。两个都为 null 表示整片。 */
   trim_start: number | null
   trim_end: number | null
+  /** 用户自己写的画面说明，喂给观察阶段和成文阶段。 */
+  content_hint: string
   extra_instruction: string
   target_duration: number | null
 }

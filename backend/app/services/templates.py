@@ -113,8 +113,14 @@ def build_pass1_user(
     media: MediaInfo | None,
     chunk_index: int,
     chunk_total: int,
+    content_hint: str = "",
 ) -> str:
-    """组织 Pass1 的用户消息文本（图片由调用方按顺序附在后面）。"""
+    """组织 Pass1 的用户消息文本（图片由调用方按顺序附在后面）。
+
+    `content_hint` 是用户自己写的画面说明。**这东西很有用**：静态帧看不出
+    「这段是一镜到底还是多镜头切换」「这是什么作品/角色」「动作的前因后果」，
+    而这些直接影响产出质量。让用户补一句话，比让模型瞎猜强得多。
+    """
     lines: list[str] = []
     lines.append(
         f"This is segment {chunk_index + 1} of {chunk_total}, covering "
@@ -132,6 +138,25 @@ def build_pass1_user(
                  "where the framing, subject, location or lighting changes abruptly.")
     lines.append("")
     lines.append(audio_text)
+
+    # 用户补充的画面说明。放在音频之后、正式指令之前 ——
+    # 位置太靠前容易被后面的长指令冲淡，太靠后又会被当成输出要求。
+    if content_hint.strip():
+        lines.append("")
+        lines.append("--- CONTEXT FROM THE PERSON WHO SUBMITTED THIS VIDEO ---")
+        lines.append("They wrote the following about this footage. Treat it as reliable "
+                     "background, and use it especially for things still frames cannot show:")
+        lines.append("  * whether the edit is one continuous take or has cuts between shots")
+        lines.append("  * what the action is, and what happens before/after this segment")
+        lines.append("  * who or what the subjects are (character, work, product, place)")
+        lines.append("  * the intended style or genre")
+        lines.append("")
+        lines.append(content_hint.strip())
+        lines.append("")
+        lines.append("Fold this into your own description. Do NOT copy it verbatim, and do not "
+                     "let it replace what you actually see — if the frames contradict it, "
+                     "trust the frames and note the discrepancy.")
+
     lines.append("")
     lines.append(
         "Now output the strict JSON described in your instructions. "
@@ -638,6 +663,7 @@ def build_pass2_user(
     target_duration: float | None = None,
     subjects: list[SubjectEntry] | None = None,
     fmt: str = "",
+    content_hint: str = "",
 ) -> str:
     """把 Pass1 的观察结果整理成 Pass2 的输入。"""
     lines: list[str] = []
@@ -654,6 +680,17 @@ def build_pass2_user(
         lines.append(f"target duration for the generated video: {target_duration:.2f}s")
     lines.append(f"target mode: {MODE_LABELS.get(mode_of(fmt), fmt or 'unknown')}")
     lines.append("")
+
+    # 用户的画面说明也要传给成文阶段。观察结果可能漏掉或误判的东西
+    # （尤其「一镜到底 vs 多镜头」这种静态帧判断不了的），成文时要用得上。
+    if content_hint.strip():
+        lines.append("=== CONTEXT FROM THE USER (reliable background) ===")
+        lines.append(content_hint.strip())
+        lines.append("")
+        lines.append("Use it to inform the rewrite, but the observation report above is "
+                     "authoritative about what is visible. If they conflict, follow the "
+                     "observation report and do not invent.")
+        lines.append("")
 
     registry = subjects or []
     if registry:

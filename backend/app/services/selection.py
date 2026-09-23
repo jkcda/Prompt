@@ -131,7 +131,17 @@ def plan_frames(
 
     durations = [max(0.05, b - a) for a, b in shots]
 
-    # --- 每个镜头的目标帧数：每秒约一帧，夹在 [min, max] 之间 ---
+    # --- 每个镜头的目标帧数：每秒约一帧，夹在 [min_per_shot, max_per_shot] 之间 ---
+    #
+    # ⚠️ `max_per_shot` 是**硬上限**，不要偷偷放开它。
+    #
+    # 试过「镜头少时按 budget/镜头数 抬高上限」，结果是这个配置在常见场景下
+    # 直接变成空配置（4 个镜头时上限被抬到 24，设 3 还是设 8 效果一样）——
+    # 配置项失去意义比不够灵活更糟。
+    #
+    # 「一镜到底抽帧太少」的正确修法是**把默认值调高**（8 → 24）：
+    # 15 秒的连续镜头给 15 帧，符合「一秒一帧」的直觉，而 4 镜头的视频
+    # 行为完全不变。想要 60 秒单镜也一秒一帧，把 MAX_FRAMES_PER_SHOT 调到 60 即可。
     target = [
         max(min_per_shot, min(max_per_shot, int(round(d / frame_interval)) or min_per_shot))
         for d in durations

@@ -34,6 +34,10 @@ class AnalyzeOptions(BaseModel):
     # 用户可以先看片再自由框选，避免把无关的前后内容也写进提示词。
     trim_start: float | None = None
     trim_end: float | None = None
+    # 用户自己写的画面说明。静态帧看不出「一镜到底还是多镜头切换」「这是什么
+    # 作品/角色」「动作的前因后果」，而这些直接影响产出质量 —— 让用户补一句话，
+    # 比让模型瞎猜强得多。会同时喂给观察阶段（Pass1）和成文阶段（Pass2）。
+    content_hint: str = ""
     extra_instruction: str = ""
     target_duration: float | None = None
 

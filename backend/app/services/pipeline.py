@@ -269,6 +269,7 @@ async def run_pipeline(job: Job, video_path: Path) -> JobResult:
             media=media,
             chunk_index=ci,
             chunk_total=total_chunks,
+            content_hint=opts.content_hint,
         )
         # 拼图模式要告诉模型「这是网格，不是单帧」，否则它会把整张图当成一帧。
         # 同时列出每张网格覆盖的时间点，模型才能把格子映射回时间轴。
@@ -334,6 +335,7 @@ async def run_pipeline(job: Job, video_path: Path) -> JobResult:
         target_duration=opts.target_duration,
         subjects=subjects,
         fmt=opts.format,
+        content_hint=opts.content_hint,
     )
 
     try:
