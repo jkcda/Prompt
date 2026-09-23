@@ -17,6 +17,9 @@
 
 两种 H3 变体的正文都**限 700 词以内**。
 
+**可以只推你要的那一段**：上传或抓取完成后先预览，拖动时间轴框出区间再反推。
+无关的片头片尾不会被写进提示词，时间戳也是相对这个片段的。
+
 ---
 
 ## 目录
@@ -31,6 +34,7 @@
 - [B站 / 抖音抓取](#b站--抖音抓取)
 - [测试](#测试)
 - [已知限制](#已知限制)
+- [部署到服务器](#部署到服务器)
 
 ---
 
@@ -250,16 +254,28 @@ ffmpeg -i in.mp4 -vf "select='gt(scene,0.30)',showinfo" -an -f null -
 | ffmpeg | **必需**。见下方安装说明 |
 | 多模态模型 | 任意 OpenAI 兼容服务（ModelScope / 百炼 / 方舟 / OpenRouter / 本地 vLLM） |
 
-### ffmpeg 安装
+### ffmpeg
 
-代码会按顺序自动查找，命中任一个即可：
+**已经打包在仓库里了**：`backend/vendor/ffmpeg/ffmpeg.exe`（79 MB，ffmpeg 6.1.1）。
+部署时不需要在服务器上另装。
 
-1. `backend/.env` 里的 `FFMPEG_PATH`
-2. `backend/runtime/ffmpeg.exe`
-3. 系统 `PATH`
-4. 常见安装目录
+查找顺序：
 
-**不需要 ffprobe**——缺失时会自动改用 `ffmpeg -i` 解析媒体信息。
+1. `backend/.env` 里的 `FFMPEG_PATH`（留空即跳过）
+2. **`backend/vendor/ffmpeg/`** ← 自带的那份
+3. `backend/runtime/`
+4. 系统 `PATH`
+5. 常见安装目录（`/usr/bin`、`C:/ffmpeg/bin` 等）
+
+自带二进制排在 `PATH` 之前，是为了让行为可复现 —— 服务器上装了什么版本
+不该影响这个服务的输出。
+
+**不需要 ffprobe** —— 缺失时自动改用 `ffmpeg -i` 解析媒体信息。
+
+> 换平台部署（比如 Linux）时，把对应平台的 ffmpeg 放到
+> `backend/vendor/ffmpeg/` 即可，或者用 `FFMPEG_PATH` 指过去。
+> Windows 那份是 `.exe`，Linux 上要找静态构建（如
+> [johnvansickle.com/ffmpeg](https://johnvansickle.com/ffmpeg/) 的 amd64 static）。
 
 ### 后端
 
@@ -661,7 +677,7 @@ Qwen-Omni）再把这个开关打开。
 
 ## 接口一览
 
-23 个接口，全部在 `/docs` 里可交互调试。
+24 个接口，全部在 `/docs` 里可交互调试。
 
 ### 系统
 
@@ -683,7 +699,36 @@ Qwen-Omni）再把这个开关打开。
 | POST | `/api/upload` | 上传视频（流式落盘，边写边校验大小） |
 | POST | `/api/analyze` | 对已上传文件发起反推 |
 | POST | `/api/fetch/probe` | 只解析链接信息，不下载 |
-| POST | `/api/fetch` | 抓取链接并反推 |
+| POST | `/api/fetch/download` | **只下载不反推** —— 返回和上传一样的信息，供前端预览并框选片段 |
+| POST | `/api/fetch` | 抓取链接并反推（一步到位，不给用户框选的机会） |
+
+#### `/api/analyze` 的请求体
+
+```jsonc
+{
+  "file_id": "1790075576_6512cc45.mp4",
+  "name": "参考.mp4",
+  "options": {
+    "format": "h3-ref",              // h3 | h3-ref | seedance | generic
+    "enable_asr": false,
+    "trim_start": 5.5,               // 只推这一段（秒，相对原片）
+    "trim_end": 11.2,                // 两个必须同时给；不给就是整片
+    "max_total_frames": null,        // 留空用服务端默认
+    "frame_interval_seconds": null,
+    "prompt_word_limit": null
+  }
+}
+```
+
+**关于 `trim_*`**：给了就只分析这段区间，返回的时间戳也是**相对这个片段**的
+（从 0 开始），而不是原片的绝对时间 —— 因为你要拿它去生成一段新视频。
+
+实现上是**先把片段切出来再跑整条管线**，所以探测、镜头检测、抽帧、音频、
+时间戳全部天然是相对片段的。另一种做法（把偏移量传遍管线、各处记得减）
+要在七八个地方各自维护，每漏一处就是一个隐蔽 bug。
+
+截取是**帧精确**的（重新编码，不是 `-c copy`）—— 用 `-c copy` 会把切点
+吸附到最近的关键帧，你选了 5.5s 却从 4.8s 开始，推出来的提示词就对不上了。
 
 ### 任务
 
@@ -798,7 +843,7 @@ YTDLP_FORMAT=bv*[height<=720][ext=mp4]+ba[ext=m4a]/bv*[height<=720]+ba/b[height<
 
 ```bash
 cd backend
-pytest                    # 全部 258 个
+pytest                    # 全部 290 个
 pytest -q tests/test_selection.py     # 只跑选帧策略
 pytest -q tests/test_pipeline_e2e.py  # 只跑端到端
 ruff check app tests                  # 静态检查
@@ -809,12 +854,12 @@ ruff check app tests                  # 静态检查
 | 文件 | 数量 | 覆盖内容 |
 |---|---|---|
 | `test_selection.py` | 22 | 预算不超、每镜保底、**按镜头时长定帧数**、**每镜全覆盖**、`max_per_shot` 大于 3 生效、帧间隔调密度 |
-| `test_ffmpeg.py` | 41 | 真实视频跑探测 / 场景检测 / 抽帧 / 缩放 / 音频 / 切分 / 频段能量 / 音频片段抽取 / 自适应镜头检测 / **拼图与布局说明** |
+| `test_ffmpeg.py` | 45 | 真实视频跑探测 / 场景检测 / 抽帧 / 缩放 / 音频 / 切分 / 频段能量 / 音频片段抽取 / 自适应镜头检测 / 拼图与布局说明 / **片段截取（帧精确）** |
 | `test_templates.py` | 59 | Pass1 JSON 宽容解析、多块镜号重排、主体登记表合并、两种模式的模板硬约束、占位符替换、音频编造禁令、频谱措辞边界、**逐段长度预算**、**压缩指令与结构校验** |
 | `test_downloader.py` | 24 | 中文分享文案取链接、平台识别、aweme_id、yt-dlp 选项（**含 `ffmpeg_location` 回归**）、清晰度封顶、失败原因上传 |
 | `test_vlm.py` | 36 | 请求体构造（data URI / Anthropic 块 / **`input_audio` 音频块**）、响应解析（含 `choices: null`）、**空响应原因诊断**、音频格式白名单与体积上限、**关思考与按次覆盖**、base_url 带不带 `/v1` 都能用 |
 | `test_api.py` | 36 | 接口契约、模式分组、上传校验、Range 流、SQLite 往返、缺列自愈、提示词库、**模型热切换**、**测试不污染真实 .env** |
-| `test_pipeline_e2e.py` | 15 | **完整管线**：帧数对齐、预算生效、四种格式、主体登记表贯通到 Pass2、模式不串味、进度事件、分块、无 key 报错 |
+| `test_pipeline_e2e.py` | 19 | **完整管线**：帧数对齐、预算生效、四种格式、主体登记表贯通到 Pass2、模式不串味、进度事件、分块、无 key 报错、**片段截取只推选中区间** |
 
 ### 关于 mock 模型
 
@@ -853,6 +898,94 @@ fastapi dev
 
 ---
 
+## 部署到服务器
+
+单机自用定位，没有鉴权。**对外暴露前先加认证**（见「已知限制」）。
+
+### 1. 拉代码
+
+```bash
+git clone <repo> && cd <repo>
+```
+
+ffmpeg 跟着仓库来，不用另装。注意仓库里有 79 MB 的二进制，
+克隆会比一般项目慢一些。
+
+### 2. 后端
+
+```bash
+cd backend
+python -m venv .venv
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
+pip install -e .
+cp .env.example .env
+```
+
+编辑 `.env`，**至少填这两项**：
+
+```ini
+VLM_API_KEY=你的密钥
+VLM_BASE_URL=https://api-inference.modelscope.cn/v1
+VLM_MODEL=Qwen/Qwen3.5-27B
+```
+
+其余留空即可（ffmpeg 会自动用自带的那份）。
+
+### 3. 前端
+
+```bash
+cd frontend
+npm ci
+npm run build        # 产物在 frontend/dist，后端会自动托管
+```
+
+后端启动时会挂载 `frontend/dist`，所以**不用单独跑前端服务**。
+
+### 4. 起服务
+
+```bash
+cd backend
+fastapi run --host 0.0.0.0 --port 8000
+```
+
+或走 uvicorn：
+
+```bash
+uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1
+```
+
+> ⚠️ **workers 必须是 1。** 任务状态存在进程内存里，
+> 多 worker 会导致「提交任务的进程」和「查询进度的进程」不是同一个，
+> 进度会查不到。
+
+### 5. 反向代理（可选）
+
+用 nginx / caddy 套一层 TLS。SSE 进度推送需要关掉缓冲：
+
+```nginx
+location /api/ {
+    proxy_pass http://127.0.0.1:8000;
+    proxy_buffering off;          # 不关的话进度不会实时推送
+    proxy_read_timeout 3600s;     # 长视频反推可能跑很久
+    client_max_body_size 600m;    # 与 MAX_UPLOAD_MB 对齐
+}
+```
+
+### 上线前检查
+
+| 项 | 怎么确认 |
+|---|---|
+| ffmpeg 就位 | `curl localhost:8000/api/health` 里 `ffmpeg` 为 `true` |
+| 模型可用 | `POST /api/health/vlm` —— 会真的发一张图实测，不是只 ping 一下 |
+| 前端已构建 | 浏览器打开首页有界面，不是 404 |
+| 数据目录可写 | `data/` 下能创建文件（上传与抽帧都写这里） |
+| 磁盘够用 | 抽帧产物按 `jobs × 帧数 × 30KB` 估；`data/tmp/` 会自动清理 |
+
+> **别把 `.env` 提交进仓库**（已在 `.gitignore` 里）。
+> 部署机上如果用了 CI/CD，密钥走环境变量或密钥管理，不要写进代码。
+
+---
+
 ## 验证记录
 
 不是「写完就交」的清单，是实际跑过的路径。
@@ -868,7 +1001,7 @@ fastapi dev
 | **真实模型 + 真实素材** | `DeepSeek-V4.1-Flash`，13.3s / 1080p 特效视频 | 88 秒，切点 10 / 镜头 4 / 抽帧 12 / 主体 8，正文 572 词 |
 | 前端构建 | `vue-tsc + vite build` | 通过，112 模块 |
 | 静态检查 | `ruff check app tests` | 通过 |
-| 测试 | — | **258 passed** |
+| 测试 | — | **290 passed** |
 
 **模型真的在看图**：喂 SMPTE 彩条帧，它正确识别出彩条布局，并读出了画面里的
 实际数字（6.0s 那帧是 `'6'`，9.5s 是 `'9'`）。
