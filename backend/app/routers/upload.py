@@ -12,6 +12,7 @@ from pathlib import Path
 from fastapi import APIRouter, File, HTTPException, UploadFile
 
 from ..core.config import UPLOAD_DIR
+from ..core.safe_delete import safe_delete
 from ..dependencies import SettingsDep
 from ..schemas import UploadResponse
 from ..services import ffmpeg as ff
@@ -56,18 +57,18 @@ async def upload_video(settings: SettingsDep, file: UploadFile = File(...)) -> U
                 total += len(chunk)
                 if total > limit:
                     fh.close()
-                    dst.unlink(missing_ok=True)
+                    safe_delete(dst)
                     raise HTTPException(413, f"文件超过 {settings.max_upload_mb}MB 上限")
                 fh.write(chunk)
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001
-        dst.unlink(missing_ok=True)
+        safe_delete(dst)
         log.exception("保存上传文件失败")
         raise HTTPException(500, f"保存上传文件失败：{exc}") from exc
 
     if total == 0:
-        dst.unlink(missing_ok=True)
+        safe_delete(dst)
         raise HTTPException(400, "上传的文件为空")
 
     info = await asyncio.to_thread(ff.probe, dst)

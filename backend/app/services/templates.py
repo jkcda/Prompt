@@ -454,12 +454,17 @@ def build_compress_system(limit: int) -> str:
         短指令 + 开思考 -> 581 词（砍 252 词，达标）
     编辑需要先想清楚「哪些能砍」，思考过程在这里是有用的。
     生成环节才需要关思考（那是照结构填内容，思考纯属浪费）。
-    """
-    return f"""You are a ruthless text editor. Shorten the prompt the user sends to \
-under {limit} words.
 
-Keep: the six section names in order, every `<Subject N>` label, every `[Shot N]` marker, \
-all retention markers, all dialogue verbatim, and `N/A` where present.
+    ⚠️ 目标值要比真实上限**更紧**：实测说「压到 700 以内」，模型压到 803 就收手了
+    （2297 → 803，确实砍了 65%，但还是超）。让它瞄 0.85 倍，落点才在上限之内。
+    """
+    target = max(1, int(limit * 0.85))
+    return f"""You are a ruthless text editor. Shorten the prompt the user sends to \
+under {target} words — it must end up comfortably below {limit}.
+
+Keep: the section names present in the original, in order, each on its own line \
+as a bare `name:`; every `<Subject N>` label; every `[Shot N]` marker; all retention \
+markers; all dialogue verbatim; and `N/A` where present.
 Cut: adjectives, filler, repeated descriptions, hedging.
 
 Output only the shortened prompt."""
@@ -467,10 +472,22 @@ Output only the shortened prompt."""
 
 def build_compress_user(prompt: str, limit: int) -> str:
     words = len(prompt.split())
+    target = max(1, int(limit * 0.85))
+    cut = max(0, words - target)
     return (
-        f"The following prompt is {words} words. Compress it to under {limit} words.\n\n"
+        f"The following prompt is {words} words. Cut at least {cut} words — "
+        f"aim for {target} words or fewer (hard ceiling {limit}).\n\n"
         f"--- BEGIN PROMPT ---\n{prompt}\n--- END PROMPT ---"
     )
+
+
+def prompt_sections(text: str) -> list[str]:
+    """取出提示词里的段落名（形如 `xxx:` 独占一行的裸名）。
+
+    不写死段落清单 —— 三种格式的段落完全不同（T2VA 三字段 / Ref2VA 六段 /
+    Seedance 无字段），写死会让校验对非 Ref2VA 格式永远失败。
+    """
+    return re.findall(r"^([a-z][a-z0-9_]*):\s*$", text, re.M)
 
 
 def check_prompt_integrity(original: str, compressed: str) -> tuple[bool, str]:
@@ -478,15 +495,17 @@ def check_prompt_integrity(original: str, compressed: str) -> tuple[bool, str]:
 
     压缩是「编辑」任务，模型偶尔会顺手删掉整节或合并主体 —— 那比超长更糟，
     所以宁可保留原文也不能接受残缺的结构。
+
+    ⚠️ 段落清单从**原文**里取，不写死。踩过：校验里硬编码了 Ref2VA 的六段名，
+    于是 T2VA / Seedance 的压缩**永远被判为残缺**（实测 T2VA 压到 487 词仍被拒），
+    压缩功能对非 Ref2VA 格式等于不存在。
     """
     if not compressed.strip():
         return False, "压缩结果为空"
 
-    required = (
-        "subject_definitions", "summary", "retention_analysis",
-        "detailed_description", "overall_soundscape", "non_diegetic_music",
-    )
-    missing = [s for s in required if f"{s}:" not in compressed]
+    want = prompt_sections(original)
+    got = set(prompt_sections(compressed))
+    missing = [s for s in want if s not in got]
     if missing:
         return False, f"压缩后缺少段落：{', '.join(missing)}"
 

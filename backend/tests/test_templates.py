@@ -28,6 +28,7 @@ from app.services.templates import (
     merge_subjects,
     mode_of,
     parse_pass1_json,
+    prompt_sections,
 )
 
 GOOD_JSON = """
@@ -707,11 +708,35 @@ def test_compress_instruction_is_short_and_direct():
     换成一句「Shorten the prompt the user sends to under N words」+ 两条 keep/cut 就管用。
     """
     system = build_compress_system(700)
-    assert "under 700 words" in system
+    assert "under" in system and "words" in system
     assert "<Subject N>" in system
     assert "[Shot N]" in system
     assert "verbatim" in system, "台词必须逐字保留"
-    assert len(system.split()) < 90, f"指令太长（{len(system.split())} 词），模型会偷懒"
+    assert len(system.split()) < 100, f"指令太长（{len(system.split())} 词），模型会偷懒"
+
+
+def test_compress_targets_below_the_limit_to_leave_headroom():
+    """目标值要比真实上限更紧。
+
+    实测说「压到 700 以内」，模型压到 803 就收手（2297 → 803，砍了 65% 但还是超）。
+    让它瞄 0.85 倍，落点才在上限之内。
+    """
+    system = build_compress_system(700)
+    assert "under 595 words" in system, "700 × 0.85 = 595"
+    assert "below 700" in system, "真实上限也要写清楚"
+
+    user = build_compress_user("a " * 2000, 700)
+    assert "2000 words" in user
+    assert "Cut at least 1405 words" in user, "2000 - 595 = 1405"
+    assert "595 words or fewer" in user
+    assert "hard ceiling 700" in user
+
+
+def test_compress_does_not_mention_a_fixed_six_section_list():
+    """压缩指令不能写死 Ref2VA 的六段名 —— T2VA / Seedance 会被带偏。"""
+    system = build_compress_system(700)
+    assert "subject_definitions" not in system
+    assert "the section names present in the original" in system
 
 
 def test_compress_uses_thinking():
@@ -734,8 +759,10 @@ def test_compress_uses_thinking():
 
 
 def test_compress_user_includes_word_count():
-    text = build_compress_user("a b c d e", 3)
-    assert "5 words" in text and "under 3 words" in text
+    text = build_compress_user("a b c d e", 100)
+    assert "5 words" in text
+    assert "85 words or fewer" in text, "100 × 0.85 = 85"
+    assert "hard ceiling 100" in text
     assert "--- BEGIN PROMPT ---" in text and "--- END PROMPT ---" in text
 
 
@@ -777,3 +804,72 @@ def test_integrity_rejects_empty():
     ok, why = check_prompt_integrity(LONG_PROMPT, "   ")
     assert not ok
     assert "为空" in why
+
+
+# T2VA 三字段格式（和 Ref2VA 六段完全不同）
+T2VA_PROMPT = """integrated_multimodal_description:
+A neon-soaked anime sequence, static camera. [Shot 1] Close-up of a girl's eye,
+iridescent iris, black choker. [Shot 2] At 00:03.400, the frame tears into
+glitch bands, saturated halftone dots flooding the left half.
+
+overall_soundscape:
+A dense synth pad with a rising sweep and no silent gap.
+
+non_diegetic_music:
+N/A"""
+
+
+def test_integrity_uses_sections_from_the_original_not_a_fixed_list():
+    """段落清单必须从原文里取，不能写死成 Ref2VA 的六段。
+
+    踩过：校验里硬编码了 subject_definitions / summary / retention_analysis /
+    detailed_description / overall_soundscape / non_diegetic_music，
+    于是 **T2VA 三字段格式的压缩永远被判为「缺少段落」**——
+    实测 T2VA 从 1175 词压到 487 词，成果全被丢掉，压缩功能对非 Ref2VA
+    格式等于不存在。而 T2VA 恰恰是默认格式。
+    """
+    ok, why = check_prompt_integrity(T2VA_PROMPT, T2VA_PROMPT)
+    assert ok, f"T2VA 自己和自己比都不通过：{why}"
+
+
+def test_t2va_compression_is_accepted():
+    """T2VA 压短后应当被接受（只要三字段都在）。"""
+    shorter = """integrated_multimodal_description:
+Neon anime sequence, static camera. [Shot 1] Girl's eye, iridescent iris.
+[Shot 2] At 00:03.400, glitch bands and halftone dots flood the frame.
+
+overall_soundscape:
+Dense synth pad, rising sweep, no silence.
+
+non_diegetic_music:
+N/A"""
+    assert len(shorter.split()) < len(T2VA_PROMPT.split())
+    ok, why = check_prompt_integrity(T2VA_PROMPT, shorter)
+    assert ok, why
+
+
+def test_t2va_compression_rejected_if_a_field_is_dropped():
+    broken = T2VA_PROMPT.replace("non_diegetic_music:", "music_notes:")
+    ok, why = check_prompt_integrity(T2VA_PROMPT, broken)
+    assert not ok
+    assert "non_diegetic_music" in why
+
+
+def test_prompt_sections_extracts_bare_names():
+    assert prompt_sections(T2VA_PROMPT) == [
+        "integrated_multimodal_description", "overall_soundscape", "non_diegetic_music"
+    ]
+    assert prompt_sections("no sections here at all") == []
+    # 行内有内容的冒号不算段落名
+    assert prompt_sections("note: something inline") == []
+
+
+def test_integrity_ignores_subject_and_shot_checks_for_t2va():
+    """T2VA 没有 <Subject N>，不该因为「主体标签变少」被拒（本来就是 0 个）。"""
+    shorter = (
+        "integrated_multimodal_description:\n"
+        "[Shot 1] Girl's eye. [Shot 2] At 00:03.400, glitch bands.\n\n"
+        "overall_soundscape:\nN/A\n\nnon_diegetic_music:\nN/A"
+    )
+    ok, why = check_prompt_integrity(T2VA_PROMPT, shorter)
+    assert ok, f"T2VA 没有主体标签，不该做主体校验：{why}"

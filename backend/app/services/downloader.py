@@ -28,6 +28,7 @@ from urllib.parse import urlparse
 import httpx
 
 from ..core.config import TMP_DIR, get_settings, resolve_ffmpeg
+from ..core.safe_delete import safe_delete
 from ..schemas import ProbeResult
 
 log = logging.getLogger("downloader")
@@ -146,24 +147,62 @@ def download_with_ytdlp(url: str, out_dir: Path) -> tuple[Path | None, str]:
         "format": get_settings().ytdlp_format,
         "merge_output_format": "mp4",
         "overwrites": True,
+        # ⚠️ 必须保留合并前的原始流。
+        #
+        # 默认行为是合并完成后 os.remove 掉分离的音视频流，而某些运行环境在
+        # os.remove 上装了删除保护（累计删除超过阈值就抛 SystemExit）——
+        # 一删就把下载线程带走，任务报「SystemExit: 1」，
+        # 而实际上视频早就下好、ffmpeg 也合并完了。纯属冤死。
+        # 置 True 后 yt-dlp 不删，多占几 MB 临时空间，换下载稳定。
+        "keepvideo": True,
     })
+    # 注意这里捕获的是 BaseException 而不是 Exception：
+    # 上面那个删除保护抛的 SystemExit 继承自 BaseException，
+    # `except Exception` 拦不住，会让异常穿到线程池里。
+    exc_note = ""
     try:
         import yt_dlp
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=True)
             path = Path(ydl.prepare_filename(info))
-    except Exception as exc:  # noqa: BLE001
-        reason = " ".join(str(exc).split())[:300]
-        log.warning("yt-dlp 下载失败 %s: %s", url, reason)
-        return None, reason
+    except BaseException as exc:  # noqa: BLE001
+        # 下载/合并**可能已经成功**，死在后续清理上。别急着报失败，
+        # 先去磁盘上找找 —— 用文件系统的事实判断，而不是相信异常。
+        exc_note = " ".join(f"{type(exc).__name__}: {exc}".split())[:200]
+        log.warning("yt-dlp 抛出异常（将回查磁盘确认是否已产出）%s: %s", url, exc_note)
+        path = out_dir / ""
 
-    if path.is_file():
-        return path, ""
-    # merge 后扩展名可能变化（webm/flv 源合并成 mp4）
-    for cand in out_dir.glob(f"{path.stem}.*"):
-        if cand.suffix.lower() in (".mp4", ".mkv", ".webm", ".flv", ".mov"):
-            return cand, ""
+    found = _find_downloaded_video(out_dir, path)
+    if found is not None:
+        if exc_note:
+            log.info("yt-dlp 虽抛异常但文件已产出，继续处理：%s（原因：%s）", found.name, exc_note)
+        return found, ""
+    if exc_note:
+        return None, exc_note
     return None, f"yt-dlp 下载完成但未产出可识别的视频文件（期望 {path.name}）"
+
+
+_VIDEO_SUFFIXES = (".mp4", ".mkv", ".webm", ".flv", ".mov")
+
+
+def _find_downloaded_video(out_dir: Path, expected: Path) -> Path | None:
+    """在输出目录里找下载好的视频。合并后扩展名可能变（webm/flv 源合成 mp4）。"""
+    if expected.name and expected.is_file() and expected.stat().st_size > 0:
+        return expected
+    stem = expected.stem if expected.name else ""
+    if stem:
+        for cand in out_dir.glob(f"{stem}.*"):
+            if cand.suffix.lower() in _VIDEO_SUFFIXES and cand.stat().st_size > 0:
+                return cand
+    # 兜底：按体积挑最大的视频文件（keepvideo 会留下分离的音视频流，
+    # 音频流通常小得多，最大的那个就是成片）
+    best: Path | None = None
+    for cand in out_dir.iterdir():
+        if cand.suffix.lower() not in _VIDEO_SUFFIXES or cand.stat().st_size <= 0:
+            continue
+        if best is None or cand.stat().st_size > best.stat().st_size:
+            best = cand
+    return best
 
 
 # ---------------------------------------------------------------------------
@@ -311,7 +350,7 @@ def download_direct(url: str, out_dir: Path, name: str = "douyin") -> Path | Non
 
     if dst.is_file() and dst.stat().st_size > 10240:
         return dst
-    dst.unlink(missing_ok=True)
+    safe_delete(dst)
     return None
 
 

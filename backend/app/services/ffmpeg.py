@@ -17,7 +17,6 @@ import logging
 import math
 import os
 import re
-import shutil
 import subprocess
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
@@ -31,6 +30,7 @@ from ..core.config import (
     resolve_ffmpeg,
     resolve_ffprobe,
 )
+from ..core.safe_delete import safe_delete
 from ..schemas import MediaInfo
 
 log = logging.getLogger("ffmpeg")
@@ -789,14 +789,7 @@ def cleanup(path: str | Path) -> None:
     而不是 `Exception`，所以 `except OSError` 和调用方的 `except Exception`
     都拦不住，一次清理就把 uvicorn 进程干掉了。
     """
-    p = Path(path)
-    try:
-        if p.is_dir():
-            shutil.rmtree(p, ignore_errors=True)
-        elif p.is_file():
-            p.unlink(missing_ok=True)
-    except BaseException as exc:  # noqa: BLE001
-        log.warning("清理 %s 失败（已忽略）：%s", p, exc)
+    safe_delete(path, quiet=False)
 
 
 def frame_dir_for(job_id: str) -> Path:
