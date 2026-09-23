@@ -171,8 +171,14 @@ async def run_pipeline(job: Job, video_path: Path) -> JobResult:
     chunk_frames: list[list[tuple[float, str, Path]]] = []
     # 每块里拼出来的网格图（含各自覆盖的时间点），用来给模型说明布局
     chunk_sheets: list[list[tuple[list[float], Path]]] = []
+    # **实际**用到的帧规划，累计起来用于最后的说明。
+    # 不要在末尾拿总预算重算一遍 —— 那样算出来的是「如果重新分配会怎样」，
+    # 而不是「实际抽了多少」。实测过：界面显示 27 张，实际只有 21 张。
+    actual_plan: list[selection.PlannedFrame] = []
+    actual_shots: list[tuple[float, float]] = []
     for ci, chunk in enumerate(chunks):
         chunk_sheets.append([])
+        actual_shots.extend((sh.start, sh.end) for sh in chunk)
         store.raise_if_cancelled(job_id)
         local_shots = [(sh.start, sh.end) for sh in chunk]
         plan = selection.plan_frames(
@@ -182,6 +188,7 @@ async def run_pipeline(job: Job, video_path: Path) -> JobResult:
             long_shot_seconds=s.long_shot_seconds,
             frame_interval=interval,
         )
+        actual_plan.extend(plan)
         role_of = {round(p.time, 3): p.role for p in plan}
         out_dir = frame_root / f"c{ci:02d}"
 
@@ -436,14 +443,8 @@ async def run_pipeline(job: Job, video_path: Path) -> JobResult:
             "mode": templates.mode_of(opts.format),
             "asr": audio.note or ("已转写" if audio.transcript else "无转写"),
             "plan": selection.describe_plan(
-                selection.plan_frames(
-                    [(sh.start, sh.end) for sh in shots],
-                    budget,
-                    max_per_shot=s.max_frames_per_shot,
-                    long_shot_seconds=s.long_shot_seconds,
-                    frame_interval=interval,
-                ),
-                [(sh.start, sh.end) for sh in shots],
+                actual_plan,
+                actual_shots,
                 s.frame_long_edge,
                 sheet_count=sum(len(v) for v in chunk_sheets),
                 sheet_cells=s.frame_sheet_cells,
