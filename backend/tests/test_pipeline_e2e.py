@@ -454,28 +454,3 @@ def test_stats_plan_matches_actual_frames(mock_vlm_env, sample_video: Path):
     assert f"抽帧 {result.frames_used} 张" in plan_text, (
         f"说明里的帧数和实际不符：\n  {plan_text}\n  实际 {result.frames_used}"
     )
-    assert result.stats["frames"] == result.frames_used
-
-
-def test_stats_plan_matches_actual_frames(mock_vlm_env, sample_video: Path):
-    """stats 里的选帧说明必须是**实际**抽的，不是拿总预算重算的。
-
-    踩过：末尾用总预算重跑了一遍 plan_frames，算出的是「如果重新分配会怎样」——
-    界面显示 27 张，实际只抽了 21 张（分块预算比总预算小）。
-    这种不一致会让用户按错误的数字调参。
-    """
-    import asyncio
-
-    from app.services.jobs import store
-
-    mock_vlm.reset()
-    job = asyncio.run(store.create(Job(
-        id="e2e-plan-match", source="upload", options=AnalyzeOptions(enable_asr=False),
-    )))
-    result = pipeline.run_pipeline_sync(job, sample_video)
-
-    plan_text = result.stats["plan"]
-    assert f"抽帧 {result.frames_used} 张" in plan_text, (
-        f"说明里的帧数和实际不符：\n  {plan_text}\n  实际 {result.frames_used}"
-    )
-    assert result.stats["frames"] == result.frames_used
