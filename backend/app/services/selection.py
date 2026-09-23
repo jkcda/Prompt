@@ -264,6 +264,7 @@ def describe_plan(
     long_edge: int = 896,
     sheet_count: int = 0,
     sheet_cells: int = 0,
+    actual_frames: int | None = None,
 ) -> str:
     """生成可读的选帧说明，用于日志和前端展示。"""
     from collections import Counter
@@ -273,10 +274,13 @@ def describe_plan(
     span = 0.0
     if shots:
         span = shots[-1][1] - shots[0][0]
-    est = estimate_tokens(len(plan), long_edge=long_edge, sheet_count=sheet_count)
+    # 抽帧时会按毫秒去重，实际张数可能比规划少一两张。
+    # 说明里要报**实际**张数，否则又会出现「界面 41 张、实际 40 张」这种不一致。
+    n = len(plan) if actual_frames is None else actual_frames
+    est = estimate_tokens(n, long_edge=long_edge, sheet_count=sheet_count)
     extra = f" / 拼成 {sheet_count} 张网格（每张 {sheet_cells} 格）" if sheet_count else ""
     return (
-        f"镜头 {len(shots)} 个 / 抽帧 {len(plan)} 张 / 覆盖 {span:.1f}s"
+        f"镜头 {len(shots)} 个 / 抽帧 {n} 张 / 覆盖 {span:.1f}s"
         f" / 每镜最多 {max(per_shot.values()) if per_shot else 0} 张"
         f" / 角色分布 {dict(roles)}{extra}"
         f" / 预估 {est / 1000:.1f}k tokens"

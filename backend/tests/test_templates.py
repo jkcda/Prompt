@@ -1092,3 +1092,56 @@ def test_pass2_is_conservative_when_structure_unknown():
     )
     assert "UNKNOWN" in user
     assert "conservative" in user
+
+
+def test_collapse_continuous_shots_merges_frame_entries():
+    """一镜到底时把逐帧条目合并成一个。
+
+    ⚠️ 为什么要代码强制：模型**判断对了却写不对**。实测一个连续运镜的 10 秒素材，
+    模型正确报了 edit_structure=continuous、cut_points=[]，
+    但 shots 数组仍然给了 20 个条目（一帧一个）。它自己前后矛盾。
+    提示词里已经明确写了「一镜到底只输出一个条目」也没用 ——
+    所以判断归模型、后果归代码。
+    """
+    from app.services.templates import collapse_continuous_shots
+
+    shots = [
+        ShotObservation(shot=str(i + 1), timecode=f"00:0{i}.000", shot_size="medium",
+                        subject="singer", action=f"action {i}", confidence=0.8)
+        for i in range(20)
+    ]
+    merged = collapse_continuous_shots(shots, "continuous")
+    assert len(merged) == 1, f"应该合并成 1 个，实际 {len(merged)}"
+    assert "action 0" in merged[0].action and "action 19" in merged[0].action, "动作细节要保留"
+    assert merged[0].transition == "continues without a cut"
+    assert merged[0].timecode == shots[0].timecode, "时间码取第一个"
+
+
+def test_collapse_keeps_shots_for_multi_shot():
+    from app.services.templates import collapse_continuous_shots
+
+    shots = [
+        ShotObservation(shot="1", timecode="00:00.000"),
+        ShotObservation(shot="2", timecode="00:03.000"),
+    ]
+    assert len(collapse_continuous_shots(shots, "multi_shot")) == 2
+    assert len(collapse_continuous_shots(shots, "unknown")) == 2
+
+
+def test_collapse_dedups_repeated_actions():
+    from app.services.templates import collapse_continuous_shots
+
+    shots = [
+        ShotObservation(shot="1", action="he sings"),
+        ShotObservation(shot="2", action="he sings"),
+        ShotObservation(shot="3", action="he turns"),
+    ]
+    merged = collapse_continuous_shots(shots, "continuous")
+    assert merged[0].action == "he sings; he turns"
+
+
+def test_collapse_noop_for_single_shot():
+    from app.services.templates import collapse_continuous_shots
+
+    one = [ShotObservation(shot="1", action="a")]
+    assert collapse_continuous_shots(one, "continuous") == one

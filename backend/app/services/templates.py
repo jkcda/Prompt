@@ -55,6 +55,38 @@ make the `shots` array follow those cuts — again, not the detector's grouping.
 
 When you genuinely cannot tell, use `unknown`, keep the detector's grouping, and say
 so in `continuity_notes`. Never invent a cut you cannot see.
+
+HOW MANY ENTRIES GO IN `shots` — this is the most common mistake
+
+The number of `shots` entries is the number of **camera setups**, NOT the number of
+frames you were given. You are given several frames per second of footage; the vast
+majority of them belong to the same shot.
+
+  * One `shots` entry covers a RANGE of consecutive frames — from where that setup
+    begins to where it ends.
+  * If frame N and frame N+1 show the same setup continuing (same subject, same
+    framing, same location, the motion simply progressed), they are the SAME shot.
+    Merge them into one entry.
+  * Only start a new entry where the image actually jumps: a different setup, a hard
+    jump in subject position, an abrupt change of location or lighting.
+  * Consecutive frames that differ only by small motion are ONE shot, not several.
+
+Sanity check before you answer: compare the number of entries you are about to emit
+against the number of cuts you actually identified. If you are emitting roughly one
+entry per frame, you have done it wrong — go back and merge the runs of frames that
+show one continuous setup. A 20-second music video is typically 5-20 shots.
+
+⚠️ Decide `edit_structure` from the FOOTAGE ALONE, **before** you write any entries,
+and do not revisit it afterwards:
+
+  * `continuous` → exactly ONE entry in `shots`, and `cut_points` empty.
+  * `multi_shot` → one entry per interval between real cuts; `cut_points` lists them.
+
+**Do NOT pick the label that happens to match how many entries you already wrote.**
+The label describes the source footage, not your output. Writing one entry per frame
+is never a reason to call something `multi_shot` — it is a reason to merge your
+entries. If your entry count and the label disagree, re-examine the footage and fix
+whichever is wrong; when in doubt, the footage wins and you merge.
 """
 
 
@@ -230,6 +262,38 @@ class Pass1Parse:
     edit_structure: str = "unknown"
     cut_points: list[str] = field(default_factory=list)
     continuity_notes: str = ""
+
+
+def collapse_continuous_shots(
+    shots: list[ShotObservation], edit_structure: str
+) -> list[ShotObservation]:
+    """一镜到底时，把逐帧的条目合并成一个。
+
+    ⚠️ 为什么要用代码强制：模型**判断对了却写不对**。实测一个连续运镜的 10 秒
+    素材，模型正确报了 `edit_structure: continuous`、`cut_points: []`，
+    但 `shots` 数组仍然给了 20 个条目（一帧一个）。它自己前后矛盾。
+
+    这种情况靠提示词治不好（已经在提示词里明确说「一镜到底只输出一个条目」，
+    也加了自检提示，模型照样按帧输出）。所以判断归模型、后果归代码。
+
+    合并保留动作细节：把各条目的 action 去重后拼起来，成文阶段仍然能看到
+    这 10 秒里发生了什么，只是不再被当成 20 个镜头。
+    """
+    if edit_structure != "continuous" or len(shots) <= 1:
+        return shots
+
+    actions: list[str] = []
+    for s in shots:
+        a = (s.action or "").strip()
+        if a and a not in actions:
+            actions.append(a)
+
+    merged = shots[0].model_copy(deep=True)
+    if actions:
+        merged.action = "; ".join(actions)[:900]
+    merged.transition = "continues without a cut"
+    merged.confidence = max((s.confidence or 0.0) for s in shots)
+    return [merged]
 
 
 def parse_pass1_json(raw: str) -> Pass1Parse:

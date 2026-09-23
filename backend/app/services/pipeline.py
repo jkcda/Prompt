@@ -300,7 +300,11 @@ async def run_pipeline(job: Job, video_path: Path) -> JobResult:
             chunk_index=ci,
             start=chunk[0].start,
             end=chunk[-1].end,
-            shots=parsed.shots,
+            # 模型经常「判断对了但写不对」：报 continuous 却仍按帧给 20 个条目。
+            # 判断归模型，后果归代码 —— 这里强制合并。
+            shots=templates.collapse_continuous_shots(
+                parsed.shots, parsed.edit_structure
+            ),
             subjects=parsed.subjects,
             global_notes=parsed.global_notes,
             # 模型自己判断的剪辑结构 —— 我们的场景检测只是抽帧采样单位，
@@ -431,6 +435,17 @@ async def run_pipeline(job: Job, video_path: Path) -> JobResult:
             "scene_threshold": used_threshold,
             "scene_adaptive": adaptive_note or "",
             "subjects": len(subjects),
+            # 模型自己判断的剪辑结构 —— 和「我们切了几个镜头」是两回事，
+            # 分开记，方便排查「一镜到底被切碎」这类问题
+            "edit_structure": (
+                observations[0].edit_structure if len(observations) == 1
+                else [o.edit_structure for o in observations]
+            ),
+            "cut_points": (
+                observations[0].cut_points if len(observations) == 1
+                else [o.cut_points for o in observations]
+            ),
+            "observed_shots": len(merged),
             "est_tokens": selection.estimate_tokens(total_frames, long_edge=s.frame_long_edge),
             "prompt_words": word_count,
             "prompt_chars": len(prompt),
@@ -454,6 +469,7 @@ async def run_pipeline(job: Job, video_path: Path) -> JobResult:
                 s.frame_long_edge,
                 sheet_count=sum(len(v) for v in chunk_sheets),
                 sheet_cells=s.frame_sheet_cells,
+                actual_frames=total_frames,
             ),
         },
     )

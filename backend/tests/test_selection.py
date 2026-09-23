@@ -297,3 +297,56 @@ def test_four_shots_behaviour_unchanged():
     assert len(plan) == 15
     counts = _counts(plan, 4)
     assert counts[0] == 5 and counts[3] == 4
+
+
+def test_describe_plan_reports_actual_frames_not_planned():
+    """说明里要报**实际**抽到的张数。
+
+    抽帧按毫秒去重，实际可能比规划少一两张。实测出现过「界面 41 张、实际 40 张」，
+    用户会按错的数字调参。
+    """
+    shots = [(0.0, 10.0)]
+    plan = plan_frames(shots, 96, max_per_shot=24, frame_interval=0.5)
+    planned = len(plan)
+
+    same = describe_plan(plan, shots, 896, actual_frames=planned)
+    assert f"抽帧 {planned} 张" in same
+
+    fewer = describe_plan(plan, shots, 896, actual_frames=planned - 1)
+    assert f"抽帧 {planned - 1} 张" in fewer
+
+    # 不传就按规划数（自检脚本等场景）
+    assert f"抽帧 {planned} 张" in describe_plan(plan, shots, 896)
+
+
+def test_first_frame_of_first_shot_is_at_zero():
+    """全片第一个镜头的首帧必须落在 0.0s。
+
+    踩过：内缩 `min(dur*8%, 0.35)` 让 8 秒镜头的首帧跑到 0.35s，
+    用户反馈「首帧你不拿」。第一个镜头前面没有别的镜头，不该内缩。
+    """
+    plan = plan_frames([(0.0, 8.0), (8.0, 12.0)], 96, max_per_shot=24, frame_interval=0.5)
+    assert plan[0].time == 0.0, f"首帧应该在 0.0s，实际 {plan[0].time}"
+    assert plan[0].role == "head"
+
+
+def test_later_shots_still_inset_a_little():
+    """后续镜头的首帧要留一点点余量，避开切点本身那一帧。"""
+    plan = plan_frames([(0.0, 4.0), (4.0, 8.0)], 96, max_per_shot=24, frame_interval=0.5)
+    second = [p for p in plan if p.shot_index == 1]
+    assert second, "第二个镜头应该有帧"
+    head = second[0]
+    assert 4.0 < head.time < 4.2, f"第二镜首帧应略大于 4.0s，实际 {head.time}"
+
+
+def test_two_frames_per_second_by_default():
+    """默认 2fps（用户明确要求）。
+
+    一秒一帧对快速动作/特效内容偏疏，半秒内发生的变化会整段漏掉。
+    """
+    from app.core.config import get_settings
+
+    assert get_settings().frame_interval_seconds == 0.5
+
+    plan = plan_frames([(0.0, 10.0)], 96, max_per_shot=24, frame_interval=0.5)
+    assert len(plan) == 20, f"10 秒应该 20 帧（2fps），实际 {len(plan)}"
