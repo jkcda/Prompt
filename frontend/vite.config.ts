@@ -13,6 +13,9 @@ export default defineConfig({
     },
   },
   server: {
+    // 显式绑 IPv4。不写的话 Vite 只监听 [::1]，于是
+    // 127.0.0.1:5173 打不开而 localhost:5173 能开 —— 容易让人以为服务没起来。
+    host: '127.0.0.1',
     port: 5173,
     strictPort: false,
     proxy: {
