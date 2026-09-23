@@ -41,6 +41,8 @@ export const useAnalyzeStore = defineStore('analyze', () => {
     max_total_frames: null,
     frame_interval_seconds: null,
     prompt_word_limit: null,
+    trim_start: null,
+    trim_end: null,
     extra_instruction: '',
     target_duration: null,
   })
@@ -107,9 +109,26 @@ export const useAnalyzeStore = defineStore('analyze', () => {
   const uploadResult = ref<UploadResult | null>(null)
   const uploadPercent = ref(0)
   const uploading = ref(false)
+  const preparing = ref(false)
 
   const linkUrl = ref('')
   const probeResult = ref<ProbeResult | null>(null)
+
+  /** 片段选区。null 表示整片。TrimBar 用 v-model 绑这个。 */
+  const trimRange = computed({
+    get: () => {
+      const a = options.value.trim_start
+      const b = options.value.trim_end
+      return a !== null && b !== null ? { start: a, end: b } : null
+    },
+    set: (v: { start: number; end: number } | null) => {
+      options.value.trim_start = v ? v.start : null
+      options.value.trim_end = v ? v.end : null
+    },
+  })
+
+  /** 探测到的时长，用来给片段选择器当上限；上传的文件没有探测值，靠 video 元素自己报。 */
+  const knownDuration = computed(() => probeResult.value?.duration ?? 0)
   const probing = ref(false)
 
   // ---------------- 任务 ----------------
@@ -229,6 +248,47 @@ export const useAnalyzeStore = defineStore('analyze', () => {
 
   // ---------------- 启动 ----------------
 
+  /** 视频是否已就绪（上传完成或链接已下载）—— 就绪后用户才能框选片段。 */
+  const ready = computed(() => !!uploadResult.value)
+
+  /**
+   * 把视频准备好：上传模式走上传，链接模式走「只下载」。
+   *
+   * 为什么和 start() 拆开：用户需要**先拿到视频、看过再框选**要反推的片段。
+   * 原来上传/下载和反推是一步完成的，中间没有让用户介入的机会。
+   */
+  async function prepare() {
+    error.value = ''
+    preparing.value = true
+    try {
+      if (mode.value === 'upload') {
+        if (!file.value) throw new Error('请先选择视频文件')
+        uploading.value = true
+        uploadPercent.value = 0
+        uploadResult.value = await api.uploadVideo(
+          file.value,
+          (p) => (uploadPercent.value = p),
+        )
+        uploading.value = false
+      } else {
+        if (!linkUrl.value.trim()) throw new Error('请先粘贴视频链接')
+        uploadResult.value = await api.fetchDownload(linkUrl.value.trim())
+      }
+      // 换了素材，之前框的区间作废
+      trimRange.value = null
+    } catch (e) {
+      error.value = errorMessage(e)
+      uploading.value = false
+    } finally {
+      preparing.value = false
+    }
+  }
+
+  function resetSource() {
+    uploadResult.value = null
+    trimRange.value = null
+  }
+
   async function start() {
     error.value = ''
     events.value = []
@@ -237,23 +297,10 @@ export const useAnalyzeStore = defineStore('analyze', () => {
     starting.value = true
 
     try {
-      let id = ''
-      if (mode.value === 'upload') {
-        if (!file.value) throw new Error('请先选择视频文件')
-
-        uploading.value = true
-        uploadPercent.value = 0
-        const up = await api.uploadVideo(file.value, (p) => (uploadPercent.value = p))
-        uploadResult.value = up
-        uploading.value = false
-
-        const res = await api.startAnalyze(up.file_id, up.name, options.value)
-        id = res.job_id
-      } else {
-        if (!linkUrl.value.trim()) throw new Error('请先粘贴视频链接')
-        const res = await api.startFetch(linkUrl.value.trim(), options.value)
-        id = res.job_id
-      }
+      const up = uploadResult.value
+      if (!up) throw new Error('视频还没准备好，请先上传或下载')
+      const res = await api.startAnalyze(up.file_id, up.name, options.value)
+      const id = res.job_id
 
       jobId.value = id
       await refreshJob()
@@ -404,7 +451,8 @@ export const useAnalyzeStore = defineStore('analyze', () => {
     options,
     // 来源
     mode, file, localPreviewUrl, uploadResult, uploadPercent, uploading,
-    linkUrl, probeResult, probing,
+    linkUrl, probeResult, probing, trimRange, knownDuration,
+    ready, preparing, prepare, resetSource,
     // 任务
     jobId, job, events, starting, error, elapsed, history, historyLoading,
     // 派生

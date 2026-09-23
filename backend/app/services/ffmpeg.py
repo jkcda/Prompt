@@ -792,6 +792,70 @@ def cleanup(path: str | Path) -> None:
     safe_delete(path, quiet=False)
 
 
+def extract_segment(
+    src: str | Path,
+    start: float,
+    end: float,
+    dst: Path,
+    crf: int = 18,
+) -> tuple[Path | None, str]:
+    """截取 [start, end] 片段并返回 `(文件路径, 失败原因)`。
+
+    为什么是**重新编码**而不是 `-c copy`：`-c copy` 会把切点吸附到关键帧，
+    用户选了 5.5s 却可能从 4.8s 开始 —— 反推出来的提示词就对不上他选的内容。
+    重新编码是帧精确的。
+
+    质量上不用担心：帧送给模型前会缩到长边 896，CRF 18 远好于这个下限。
+
+    为什么先切片再跑管线（而不是把偏移量传遍整条管线）：
+    切完之后，探测、镜头检测、抽帧、音频、时间戳**全部天然是相对片段的**，
+    不用在七八个地方各自记得减偏移 —— 那种改法每漏一处就是一个隐蔽 bug。
+    """
+    src, dst = Path(src), Path(dst)
+    # 显式拒绝非法区间。不拦的话 `max(0.05, end - start)` 会把它悄悄变成
+    # 一个 0.05 秒的垃圾片段 —— ffmpeg 还返回成功，等于把错误数据往下游传。
+    if end <= start:
+        return None, f"片段区间非法：{start:.2f}s → {end:.2f}s（终点必须大于起点）"
+    if end - start < 0.5:
+        return None, f"片段太短：{end - start:.2f}s（至少 0.5s）"
+
+    duration = end - start
+    dst.parent.mkdir(parents=True, exist_ok=True)
+
+    cmd = [
+        resolve_ffmpeg(), "-hide_banner", "-loglevel", "error", "-y",
+        # -ss 放在 -i 前面：配合重新编码默认就是帧精确的，而且能快速定位
+        "-ss", f"{max(0.0, start):.3f}",
+        "-i", str(src),
+        "-t", f"{duration:.3f}",
+        "-c:v", "libx264", "-crf", str(crf), "-preset", "veryfast",
+        "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-b:a", "128k",
+        "-movflags", "+faststart",
+        str(dst),
+    ]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, timeout=600)
+    except Exception as exc:  # noqa: BLE001
+        return None, f"截取片段异常：{exc}"
+
+    if proc.returncode != 0 or not dst.exists() or dst.stat().st_size == 0:
+        err = proc.stderr.decode("utf-8", "replace").strip()[-300:]
+        return None, f"截取片段失败：{err or 'ffmpeg 未产出文件'}"
+
+    # 校验切出来的时长和请求的接近 —— 差太多说明源文件时间轴有问题，
+    # 与其拿着错的片段往下跑，不如现在报出来。
+    got = probe(dst)
+    if got.duration <= 0:
+        return None, "截取片段后无法读取时长"
+    if abs(got.duration - duration) > max(1.0, duration * 0.15):
+        return None, (
+            f"截取结果时长不符：请求 {duration:.2f}s，实际 {got.duration:.2f}s"
+            "（源文件时间轴可能有异常）"
+        )
+    return dst, ""
+
+
 def frame_dir_for(job_id: str) -> Path:
     d = FRAME_DIR / job_id
     d.mkdir(parents=True, exist_ok=True)

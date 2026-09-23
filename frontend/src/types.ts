@@ -27,6 +27,9 @@ export interface AnalyzeOptions {
   max_total_frames: number | null
   frame_interval_seconds: number | null
   prompt_word_limit: number | null
+  /** 只反推这段区间（秒，相对原片）。两个都为 null 表示整片。 */
+  trim_start: number | null
+  trim_end: number | null
   extra_instruction: string
   target_duration: number | null
 }

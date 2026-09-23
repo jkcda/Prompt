@@ -93,6 +93,10 @@ export const startAnalyze = (fileId: string, name: string, options: AnalyzeOptio
 export const probeLink = (url: string) =>
   http.post<ProbeResult>('/fetch/probe', { url }, { timeout: 90_000 }).then((r) => r.data)
 
+/** 只下载不反推 —— 让用户先看到视频、框选片段，再决定推哪一段。 */
+export const fetchDownload = (url: string) =>
+  http.post<UploadResult>('/fetch/download', { url }, { timeout: 300_000 }).then((r) => r.data)
+
 export const startFetch = (url: string, options: AnalyzeOptions) =>
   http.post<{ job_id: string }>('/fetch', { url, options }, { timeout: 90_000 }).then((r) => r.data)
 

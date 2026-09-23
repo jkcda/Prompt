@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from .media import AudioReport, MediaInfo, Shot
 from .observation import ShotObservation, SubjectEntry
@@ -30,8 +30,25 @@ class AnalyzeOptions(BaseModel):
     max_total_frames: int | None = None
     frame_interval_seconds: float | None = None
     prompt_word_limit: int | None = None
+    # 只反推这段区间（秒，相对原片）。留空表示整片。
+    # 用户可以先看片再自由框选，避免把无关的前后内容也写进提示词。
+    trim_start: float | None = None
+    trim_end: float | None = None
     extra_instruction: str = ""
     target_duration: float | None = None
+
+    @model_validator(mode="after")
+    def _check_trim(self) -> AnalyzeOptions:
+        """区间校验：起止都要有（或都没有），且 end > start。"""
+        a, b = self.trim_start, self.trim_end
+        if (a is None) != (b is None):
+            raise ValueError("trim_start 和 trim_end 必须同时提供或同时留空")
+        if a is not None and b is not None:
+            if a < 0:
+                raise ValueError("trim_start 不能为负")
+            if b <= a:
+                raise ValueError(f"trim_end（{b}）必须大于 trim_start（{a}）")
+        return self
 
 
 class JobProgress(BaseModel):

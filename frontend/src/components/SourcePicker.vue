@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 
+import TrimBar from '@/components/TrimBar.vue'
 import { useAnalyzeStore } from '@/stores/analyze'
 
 const store = useAnalyzeStore()
@@ -19,10 +20,18 @@ const pickedSize = computed(() => {
   return `${(s / 1048576).toFixed(1)} MB`
 })
 
+/** 视频就绪后才能框选片段、才能开始反推。 */
 const canStart = computed(() => {
-  if (store.running || store.starting) return false
-  return store.mode === 'upload' ? !!store.file : !!store.linkUrl.trim()
+  if (store.running || store.starting || store.preparing) return false
+  return store.ready
 })
+
+/** 上传模式：选中文件就自动上传，传完就能预览和框选。 */
+function onFileChosen(f: File) {
+  store.setFile(f)
+  store.resetSource()
+  void store.prepare()
+}
 
 function pick() {
   fileInput.value?.click()
@@ -31,14 +40,14 @@ function pick() {
 function onFileInput(e: Event) {
   const target = e.target as HTMLInputElement
   const f = target.files?.[0]
-  if (f) store.setFile(f)
+  if (f) onFileChosen(f)
   target.value = ''
 }
 
 function onDrop(e: DragEvent) {
   dragging.value = false
   const f = e.dataTransfer?.files?.[0]
-  if (f) store.setFile(f)
+  if (f) onFileChosen(f)
 }
 
 function onDragOver() {
@@ -48,6 +57,11 @@ function onDragOver() {
 function onDragLeave() {
   dragging.value = false
 }
+
+/** 改了链接就把已下载的视频作废，避免「贴了新链接却推的是旧视频」。 */
+watch(() => store.linkUrl, () => {
+  if (store.ready && store.mode === 'link') store.resetSource()
+})
 </script>
 
 <template>
@@ -159,7 +173,34 @@ function onDragLeave() {
             </div>
           </div>
         </div>
+
+        <div class="row" style="margin-top: 12px">
+          <button
+            class="btn"
+            :disabled="store.preparing || !store.linkUrl.trim()"
+            @click="store.prepare()"
+          >
+            <span v-if="store.preparing" class="spinner" />
+            {{ store.preparing ? '下载中…' : store.ready ? '重新下载' : '下载视频' }}
+          </button>
+          <span class="faint" style="font-size: 12px">下载后可以预览并框选要反推的片段</span>
+        </div>
       </template>
+
+      <!-- ------------------------------------------------ 片段选择 -->
+      <div v-if="store.ready && store.videoUrl" class="trim-section">
+        <div class="trim-head">
+          <span class="field-label">选择要反推的片段</span>
+          <span class="faint" style="font-size: 12px">
+            整片太长时，框出你要的那一段——无关的前后内容不会被写进提示词
+          </span>
+        </div>
+        <TrimBar
+          v-model="store.trimRange"
+          :src="store.videoUrl"
+          :duration="store.knownDuration"
+        />
+      </div>
 
       <!-- ------------------------------------------------ 模式 -->
       <div class="divider" />
@@ -310,9 +351,12 @@ function onDragLeave() {
       <!-- ------------------------------------------------ 启动 -->
       <div class="row" style="margin-top: 18px; gap: 12px">
         <button class="btn btn-primary btn-lg" :disabled="!canStart" @click="store.start()">
-          <span v-if="store.starting || store.uploading" class="spinner" />
-          {{ store.starting || store.uploading ? '处理中…' : '开始反推' }}
+          <span v-if="store.starting" class="spinner" />
+          {{ store.starting ? '反推中…' : '开始反推' }}
         </button>
+        <span v-if="!store.ready && !store.preparing" class="faint" style="font-size: 12px">
+          {{ store.mode === 'upload' ? '先选一个视频文件' : '先粘贴链接并下载' }}
+        </span>
         <button
           v-if="store.job || store.error"
           class="btn btn-ghost"
@@ -387,8 +431,7 @@ function onDragLeave() {
   margin: 18px 0;
 }
 
-.probe-card {
-  margin-top: 14px;
+.probe-card {  margin-top: 14px;
   padding: 12px;
   border: 1px solid var(--border-soft);
   border-radius: var(--radius);
@@ -502,5 +545,20 @@ function onDragLeave() {
   border-color: var(--accent);
   background: var(--accent-soft);
   color: var(--accent-hover);
+}
+
+.trim-section {
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border-soft);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.trim-head {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
 }
 </style>

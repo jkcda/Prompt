@@ -21,6 +21,10 @@ UPLOAD_DIR = DATA_DIR / "uploads"
 FRAME_DIR = DATA_DIR / "frames"
 TMP_DIR = DATA_DIR / "tmp"
 RUNTIME_DIR = BACKEND_DIR / "runtime"
+# 打包进仓库的第三方二进制（ffmpeg 等）。部署时不用在服务器上另装，
+# 也避免服务器上的版本差异影响行为。
+VENDOR_DIR = BACKEND_DIR / "vendor"
+VENDOR_FFMPEG_DIR = VENDOR_DIR / "ffmpeg"
 FRONTEND_DIR = PROJECT_ROOT / "frontend"
 
 for _d in (DATA_DIR, UPLOAD_DIR, FRAME_DIR, TMP_DIR, RUNTIME_DIR):
@@ -172,7 +176,13 @@ class Settings(BaseSettings):
 # ---------------------------------------------------------------------------
 
 def _candidates(names: tuple[str, ...]) -> list[Path]:
-    """按优先级列出可能的可执行文件路径。"""
+    """按优先级列出可能的可执行文件路径。
+
+    优先级：显式配置 > **项目自带**（vendor / runtime）> 系统 PATH > 常见安装位置。
+
+    自带二进制排在 PATH 之前，是为了让部署可复现 —— 服务器上装了什么版本的
+    ffmpeg 不该影响这个服务的行为。仓库里带了一份 `backend/vendor/ffmpeg/ffmpeg.exe`。
+    """
     exe = ".exe" if os.name == "nt" else ""
     out: list[Path] = []
 
@@ -185,9 +195,10 @@ def _candidates(names: tuple[str, ...]) -> list[Path]:
         for n in names:
             out.append(Path(s.ffmpeg_dir) / f"{n}{exe}")
 
-    # 2. 项目内 runtime 目录（可选的自带二进制位置）
-    for n in names:
-        out.append(RUNTIME_DIR / f"{n}{exe}")
+    # 2. 项目自带（打包进仓库，部署时不用在服务器上另装）
+    for d in (VENDOR_FFMPEG_DIR, RUNTIME_DIR):
+        for n in names:
+            out.append(d / f"{n}{exe}")
 
     # 3. 系统 PATH
     for n in names:
@@ -195,10 +206,13 @@ def _candidates(names: tuple[str, ...]) -> list[Path]:
         if found:
             out.append(Path(found))
 
-    # 4. 常见安装位置 / 复用已有项目里的静态二进制
+    # 4. 常见安装位置
+    #
+    # 注意：这里不再硬编码开发机上别的项目的路径（原来有
+    # D:/nexus/.../ffmpeg-static）。那种路径在服务器上必然不存在，
+    # 留着只会让「本地能跑、上线就找不到 ffmpeg」这种问题更难查。
     common_dirs = [
         PROJECT_ROOT / "bin",
-        Path("D:/nexus/aiconnent/server/node_modules/ffmpeg-static"),
         Path("C:/ffmpeg/bin"),
         Path("D:/ffmpeg/bin"),
         Path("C:/Program Files/ffmpeg/bin"),

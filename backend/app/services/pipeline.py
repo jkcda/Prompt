@@ -45,6 +45,7 @@ log = logging.getLogger("pipeline")
 
 STAGE_LABELS = {
     "probe": "探测媒体",
+    "trim": "截取片段",
     "audio": "分析音频",
     "scenes": "镜头切分",
     "plan": "分配帧预算",
@@ -72,6 +73,34 @@ async def run_pipeline(job: Job, video_path: Path) -> JobResult:
     media = await asyncio.to_thread(ff.probe, video_path)
     if not media.has_video:
         raise RuntimeError("该文件不含视频流，无法反推")
+
+    # ---------------- 1.5 片段截取（用户框选了区间时） ----------------
+    #
+    # 先切出片段再跑后面的流程，这样探测、镜头检测、抽帧、音频、时间戳
+    # **全部天然是相对片段的**。另一种做法是把偏移量传遍整条管线、
+    # 在七八个地方各自记得减 —— 那种改法每漏一处就是一个隐蔽 bug。
+    trim_start = trim_end = None
+    if opts.trim_start is not None and opts.trim_end is not None:
+        trim_start = max(0.0, float(opts.trim_start))
+        trim_end = min(float(opts.trim_end), media.duration)
+        if trim_end - trim_start < 0.5:
+            raise RuntimeError(
+                f"选择的片段只有 {max(0.0, trim_end - trim_start):.2f} 秒，太短了（至少 0.5 秒）"
+            )
+        await step("trim", 5, f"截取片段 {trim_start:.1f}s - {trim_end:.1f}s")
+        seg_path, why = await asyncio.to_thread(
+            ff.extract_segment,
+            video_path,
+            trim_start,
+            trim_end,
+            ff.frame_dir_for(job_id) / "segment.mp4",
+        )
+        if seg_path is None:
+            raise RuntimeError(why or "截取片段失败")
+        log.info("已截取片段 %.2fs - %.2fs（%.2fs）", trim_start, trim_end, trim_end - trim_start)
+        video_path = seg_path
+        media = await asyncio.to_thread(ff.probe, video_path)
+        store.raise_if_cancelled(job_id)
 
     if s.max_duration_seconds > 0 and media.duration > s.max_duration_seconds:
         log.warning("视频时长 %.1fs 超过上限 %.1fs，将只分析前段", media.duration, s.max_duration_seconds)
@@ -396,6 +425,11 @@ async def run_pipeline(job: Job, video_path: Path) -> JobResult:
                 word_limit > 0 and word_count > word_limit
             ),
             "format": opts.format,
+            "trim": (
+                {"start": round(trim_start, 3), "end": round(trim_end, 3),
+                 "duration": round(trim_end - trim_start, 3)}
+                if trim_start is not None and trim_end is not None else None
+            ),
             "format_label": templates.format_display(opts.format),
             "mode": templates.mode_of(opts.format),
             "asr": audio.note or ("已转写" if audio.transcript else "无转写"),

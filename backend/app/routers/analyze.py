@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import shutil
+import uuid
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
@@ -15,9 +17,12 @@ from ..schemas import (
     FetchRequest,
     JobCreatedResponse,
     ProbeResult,
+    UploadResponse,
 )
 from ..services import downloader
+from ..services import ffmpeg as ff
 from ..services.runner import parse_options, start_fetch_job, start_upload_job
+from .upload import _make_file_id
 
 log = logging.getLogger("api.analyze")
 router = APIRouter(prefix="/api", tags=["analyze"])
@@ -46,6 +51,51 @@ async def fetch_probe(req: FetchProbeRequest) -> ProbeResult:
     if not url:
         raise HTTPException(400, "请提供视频链接或分享文案")
     return await asyncio.to_thread(downloader.probe, url)
+
+
+@router.post(
+    "/fetch/download",
+    response_model=UploadResponse,
+    summary="抓取链接并只下载（供用户先框选片段）",
+)
+async def fetch_download(req: FetchRequest) -> UploadResponse:
+    """下载链接里的视频并落盘，返回和上传一样的信息。
+
+    为什么要和 `/fetch` 分开：用户需要**先拿到视频、看过再框选**要反推的片段。
+    `/fetch` 是「下载完直接反推」，中间没有让用户介入的机会。
+    拆开之后前端可以先放预览、让用户拖出区间，再带着 trim 参数调 `/analyze`。
+    """
+    url = downloader.extract_url(req.url) or req.url
+    if not url:
+        raise HTTPException(400, "请提供视频链接或分享文案")
+
+    # 借用任务目录做下载落地，成功后挪进 uploads（和 runner 的抓取流程一致）
+    tag = f"dl-{uuid.uuid4().hex[:8]}"
+    path, info, why = await asyncio.to_thread(downloader.download, url, tag)
+    if path is None:
+        raise HTTPException(400, why or "视频下载失败")
+
+    file_id = _make_file_id(path.stem, path.suffix or ".mp4")
+    dst = UPLOAD_DIR / file_id
+    try:
+        shutil.move(str(path), str(dst))
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(500, f"保存下载文件失败：{exc}") from exc
+
+    probed = await asyncio.to_thread(ff.probe, dst)
+    size = dst.stat().st_size
+    log.info("抓取下载完成：%s（%.1fMB，%.1fs）", file_id, size / 1048576, probed.duration)
+    return UploadResponse(
+        file_id=file_id,
+        name=info.title or path.name,
+        size=size,
+        video_url=f"/api/media/upload/{file_id}",
+        duration=probed.duration,
+        width=probed.width,
+        height=probed.height,
+        fps=probed.fps,
+        has_audio=probed.has_audio,
+    )
 
 
 @router.post("/fetch", response_model=JobCreatedResponse, summary="抓取链接并反推")

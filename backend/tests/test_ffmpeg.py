@@ -417,3 +417,53 @@ def test_describe_sheet_layout_explains_grid_and_times(sample_video: Path, tmp_p
     assert "reading order" in text
     assert "padding" in text, "黑块补齐要说明，否则模型会当成画面内容"
     assert "0.00s" in text, "要列出每张图覆盖的时间点"
+
+
+# ---------------------------------------------------------------------------
+# 片段截取
+# ---------------------------------------------------------------------------
+
+def test_extract_segment_is_frame_accurate(sample_video: Path, tmp_path: Path):
+    """截取必须是帧精确的，不能吸附到关键帧。
+
+    用 `-c copy` 会把切点吸到最近的关键帧 —— 用户选了 5.5s 却从 4.8s 开始，
+    反推出来的提示词就对不上他框的内容。所以这里重新编码。
+    """
+    info = ff.probe(sample_video)
+    seg, why = ff.extract_segment(sample_video, 1.0, 3.0, tmp_path / "seg.mp4")
+    assert seg is not None, why
+    assert seg.is_file() and seg.stat().st_size > 0
+
+    got = ff.probe(seg)
+    assert abs(got.duration - 2.0) < 0.3, f"时长应该约 2s，实际 {got.duration}"
+    assert got.has_video
+    assert got.width == info.width and got.height == info.height
+
+
+def test_extract_segment_from_the_middle(sample_video: Path, tmp_path: Path):
+    info = ff.probe(sample_video)
+    start, end = info.duration * 0.3, info.duration * 0.7
+    seg, why = ff.extract_segment(sample_video, start, end, tmp_path / "mid.mp4")
+    assert seg is not None, why
+    got = ff.probe(seg)
+    assert abs(got.duration - (end - start)) < 0.4
+
+
+def test_extract_segment_rejects_bad_range(sample_video: Path, tmp_path: Path):
+    """起止颠倒 / 区间为空时不该产出文件。"""
+    for a, b in ((5.0, 2.0), (3.0, 3.0)):
+        seg, why = ff.extract_segment(sample_video, a, b, tmp_path / f"s{a}{b}.mp4")
+        assert seg is None or why, f"{a}->{b} 应该失败"
+
+
+def test_extract_segment_clamps_start_beyond_duration(sample_video: Path, tmp_path: Path):
+    """起点超过片长时不该崩，要么失败要么给出很短的结果。"""
+    info = ff.probe(sample_video)
+    seg, why = ff.extract_segment(
+        sample_video, info.duration + 10, info.duration + 20, tmp_path / "oob.mp4"
+    )
+    assert seg is None, f"越界不该产出可用片段（why={why}）"
+
+
+# ---------------------------------------------------------------------------
+# 片段截取

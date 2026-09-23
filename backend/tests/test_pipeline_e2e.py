@@ -20,6 +20,7 @@ import uvicorn
 
 from app.core import config as cfg
 from app.schemas import AnalyzeOptions, Job
+from app.services import ffmpeg as ff
 from app.services import pipeline
 from tests import mock_vlm
 
@@ -355,3 +356,78 @@ def test_prompt_word_limit_override_recorded(mock_vlm_env, sample_video: Path):
     assert result.stats["prompt_word_limit"] == 1234
     assert "prompt_words" in result.stats
     assert "prompt_over_limit" in result.stats
+
+
+# ---------------------------------------------------------------------------
+# 片段截取（trim）
+# ---------------------------------------------------------------------------
+
+def test_trim_analyses_only_the_selected_range(mock_vlm_env, sample_video: Path):
+    """框选片段后，反推的应该**只有**那一段。
+
+    实现是「先切出片段再跑管线」，所以下游（探测/镜头检测/抽帧/音频/时间戳）
+    全部天然是相对片段的，不用在七八个地方各自记得减偏移。
+    """
+    import asyncio
+
+    from app.services.jobs import store
+
+    full = ff.probe(sample_video)
+    mock_vlm.reset()
+    job = asyncio.run(store.create(Job(
+        id="e2e-trim", source="upload",
+        options=AnalyzeOptions(enable_asr=False, trim_start=1.0, trim_end=3.0),
+    )))
+    result = pipeline.run_pipeline_sync(job, sample_video)
+
+    assert abs(result.media.duration - 2.0) < 0.4, f"应该只分析 2s，实际 {result.media.duration}"
+    assert result.media.duration < full.duration - 1.0
+    trim = result.stats["trim"]
+    assert trim is not None
+    assert abs(trim["start"] - 1.0) < 0.01 and abs(trim["end"] - 3.0) < 0.01
+    # 时间戳要相对片段，不能是原片的绝对时间
+    assert result.observations, "应该有镜头观察结果"
+
+
+def test_no_trim_means_whole_video(mock_vlm_env, sample_video: Path):
+    import asyncio
+
+    from app.services.jobs import store
+
+    mock_vlm.reset()
+    job = asyncio.run(store.create(Job(
+        id="e2e-notrim", source="upload", options=AnalyzeOptions(enable_asr=False),
+    )))
+    result = pipeline.run_pipeline_sync(job, sample_video)
+    assert result.stats["trim"] is None
+    assert result.media.duration > 5.0
+
+
+def test_trim_shorter_than_half_second_is_rejected(mock_vlm_env, sample_video: Path):
+    import asyncio
+
+    from app.services.jobs import store
+
+    mock_vlm.reset()
+    job = asyncio.run(store.create(Job(
+        id="e2e-trim-short", source="upload",
+        options=AnalyzeOptions(enable_asr=False, trim_start=1.0, trim_end=1.2),
+    )))
+    with pytest.raises(RuntimeError, match="太短"):
+        pipeline.run_pipeline_sync(job, sample_video)
+
+
+def test_trim_options_reject_inconsistent_ranges():
+    """只给一端 / 终点不大于起点 都要被 schema 拒掉。"""
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        AnalyzeOptions(trim_start=1.0)
+    with pytest.raises(ValidationError):
+        AnalyzeOptions(trim_end=5.0)
+    with pytest.raises(ValidationError):
+        AnalyzeOptions(trim_start=5.0, trim_end=5.0)
+    with pytest.raises(ValidationError):
+        AnalyzeOptions(trim_start=-1.0, trim_end=3.0)
+    ok = AnalyzeOptions(trim_start=1.0, trim_end=3.0)
+    assert ok.trim_start == 1.0 and ok.trim_end == 3.0
