@@ -23,6 +23,9 @@ env/
 data/
 !data/.gitkeep
 backend/runtime/
+
+# 提示词导出（用 python -m app.dump_prompts 随时重新生成）
+prompts-dump/
 *.db
 *.db-journal
 *.sqlite
