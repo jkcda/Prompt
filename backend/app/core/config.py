@@ -101,6 +101,23 @@ class Settings(BaseSettings):
     frame_interval_seconds: float = 1.0
     # 单个镜头超过多少秒时额外补帧（保留给长镜头加权用）
     long_shot_seconds: float = 5.0
+    # 把帧拼成网格图（contact sheet）再送给模型，0 = 关闭（每帧单独一张图）。
+    #
+    # **为什么拼图**：实测模型的图片 token 成本有上限 —— 网格从 2.7 Mpx 做到
+    # 9.2 Mpx（3.4 倍），token 只从 1156 涨到 1176。也就是说一张图里放 6 帧还是
+    # 20 帧，成本几乎一样。所以同样预算下可以给模型几倍的时间覆盖度，速度还更快。
+    #
+    # 实测（13.3s 视频，Pass1 全流程）：
+    #     1fps / 12 张单帧 -> 46s，画面要素 7/7
+    #     2fps / 3 张 3x3  -> 26s，画面要素 7/7，镜头数更接近真实
+    #
+    # ⚠️ **代价是小字**：6 格时文字可靠，9 格以上开始编
+    # （实测 9/12/16/20 格都把 `FUTURE HERO` 读成 `ULTRA HERO`，偶尔又能读对 ——
+    # 在临界点上随机翻）。画面描述不受影响。
+    # 所以：只关心画面 -> 用 9~12；需要读小字 -> 压到 4~6，或保持 0 用单帧。
+    frame_sheet_cells: int = 0
+    # 拼图模式下每秒抽几帧。2.0 = 一秒两帧，配合 9 格约每 4.5 秒一张图。
+    frame_sample_fps: float = 2.0
     frame_long_edge: int = 896
     frame_jpeg_quality: int = 82
 

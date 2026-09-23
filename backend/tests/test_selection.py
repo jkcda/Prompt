@@ -221,3 +221,25 @@ def test_single_long_shot_gets_dense_frames():
     assert len(plan) == 8
     times = sorted(f.time for f in plan)
     assert times[0] < 2.0 and times[-1] > 13.0, "应该铺满整个镜头"
+
+
+def test_estimate_tokens_counts_sheets_not_frames():
+    """拼图模式下按张数算，不是按帧数 —— 一张网格装 6 帧还是 20 帧都一样。
+
+    实测：网格 2.7Mpx -> 9.2Mpx（3.4 倍），token 只从 1156 涨到 1176。
+    """
+    from app.services.selection import TOKENS_PER_SHEET
+
+    one_sheet = estimate_tokens(24, sheet_count=1)
+    assert one_sheet == TOKENS_PER_SHEET, "一张网格就该按一张算"
+    assert estimate_tokens(24, sheet_count=3) == 3 * TOKENS_PER_SHEET
+    # 同样 24 帧，单帧模式要贵得多
+    assert estimate_tokens(24) > 5 * TOKENS_PER_SHEET
+
+
+def test_describe_plan_mentions_sheets():
+    shots = [(0.0, 5.0), (5.0, 10.0)]
+    plan = plan_frames(shots, 96, max_per_shot=8, frame_interval=1.0)
+    text = describe_plan(plan, shots, 896, sheet_count=2, sheet_cells=9)
+    assert "2 张网格" in text
+    assert "每张 9 格" in text

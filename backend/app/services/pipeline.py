@@ -114,7 +114,15 @@ async def run_pipeline(job: Job, video_path: Path) -> JobResult:
     # ---------------- 4. 帧预算分配 ----------------
     budget = opts.max_total_frames or s.max_total_frames
     # 按次覆盖：前端高级选项里可以单独指定，留空用服务端默认
-    interval = opts.frame_interval_seconds or s.frame_interval_seconds
+    # 拼图模式下默认抽密一点（每秒 frame_sample_fps 帧）——
+    # 单帧模式受 token 成本约束只能 1fps，拼图后一格里塞多帧几乎不加钱，
+    # 所以可以拿时间密度换。显式指定过 frame_interval_seconds 则以指定值为准。
+    if opts.frame_interval_seconds:
+        interval = opts.frame_interval_seconds
+    elif s.frame_sheet_cells >= 2 and s.frame_sample_fps > 0:
+        interval = 1.0 / s.frame_sample_fps
+    else:
+        interval = s.frame_interval_seconds
     word_limit = opts.prompt_word_limit or s.prompt_word_limit
     await step("plan", 26, f"{len(shots)} 个镜头，预算 {budget} 帧")
 
@@ -132,7 +140,10 @@ async def run_pipeline(job: Job, video_path: Path) -> JobResult:
     frame_root = ff.frame_dir_for(job_id)
 
     chunk_frames: list[list[tuple[float, str, Path]]] = []
+    # 每块里拼出来的网格图（含各自覆盖的时间点），用来给模型说明布局
+    chunk_sheets: list[list[tuple[list[float], Path]]] = []
     for ci, chunk in enumerate(chunks):
+        chunk_sheets.append([])
         store.raise_if_cancelled(job_id)
         local_shots = [(sh.start, sh.end) for sh in chunk]
         plan = selection.plan_frames(
@@ -156,6 +167,24 @@ async def run_pipeline(job: Job, video_path: Path) -> JobResult:
         for t, path in pairs:
             role = role_of.get(round(t, 3), "mid")
             items.append((t, role, path))
+
+        # 拼图模式：把这一块的帧合成网格图，一张图装 cells 帧。
+        # 实测模型对图片 token 有上限，一格里放 6 帧还是 20 帧成本几乎一样，
+        # 所以同预算下能换到几倍的时间覆盖度。代价是小字会糊（见 config 注释）。
+        if s.frame_sheet_cells >= 2 and len(pairs) >= 2:
+            sheets = await asyncio.to_thread(
+                ff.build_contact_sheets, pairs, s.frame_sheet_cells, out_dir / "sheets"
+            )
+            items = []
+            for times, path in sheets:
+                if len(times) > 1:
+                    items.append((times[0], "sheet", path))
+                    chunk_sheets[-1].append((times, path))
+                else:
+                    items.append((times[0], role_of.get(round(times[0], 3), "mid"), path))
+            log.info("拼图：%d 帧 -> %d 张网格（每张最多 %d 格）",
+                     len(pairs), len(items), s.frame_sheet_cells)
+
         chunk_frames.append(items)
 
         pct = 32 + int(18 * (ci + 1) / max(1, total_chunks))
@@ -212,6 +241,12 @@ async def run_pipeline(job: Job, video_path: Path) -> JobResult:
             chunk_index=ci,
             chunk_total=total_chunks,
         )
+        # 拼图模式要告诉模型「这是网格，不是单帧」，否则它会把整张图当成一帧。
+        # 同时列出每张网格覆盖的时间点，模型才能把格子映射回时间轴。
+        if chunk_sheets[ci]:
+            user += "\n\n" + ff.describe_sheet_layout(
+                chunk_sheets[ci], s.frame_sheet_cells
+            )
         tasks.append((templates.PASS1_SYSTEM, prev_notes + user, imgs))
         audio_per_task.append(audios)
 
@@ -373,6 +408,9 @@ async def run_pipeline(job: Job, video_path: Path) -> JobResult:
                     frame_interval=interval,
                 ),
                 [(sh.start, sh.end) for sh in shots],
+                s.frame_long_edge,
+                sheet_count=sum(len(v) for v in chunk_sheets),
+                sheet_cells=s.frame_sheet_cells,
             ),
         },
     )

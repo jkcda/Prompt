@@ -14,6 +14,7 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -370,6 +371,121 @@ def extract_frame(
         return out_path
     log.debug("抽帧无输出 t=%.2f: %s", time_sec, _decode(cp.stderr)[-300:])
     return None
+
+
+def build_contact_sheets(
+    frames: list[tuple[float, Path]],
+    cells_per_sheet: int,
+    out_dir: Path | None = None,
+    cols: int | None = None,
+    quality: int = 3,
+) -> list[tuple[list[float], Path]]:
+    """把帧拼成若干张 contact sheet（网格图）。返回 [(该图包含的时间点列表, 图路径)]。
+
+    **为什么拼图**：实测模型的图片 token 成本有上限 ——
+    网格从 2.7 Mpx 做到 9.2 Mpx（3.4 倍），token 只从 1156 涨到 1176。
+    也就是说**一格里放 6 帧还是 20 帧，成本几乎一样**。
+    所以同样预算下可以给模型多几倍的时间覆盖度，速度还更快。
+
+    实测（13.3s 视频，Pass1 全流程）：
+        1fps / 12 张单帧  -> 46s，画面要素 7/7，T恤文字正确
+        2fps / 3 张 3x3   -> 26s，画面要素 7/7，T恤文字正确，镜头数更准
+
+    ⚠️ **代价：小字**。6 格时文字可靠，9 格以上开始编
+    （实测 9/12/16/20 格都把 `FUTURE HERO` 读成 `ULTRA HERO`，
+    偶尔又能读对 —— 在临界点上随机翻）。画面描述不受影响。
+    所以只关心画面时用大网格，需要读小字时把 cells_per_sheet 压到 6 以下。
+    """
+    if not frames or cells_per_sheet < 2:
+        return []
+
+    out_dir = out_dir or Path(tempfile.mkdtemp(prefix="sheets-", dir=str(TMP_DIR)))
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    n = len(frames)
+    cols = cols or max(2, int(math.ceil(math.sqrt(cells_per_sheet))))
+    rows = max(1, int(math.ceil(cells_per_sheet / cols)))
+
+    # 单元格尺寸：统一缩到 896x504 再加 3px 黑边，这样 hstack/vstack 能对齐
+    cw, ch, border = 896, 504, 3
+    tw, th = cw + border * 2, ch + border * 2
+
+    sheets: list[tuple[list[float], Path]] = []
+    for si in range(0, n, cells_per_sheet):
+        group = frames[si:si + cells_per_sheet]
+        if len(group) < 2:
+            # 最后只剩一帧就没必要拼图了，交给调用方当单帧处理
+            sheets.append(([group[0][0]], group[0][1]))
+            continue
+
+        dst = out_dir / f"sheet{si // cells_per_sheet + 1:02d}.jpg"
+        total = cols * rows
+        parts: list[str] = []
+        cells: list[str] = []
+        for i in range(len(group)):
+            parts.append(
+                f"[{i}:v]scale={cw}:{ch}:force_original_aspect_ratio=decrease,"
+                f"pad={cw}:{ch}:(ow-iw)/2:(oh-ih)/2:color=black,"
+                f"pad={tw}:{th}:{border}:{border}:color=black,setsar=1[v{i}]"
+            )
+            cells.append(f"[v{i}]")
+        # 不足一格的黑块补齐，保证网格对齐
+        for j in range(len(group), total):
+            parts.append(f"color=c=black:s={tw}x{th}:d=1,setsar=1[p{j}]")
+            cells.append(f"[p{j}]")
+
+        # 逐行 hstack，再把各行 vstack
+        row_labels: list[str] = []
+        for r in range(rows):
+            row = cells[r * cols:(r + 1) * cols]
+            parts.append(f"{''.join(row)}hstack=inputs={len(row)}[r{r}]")
+            row_labels.append(f"[r{r}]")
+        parts.append(f"{''.join(row_labels)}vstack=inputs={rows}[out]")
+
+        cmd = (
+            [resolve_ffmpeg(), "-hide_banner", "-loglevel", "error", "-y"]
+            + [arg for _, path in group for arg in ("-i", str(path))]
+            + ["-filter_complex", ";".join(parts), "-map", "[out]",
+               "-frames:v", "1", "-q:v", str(quality), str(dst)]
+        )
+        try:
+            proc = subprocess.run(cmd, capture_output=True, timeout=180)
+            if proc.returncode == 0 and dst.exists() and dst.stat().st_size > 0:
+                sheets.append(([t for t, _ in group], dst))
+            else:
+                log.warning(
+                    "拼图失败，退回单帧：%s",
+                    proc.stderr.decode("utf-8", "replace")[-300:],
+                )
+                sheets.extend(([t], p) for t, p in group)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("拼图异常，退回单帧：%s", exc)
+            sheets.extend(([t], p) for t, p in group)
+
+    return sheets
+
+
+def describe_sheet_layout(
+    sheets: list[tuple[list[float], Path]], cells_per_sheet: int
+) -> str:
+    """给模型看的网格布局说明。不说明的话模型不知道格子和时间怎么对应。"""
+    if not sheets:
+        return ""
+    cols = max(2, int(math.ceil(math.sqrt(cells_per_sheet))))
+    rows = max(1, int(math.ceil(cells_per_sheet / cols)))
+    lines = [
+        f"IMPORTANT — the {len(sheets)} attached image(s) are CONTACT SHEETS, not single frames.",
+        f"Each sheet is a {cols}x{rows} grid holding up to {cells_per_sheet} frames in reading "
+        f"order (left-to-right, then top-to-bottom), in chronological sequence.",
+        "Treat every grid cell as one separate frame. Cells filled with black are padding — ignore them.",
+    ]
+    for i, (times, _) in enumerate(sheets, 1):
+        if len(times) > 1:
+            rng = ", ".join(f"{t:.2f}s" for t in times)
+            lines.append(f"  sheet {i}: {rng}")
+        else:
+            lines.append(f"  sheet {i}: single frame at {times[0]:.2f}s")
+    return "\n".join(lines)
 
 
 def extract_frames_at(

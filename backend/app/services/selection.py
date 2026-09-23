@@ -33,6 +33,11 @@ PIXELS_PER_TOKEN = 1600
 # 默认按 16:9 估。竖屏 9:16 的像素数一样，不影响结果。
 DEFAULT_ASPECT = 16 / 9
 
+# 拼图（contact sheet）单张的 token 成本。**实测值是平坦的** ——
+# 网格从 2.7 Mpx 做到 9.2 Mpx（3.4 倍），token 只从 1156 涨到 1176。
+# 也就是说一格里放 6 帧还是 20 帧，成本几乎一样。
+TOKENS_PER_SHEET = 1150
+
 
 def tokens_per_frame(long_edge: int = 896, aspect: float = DEFAULT_ASPECT) -> int:
     """单帧的 token 成本估算（按长边和画幅比例）。"""
@@ -204,12 +209,18 @@ def _evenly_pick(total: int, want: int) -> list[int]:
 
 
 def estimate_tokens(
-    frame_count: int, text_chars: int = 0, long_edge: int = 896
+    frame_count: int,
+    text_chars: int = 0,
+    long_edge: int = 896,
+    sheet_count: int = 0,
 ) -> int:
     """粗略估算这次请求的 token 消耗，用于预算保护与展示。
 
     ⚠️ 用实测公式而不是拍脑袋的常数 —— 之前那个常数高了近 4 倍。
+    拼图模式下按张数算：一张网格约 1150 tokens，装 6 帧还是 20 帧都一样。
     """
+    if sheet_count > 0:
+        return sheet_count * TOKENS_PER_SHEET + int(text_chars / 1.6)
     return frame_count * tokens_per_frame(long_edge) + int(text_chars / 1.6)
 
 
@@ -221,6 +232,8 @@ def describe_plan(
     plan: list[PlannedFrame],
     shots: list[tuple[float, float]],
     long_edge: int = 896,
+    sheet_count: int = 0,
+    sheet_cells: int = 0,
 ) -> str:
     """生成可读的选帧说明，用于日志和前端展示。"""
     from collections import Counter
@@ -230,9 +243,11 @@ def describe_plan(
     span = 0.0
     if shots:
         span = shots[-1][1] - shots[0][0]
+    est = estimate_tokens(len(plan), long_edge=long_edge, sheet_count=sheet_count)
+    extra = f" / 拼成 {sheet_count} 张网格（每张 {sheet_cells} 格）" if sheet_count else ""
     return (
         f"镜头 {len(shots)} 个 / 抽帧 {len(plan)} 张 / 覆盖 {span:.1f}s"
         f" / 每镜最多 {max(per_shot.values()) if per_shot else 0} 张"
-        f" / 角色分布 {dict(roles)}"
-        f" / 预估 {estimate_tokens(len(plan), long_edge=long_edge) / 1000:.1f}k tokens"
+        f" / 角色分布 {dict(roles)}{extra}"
+        f" / 预估 {est / 1000:.1f}k tokens"
     )
