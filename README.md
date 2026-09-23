@@ -303,10 +303,14 @@ cp .env.example .env
 # 编辑 .env，至少填 VLM_API_KEY / VLM_BASE_URL / VLM_MODEL
 
 # 3. 启动
-fastapi dev                     # 开发（热重载）
-# 或
-fastapi run                     # 生产
+uvicorn app.main:app --reload              # 开发（热重载）
+uvicorn app.main:app --host 0.0.0.0 --port 8000   # 生产
 ```
+
+> 用 `uvicorn` 而不是 `fastapi dev` / `fastapi run` —— 后者需要额外装
+> `fastapi[standard]`，而 `uvicorn` 已经是本项目声明的依赖，装上就能用。
+> 想用 `fastapi` 命令的话，`pip install "fastapi[standard]"` 即可，
+> 入口已经配好在 `pyproject.toml` 的 `[tool.fastapi]` 里。
 
 启动后：
 
@@ -1024,7 +1028,7 @@ python -m tests.mock_vlm 8899
 VLM_API_KEY=mock-key \
 VLM_BASE_URL=http://127.0.0.1:8899/v1 \
 VLM_MODEL=mock-vlm \
-fastapi dev
+uvicorn app.main:app --reload
 ```
 
 ---
@@ -1089,12 +1093,6 @@ npm run build        # 产物在 frontend/dist，后端会自动托管
 
 ```bash
 cd backend
-fastapi run --host 0.0.0.0 --port 8000
-```
-
-或走 uvicorn：
-
-```bash
 uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1
 ```
 
