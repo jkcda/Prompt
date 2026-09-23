@@ -798,7 +798,7 @@ YTDLP_FORMAT=bv*[height<=720][ext=mp4]+ba[ext=m4a]/bv*[height<=720]+ba/b[height<
 
 ```bash
 cd backend
-pytest                    # 全部 245 个
+pytest                    # 全部 258 个
 pytest -q tests/test_selection.py     # 只跑选帧策略
 pytest -q tests/test_pipeline_e2e.py  # 只跑端到端
 ruff check app tests                  # 静态检查
@@ -808,8 +808,8 @@ ruff check app tests                  # 静态检查
 
 | 文件 | 数量 | 覆盖内容 |
 |---|---|---|
-| `test_selection.py` | 20 | 预算不超、每镜保底、**按镜头时长定帧数**、**每镜全覆盖**、`max_per_shot` 大于 3 生效、帧间隔调密度 |
-| `test_ffmpeg.py` | 33 | 真实视频跑探测 / 场景检测 / 抽帧 / 缩放 / 音频 / 切分 / **频段能量** / **音频片段抽取** / **自适应镜头检测** |
+| `test_selection.py` | 22 | 预算不超、每镜保底、**按镜头时长定帧数**、**每镜全覆盖**、`max_per_shot` 大于 3 生效、帧间隔调密度 |
+| `test_ffmpeg.py` | 41 | 真实视频跑探测 / 场景检测 / 抽帧 / 缩放 / 音频 / 切分 / 频段能量 / 音频片段抽取 / 自适应镜头检测 / **拼图与布局说明** |
 | `test_templates.py` | 59 | Pass1 JSON 宽容解析、多块镜号重排、主体登记表合并、两种模式的模板硬约束、占位符替换、音频编造禁令、频谱措辞边界、**逐段长度预算**、**压缩指令与结构校验** |
 | `test_downloader.py` | 24 | 中文分享文案取链接、平台识别、aweme_id、yt-dlp 选项（**含 `ffmpeg_location` 回归**）、清晰度封顶、失败原因上传 |
 | `test_vlm.py` | 36 | 请求体构造（data URI / Anthropic 块 / **`input_audio` 音频块**）、响应解析（含 `choices: null`）、**空响应原因诊断**、音频格式白名单与体积上限、**关思考与按次覆盖**、base_url 带不带 `/v1` 都能用 |
@@ -868,7 +868,7 @@ fastapi dev
 | **真实模型 + 真实素材** | `DeepSeek-V4.1-Flash`，13.3s / 1080p 特效视频 | 88 秒，切点 10 / 镜头 4 / 抽帧 12 / 主体 8，正文 572 词 |
 | 前端构建 | `vue-tsc + vite build` | 通过，112 模块 |
 | 静态检查 | `ruff check app tests` | 通过 |
-| 测试 | — | **245 passed** |
+| 测试 | — | **258 passed** |
 
 **模型真的在看图**：喂 SMPTE 彩条帧，它正确识别出彩条布局，并读出了画面里的
 实际数字（6.0s 那帧是 `'6'`，9.5s 是 `'9'`）。
