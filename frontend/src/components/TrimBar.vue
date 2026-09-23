@@ -28,11 +28,32 @@ const track = ref<HTMLDivElement | null>(null)
 const playhead = ref(0)
 const dragging = ref<'start' | 'end' | null>(null)
 
-/** 整片时长优先用探测值，探测没出来时退回 video 元素自己报的。 */
-const total = computed(() => {
+/**
+ * 从 `<video>` 元素读到的时长。
+ *
+ * ⚠️ 必须存在 ref 里，不能直接在 computed 里读 `video.value.duration` ——
+ * **`<video>` 的 duration 不是响应式的**，Vue 追踪不到它。
+ * 踩过：上传的视频没有探测结果（probe 只用于链接模式），`props.duration` 是 0，
+ * 而 computed 又读不到元素上的 duration，于是 `total` 永远是 0，
+ * 拖动时被 `total <= 0` 直接挡掉 —— 表现就是「选不了时间段」。
+ */
+const videoDuration = ref(0)
+
+/** 整片时长优先用探测值，没有就用 video 元素报的。 */
+const total = computed(() => (props.duration > 0 ? props.duration : videoDuration.value))
+
+/**
+ * 交互时刻**直接**读一次时长，作为兜底。
+ *
+ * 即使某个环节的响应式没跟上（元数据刚加载完、computed 还没重算），
+ * 拖动也不会被误挡。
+ */
+function currentTotal(): number {
   if (props.duration > 0) return props.duration
-  return video.value?.duration && isFinite(video.value.duration) ? video.value.duration : 0
-})
+  if (videoDuration.value > 0) return videoDuration.value
+  const v = video.value
+  return v && isFinite(v.duration) && v.duration > 0 ? v.duration : 0
+}
 
 const start = computed(() => props.modelValue?.start ?? 0)
 const end = computed(() => props.modelValue?.end ?? total.value)
@@ -53,16 +74,18 @@ const fmt = (t: number) => {
 const MIN_LEN = 0.5
 
 function setRange(a: number, b: number) {
+  const span = currentTotal()
   const lo = Math.max(0, Math.min(a, b))
-  const hi = Math.min(total.value, Math.max(a, b))
+  const hi = Math.min(span > 0 ? span : Math.max(a, b), Math.max(a, b))
   if (hi - lo < MIN_LEN) return
   emit('update:modelValue', { start: lo, end: hi })
 }
 
 function onTrackPointerDown(e: PointerEvent) {
-  if (!track.value || total.value <= 0) return
+  const span = currentTotal()
+  if (!track.value || span <= 0) return
   const rect = track.value.getBoundingClientRect()
-  const t = ((e.clientX - rect.left) / rect.width) * total.value
+  const t = ((e.clientX - rect.left) / rect.width) * span
   // 点哪边近就动哪个手柄
   const toStart = Math.abs(t - start.value)
   const toEnd = Math.abs(t - end.value)
@@ -73,13 +96,15 @@ function onTrackPointerDown(e: PointerEvent) {
 }
 
 function onTrackPointerMove(e: PointerEvent) {
-  if (!dragging.value || !track.value) return
+  const span = currentTotal()
+  if (!dragging.value || !track.value || span <= 0) return
   const rect = track.value.getBoundingClientRect()
-  moveTo(dragging.value, ((e.clientX - rect.left) / rect.width) * total.value)
+  moveTo(dragging.value, ((e.clientX - rect.left) / rect.width) * span)
 }
 
 function moveTo(which: 'start' | 'end', t: number) {
-  const clamped = Math.min(total.value, Math.max(0, t))
+  const span = currentTotal()
+  const clamped = span > 0 ? Math.min(span, Math.max(0, t)) : Math.max(0, t)
   if (which === 'start') {
     setRange(clamped, end.value)
   } else {
@@ -103,7 +128,7 @@ function selectAll() {
 /** 预览选区：从头播到尾部就停，方便确认框对了。 */
 function playSelection() {
   const v = video.value
-  if (!v || total.value <= 0) return
+  if (!v || currentTotal() <= 0) return
   v.currentTime = start.value
   void v.play()
 }
@@ -118,10 +143,15 @@ function onTimeUpdate() {
 
 function onLoadedMetadata() {
   const v = video.value
-  if (!v || props.modelValue) return
+  if (!v) return
+  // 存进 ref —— `<video>` 的 duration 不是响应式的，不存的话 total 永远是 0
+  videoDuration.value = isFinite(v.duration) && v.duration > 0 ? v.duration : 0
+
+  if (props.modelValue) return
   // 没框选时，如果视频比上限长，默认帮用户框出前段
-  if (props.duration > 0 && v.duration > props.duration + 0.05) {
-    emit('update:modelValue', { start: 0, end: props.duration })
+  const limit = props.duration > 0 ? props.duration : 0
+  if (limit > 0 && videoDuration.value > limit + 0.05) {
+    emit('update:modelValue', { start: 0, end: limit })
   }
 }
 
