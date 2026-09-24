@@ -17,9 +17,15 @@ from pydantic import BaseModel, Field
 class ShotObservation(BaseModel):
     shot: str = ""
     timecode: str = ""
+    # 这个镜头在源视频里的起止毫秒。为什么要单独要：
+    # 成文阶段要写「[Shot N] At MM:SS.mmm」以及分镜表的时间区间，
+    # 而 `timecode` 只给了首帧。给了区间之后，最后一个镜头的 end_ms
+    # 还能被代码强制对齐到片段总时长 —— 否则模型经常把结尾算短一截。
+    start_ms: int = 0
+    end_ms: int = 0
     shot_size: str = ""       # 景别：特写 / 近景 / 中景 / 全景 / 远景
     camera: str = ""          # 运镜：固定 / 推 / 拉 / 摇 / 移 / 跟 / 手持 / 环绕 / 升降
-    subject: str = ""         # 主体与外观、服装、关键道具
+    subject: str = ""         # 主体与外观、服装、关键道具（只写本帧可见的）
     action: str = ""          # 动作 + 物理传导细节
     setting: str = ""         # 环境与场景
     lighting: str = ""        # 光线来源、方向、质感
@@ -30,6 +36,9 @@ class ShotObservation(BaseModel):
     sfx: str = ""             # 非语音声
     transition: str = ""      # 与下一镜的衔接
     confidence: float = 0.0
+    # 由代码在合并阶段标注：这条是不是和上一条拼起来的连续镜头。
+    # 让下游（前端、Pass2）知道「这里原本是两条，被判定为同一个机位」。
+    is_continuous: bool = False
 
 
 class SubjectEntry(BaseModel):

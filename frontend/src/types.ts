@@ -69,12 +69,32 @@ export interface AudioReport {
   peak_volume_db: number | null
   silence_ratio: number | null
   loudness_points: number[]
+  // 频段能量（dB，相对全频段）。**仅诊断用** —— 这些数字不会写进提示词，
+  // 它们只在服务端支撑 music_profile 那句人类可读的描述。
+  speech_band_db: number | null
+  low_band_db: number | null
+  high_band_db: number | null
+  // 节奏与音乐画像（纯 Python 从 PCM 算出，不需要模型）
+  bpm: number | null
+  has_beat: boolean
+  onset_rate: number
+  transient_bursts: number
+  dynamic_range_db: number | null
+  /** 人类可读的音乐描述，成文阶段会直接用它 */
+  music_profile: string
+  /** 转写检出的语言，歌词要保持原语言 */
+  language: string
+  /** 人声是怎么提取的（Demucs / ffmpeg 带通 / 未处理） */
+  vocal_isolation: string
   note: string
 }
 
 export interface ShotObservation {
   shot: string
   timecode: string
+  /** 该镜头在源视频里的起止毫秒。后端会补全并对齐，末镜的 end_ms 等于总时长。 */
+  start_ms: number
+  end_ms: number
   shot_size: string
   camera: string
   subject: string
@@ -88,6 +108,8 @@ export interface ShotObservation {
   sfx: string
   transition: string
   confidence: number
+  /** 这一条由代码把相邻的同一机位条目合并而来 */
+  is_continuous: boolean
 }
 
 /** Pass1 的跨镜头主体登记项，Ref2VA 的参考标签由它推导。 */

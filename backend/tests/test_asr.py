@@ -33,7 +33,7 @@ def test_no_asr_config_skips_transcription(sample_video: Path, no_asr, monkeypat
 
     def spy(*a, **kw):
         called["n"] += 1
-        return "", []
+        return "", [], ""
 
     monkeypatch.setattr(asr, "_transcribe_api", spy)
     monkeypatch.setattr(asr, "_local_whisper_available", lambda: False)
@@ -58,7 +58,7 @@ def test_asr_configured_does_call_transcription(sample_video: Path, monkeypatch)
 
         def spy(path, duration):
             called["n"] += 1
-            return "hello", []
+            return "hello", [], "en"
 
         monkeypatch.setattr(asr, "_transcribe_api", spy)
         monkeypatch.setattr(asr, "_local_whisper_available", lambda: False)
@@ -66,7 +66,9 @@ def test_asr_configured_does_call_transcription(sample_video: Path, monkeypatch)
         report = asr.analyze_audio(sample_video, enable_asr=True)
         assert called["n"] == 1
         assert report.transcript == "hello"
-        assert report.note == "API 转写"
+        assert report.language == "en"
+        # note 现在会带上音乐画像的结论，所以用 in 而不是 ==
+        assert "API 转写" in report.note
     finally:
         monkeypatch.delenv("ASR_API_KEY", raising=False)
         monkeypatch.delenv("ASR_BASE_URL", raising=False)
@@ -79,8 +81,10 @@ def test_enable_asr_false_skips_everything(sample_video: Path, monkeypatch):
     cfg.refresh_settings()
     try:
         called = {"n": 0}
-        monkeypatch.setattr(asr, "_transcribe_api",
-                            lambda *a, **kw: (called.__setitem__("n", called["n"] + 1), ("", []))[1])
+        monkeypatch.setattr(
+            asr, "_transcribe_api",
+            lambda *a, **kw: (called.__setitem__("n", called["n"] + 1), ("", [], ""))[1],
+        )
 
         report = asr.analyze_audio(sample_video, enable_asr=False)
         assert called["n"] == 0
@@ -119,3 +123,92 @@ def test_audio_report_spectrum_fields_are_filled(sample_video: Path):
     assert isinstance(report, AudioReport)
     assert report.speech_band_db is not None
     assert report.low_band_db is not None
+    assert report.high_band_db is not None
+
+
+# ---------------------------------------------------------------------------
+# 音乐画像与输出措辞
+# ---------------------------------------------------------------------------
+
+def test_music_profile_detects_tempo(ffmpeg_bin: str, tmp_path: Path):
+    """有稳定节拍的音轨要能测出接近真实的 BPM。
+
+    用 tremolo 把 100Hz 正弦调制成 128 BPM（2.133Hz）的脉冲串，
+    这是「能量包络有明显周期」的最简模型。
+    """
+    import subprocess
+
+    from app.services import audio_features
+
+    clip = tmp_path / "beat.wav"
+    subprocess.run([
+        ffmpeg_bin, "-hide_banner", "-loglevel", "error",
+        "-f", "lavfi", "-i", "sine=frequency=100:duration=12",
+        "-af", "tremolo=f=2.133:d=0.9",
+        "-ac", "1", "-ar", "8000", "-y", str(clip),
+    ], check=True, capture_output=True, timeout=120)
+
+    profile = audio_features.analyze_music(str(clip))
+    assert profile.analysed is True
+    assert profile.bpm is not None, "有稳定节拍的音轨应该能估出 BPM"
+    assert 110 <= profile.bpm <= 145, f"BPM 偏差过大：{profile.bpm}"
+    assert profile.has_beat is True
+
+
+def test_music_profile_silence_has_no_beat(ffmpeg_bin: str, tmp_path: Path):
+    """纯静音不该被判成有节拍。"""
+    import subprocess
+
+    from app.services import audio_features
+
+    clip = tmp_path / "silence.wav"
+    subprocess.run([
+        ffmpeg_bin, "-hide_banner", "-loglevel", "error",
+        "-f", "lavfi", "-i", "anullsrc=r=8000:cl=mono", "-t", "6",
+        "-y", str(clip),
+    ], check=True, capture_output=True, timeout=60)
+
+    profile = audio_features.analyze_music(str(clip))
+    assert profile.has_beat is False
+
+
+def test_audio_prompt_never_leaks_tool_terms(sample_video: Path):
+    """音频段落的措辞会**原样进最终提示词**，绝不能出现分析术语。
+
+    实测漏出过 `content unanalysed` / `voice band` / `energy distribution` ——
+    那是我们自己的 system prompt 里的词被模型抄走了。
+    """
+    report = asr.analyze_audio(sample_video, enable_asr=False)
+    text = asr.format_transcript_for_prompt(report).lower()
+
+    for term in (
+        "content unanalysed", "energy distribution", "voice band",
+        "speech band", "not identified", "frequency band", "spectral",
+        "low-frequency component",
+    ):
+        assert term not in text, f"音频段落里漏出了工具术语：{term}"
+
+
+def test_audio_prompt_gives_human_readable_music(sample_video: Path):
+    """有音轨时必须给一句人类可读的音乐描述，而不是只报「未识别」。"""
+    report = asr.analyze_audio(sample_video, enable_asr=False)
+    text = asr.format_transcript_for_prompt(report)
+
+    assert "【音乐与声音" in text
+    # 440Hz 正弦：能量集中在中频，描述里应该能说出这一点
+    assert report.music_profile, "有音轨却没有生成音乐描述"
+    assert "The soundtrack reads as" in report.music_profile
+
+
+def test_audio_prompt_marks_unknown_as_unknown(sample_video: Path):
+    """没做转写时必须把「不知道」写死。
+
+    只写「未获得文本内容」这种中性陈述等于留白，模型一定会去填 ——
+    实测它编出了「电子提示音与数字跳变同步」并标成 fully_copy。
+    """
+    report = asr.analyze_audio(sample_video, enable_asr=False)
+    text = asr.format_transcript_for_prompt(report)
+
+    assert "一无所知" in text
+    assert "禁止编造" in text
+    assert "不要写任何台词或歌词" in text

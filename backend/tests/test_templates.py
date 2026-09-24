@@ -255,7 +255,10 @@ def test_pass2_system_contains_hard_rules_for_every_format():
     for fmt in FORMAT_LABELS:
         system = build_pass2_system(fmt, "en")
         assert "NEVER use static or terminal verbs" in system
-        assert "mouth movement" in system
+        # 口型规则。措辞是 "Mouth movement — describe it as a VISUAL fact"，
+        # 所以只匹配词干，不匹配大小写。
+        assert "outh movement" in system
+        assert "VISUAL fact" in system
 
 
 def test_pass2_system_h3_uses_bare_field_names():
@@ -561,13 +564,14 @@ def test_audio_report_forbids_fabrication_when_not_transcribed():
     report = AudioReport(has_audio=True, mean_volume_db=-21.0, silence_ratio=0.0)
     text = format_transcript_for_prompt(report)
 
-    assert "未知" in text
-    assert "禁止描述任何具体的声音" in text
-    assert "不要写台词或歌词" in text
-    assert "不要写 BGM" in text
+    assert "一无所知" in text
+    assert "禁止编造" in text
+    assert "不要写任何台词或歌词" in text
+    assert "不要写 BGM 的乐器" in text
     assert "N/A" in text
-    # 音量信息仍然要保留，这是唯一已知的
-    assert "-21.0dB" in text
+    # ⚠️ 音量数字**不再**进提示词。数字对生成视频没有意义，而且会诱导模型
+    # 写「低频 -12dB 的成分」这种句子 —— 实测就是这么漏出去的。
+    assert "-21.0dB" not in text
 
 
 def test_audio_report_with_transcript_does_not_warn():
@@ -576,21 +580,20 @@ def test_audio_report_with_transcript_does_not_warn():
     report = AudioReport(has_audio=True, transcript="la la la")
     text = format_transcript_for_prompt(report)
     assert "la la la" in text
-    assert "禁止描述任何具体的声音" not in text
-    assert "【重申】" not in text
+    assert "禁止编造" not in text
 
 
 def test_audio_report_no_track_says_na():
     from app.services.asr import format_transcript_for_prompt
 
     text = format_transcript_for_prompt(AudioReport(has_audio=False))
-    assert "无音轨" in text
+    assert "没有音轨" in text
     assert "N/A" in text
 
 
 def test_pass2_rules_forbid_fabricated_sound():
     system = build_pass2_system("h3", "en")
-    assert "not transcribed" in system
+    assert "the audio content is unknown" in system
     assert "Fabricated sound is worse than an empty field" in system
     assert "not even hedged" in system, "要堵住「似乎/仿佛」这种模糊编造"
 
@@ -600,7 +603,6 @@ def test_pass2_rules_forbid_inferring_sound_from_visuals():
     system = build_pass2_system("h3", "en")
     assert "Do NOT convert visual events into sound events" in system
     assert "footsteps" in system and "cloth rustle" in system
-    assert "leave the sound unspecified" in system
 
 
 def test_pipeline_audio_slice_warns_when_no_transcript():
@@ -620,7 +622,7 @@ def test_pipeline_audio_slice_no_track():
 
 
 # ---------------------------------------------------------------------------
-# 频谱特征（无 ASR 时唯一可用的音频信息）
+# 频谱特征的措辞边界
 # ---------------------------------------------------------------------------
 
 def test_spectrum_speech_dominant():
@@ -628,8 +630,7 @@ def test_spectrum_speech_dominant():
 
     lines = describe_spectrum(AudioReport(has_audio=True, speech_band_db=-1.0, low_band_db=-25.0))
     joined = "\n".join(lines)
-    assert "能量高度集中在这一频段" in joined
-    assert "频谱无法区分" in joined, "纯音调也会落在这个频段，必须说明分不出来"
+    assert "人声/主奏频段能量占比高" in joined
     assert "低频很弱" in joined
     # 不能升级成内容断言
     assert "有人说话" not in joined
@@ -641,9 +642,10 @@ def test_spectrum_music_like():
 
     lines = describe_spectrum(AudioReport(has_audio=True, speech_band_db=-12.0, low_band_db=-4.0))
     joined = "\n".join(lines)
-    assert "不太像以人声为主" in joined
-    assert "疑似有节奏性的音乐编排" in joined
-    assert "但也可能是低频环境噪声" in joined, "低频强不等于一定有鼓点"
+    assert "能量大部分落在人声频段之外" in joined
+    assert "低频成分显著" in joined
+    # 低频强不等于一定有鼓点
+    assert "鼓" in joined and "这类" in joined
 
 
 def test_spectrum_mixed_case():
@@ -652,8 +654,7 @@ def test_spectrum_mixed_case():
 
     lines = describe_spectrum(AudioReport(has_audio=True, speech_band_db=-4.5, low_band_db=-4.3))
     joined = "\n".join(lines)
-    assert "混有其他频段成分" in joined
-    assert "人声 + 配器" in joined
+    assert "混有其他频段" in joined
 
 
 def test_spectrum_missing_values_are_skipped():
@@ -662,25 +663,34 @@ def test_spectrum_missing_values_are_skipped():
     assert describe_spectrum(AudioReport(has_audio=True)) == []
 
 
-def test_spectrum_is_included_in_prompt_but_bounded():
-    """频谱数据可以给，但必须标明边界——它是能量分布，不是内容识别。"""
+def test_spectrum_numbers_stay_out_of_the_prompt():
+    """频谱数据**不再**以原始形式进提示词。
+
+    实测：给了 dB 数字和频段名之后，最终输出里出现了
+    `measured energy mostly voice band` / `inferred from energy distribution`
+    —— 模型把工具术语照抄走了。现在这些数字只在服务端支撑
+    `MusicProfile.describe()` 生成的那句人类可读描述。
+    """
     from app.services.asr import format_transcript_for_prompt
 
     report = AudioReport(has_audio=True, speech_band_db=-1.2, low_band_db=-19.0)
     text = format_transcript_for_prompt(report)
-    assert "音频频谱特征" in text
-    assert "不是内容识别" in text
-    assert "不得据此断言具体内容" in text
-    # 禁令仍然在
-    assert "禁止描述任何具体的声音" in text
+
+    # 只查**真正有害**的形式：测量数字和英文分析术语。
+    # 中文的「频段 / 分贝」会出现在禁令句里，那是合理的，不算泄漏。
+    assert "dB" not in text
+    assert "Hz" not in text
+    for term in ("content unanalysed", "energy distribution", "voice band", "spectral"):
+        assert term not in text.lower(), f"音频段落里漏出了工具术语：{term}"
+    assert "【音乐与声音" in text
 
 
-def test_pass2_rule_distinguishes_content_from_spectrum():
-    """规则要允许频谱倾向描述，否则和频谱数据自相矛盾。"""
+def test_pass2_rule_forbids_analysis_vocabulary():
+    """规则要明确禁止把音频分析用语写进提示词 —— 实测漏出过 voice band。"""
     system = build_pass2_system("h3", "en")
-    assert "distinguish CONTENT from SPECTRUM" in system
-    assert "voice-dominant" in system
-    assert "does not license" in system
+    assert "audio-ANALYSIS vocabulary" in system
+    assert "frequency-band names" in system
+    assert "decibel or hertz" in system
 
 
 # ---------------------------------------------------------------------------

@@ -68,8 +68,25 @@ class AudioReport(BaseModel):
 
     # ---- 频谱能量特征（ffmpeg 实测，不需要任何模型）----
     # 没有 ASR 时，这几个数字是唯一能拿到的音频信息。
-    # 它们只能说明「能量分布在哪」，不能说明「是什么声音」——
-    # 所以措辞必须停在「疑似以人声为主」，绝不能说成「有对白」。
+    # ⚠️ 它们只能说明「能量分布在哪」，不能说明「是什么声音」。
+    # 而且**不许把这些数字或它们的术语写进最终提示词** ——
+    # 实测输出里出现过 "content unanalysed" / "voice band" 这类工具术语，
+    # 视频模型拿到这种句子写不出任何东西。数字只用来支撑一句人类可读的描述。
     speech_band_db: float | None = None   # 300-3400Hz 相对全频段的能量（dB，越接近 0 越集中于人声频段）
     low_band_db: float | None = None      # <200Hz 相对全频段的能量（dB，越接近 0 低频越强）
+    high_band_db: float | None = None     # >6kHz 相对全频段的能量（dB，掌声/镲片的线索）
+
+    # ---- 节奏与音乐画像（纯 Python 从 PCM 算出）----
+    bpm: float | None = None              # 估计的每分钟拍数
+    has_beat: bool = False                # 有没有稳定节拍
+    onset_rate: float = 0.0               # 每秒音头数，反映节奏密度
+    transient_bursts: int = 0             # 密集高频瞬态簇个数（掌声/欢呼线索）
+    dynamic_range_db: float | None = None  # 峰值 - 平均
+    # 人类可读的音乐描述，由 audio_features.MusicProfile.describe() 生成。
+    # 成文阶段可以直接用这句话，也可以改写，但**不许退回工具术语**。
+    music_profile: str = ""
+
+    # ---- 转写来源 ----
+    language: str = ""                    # 转写检出的语言（保留原语言输出用）
+    vocal_isolation: str = ""             # 人声是怎么提取的（Demucs / ffmpeg 带通 / 未处理）
     note: str = ""

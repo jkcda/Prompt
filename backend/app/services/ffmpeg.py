@@ -630,6 +630,7 @@ def analyze_audio_levels(src: str | Path) -> dict:
         "loudness_points": [],
         "speech_band_db": None,
         "low_band_db": None,
+        "high_band_db": None,
     }
 
     try:
@@ -665,7 +666,8 @@ def analyze_audio_levels(src: str | Path) -> dict:
     except Exception:  # noqa: BLE001
         pass
 
-    # 频段能量：语音频段（人声/对白主要落在这里）与低频段（鼓、贝斯、音乐铺底）
+    # 频段能量：语音频段（人声/对白主要落在这里）、低频段（鼓、贝斯、音乐铺底）、
+    # 高频段（镲片、齿音、空气感，也是掌声/欢呼的线索）
     #
     # 滤波链都串两遍：ffmpeg 的 highpass/lowpass 是单极点（6dB/oct），太缓。
     # 单极点 lowpass=f=200 挡不住 440Hz —— 实测纯 440Hz 正弦的低频相对能量
@@ -679,6 +681,9 @@ def analyze_audio_levels(src: str | Path) -> dict:
         low = _band_mean_volume(src, "lowpass=f=200,lowpass=f=200")
         if low is not None:
             result["low_band_db"] = round(low - full, 1)
+        high = _band_mean_volume(src, "highpass=f=6000,highpass=f=6000")
+        if high is not None:
+            result["high_band_db"] = round(high - full, 1)
 
     return result
 

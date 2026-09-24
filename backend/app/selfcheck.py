@@ -13,8 +13,9 @@ from pathlib import Path
 
 from .core.config import get_settings, resolve_ffmpeg, resolve_ffprobe
 from .services import asr as asr_mod
+from .services import audio_features, selection
 from .services import ffmpeg as ff
-from .services import selection
+from .services import motion as motion_mod
 
 
 def main(argv: list[str]) -> int:
@@ -59,6 +60,21 @@ def main(argv: list[str]) -> int:
     for i, (a, b) in enumerate(shots[:10]):
         print(f"      #{i + 1}: {a:7.2f}s - {b:7.2f}s  ({b - a:.2f}s)")
 
+    # 运动分析必须和管线走同一条路径 —— 自检报「全部静止」而管线报「有运镜」
+    # 的话，用户会照着错的数字去调参数。
+    t0 = time.time()
+    motions = motion_mod.analyze_shots_motion(str(video), shots) if s.motion_analysis else []
+    print(f"\n[2.5] 镜头运动分析  ({time.time() - t0:.2f}s)")
+    if not motions:
+        print("    (已关闭：MOTION_ANALYSIS=false)")
+    else:
+        moved = sum(1 for m in motions if not m.camera_static)
+        print(f"    检出相机运动 : {moved}/{len(motions)} 个镜头")
+        for i, m in enumerate(motions[:10]):
+            print(f"      #{i + 1}: {motion_mod.suggest_camera(m):<12} "
+                  f"位移 {m.px_per_sec:6.1f}px/s  累计 {m.total_shift:6.1f}px  "
+                  f"纹理 {m.texture:4.1f}" + (f"  ⚠ {m.error}" if m.error else ""))
+
     t0 = time.time()
     plan = selection.plan_frames(
         shots,
@@ -86,7 +102,20 @@ def main(argv: list[str]) -> int:
     print(f"    有音轨 : {audio.has_audio}")
     print(f"    平均音量: {audio.mean_volume_db} dB")
     print(f"    静音占比: {audio.silence_ratio}")
+    print(f"    频段   : 低频 {audio.low_band_db} / 中频 {audio.speech_band_db} "
+          f"/ 高频 {audio.high_band_db} dB（相对全频段）")
+    print(f"    节奏   : BPM={audio.bpm} 稳定节拍={audio.has_beat} "
+          f"音头密度={audio.onset_rate}/s 瞬态簇={audio.transient_bursts}")
+    print(f"    音乐描述: {audio.music_profile or '(未得出)'}")
+    print(f"    人声分离: {audio.vocal_isolation or '(未做)'}")
     print(f"    备注   : {audio.note}")
+
+    # 音频段落是**原样进最终提示词**的，所以这里顺便查一遍有没有工具术语漏出去
+    t0 = time.time()
+    prompt_text = asr_mod.format_transcript_for_prompt(audio)
+    _, jargon = audio_features.sanitize_audio_jargon(prompt_text)
+    print(f"\n[6] 音频段落措辞检查  ({time.time() - t0:.2f}s)")
+    print(f"    分析术语泄漏: {'无' if not jargon else '、'.join(jargon)}")
 
     print("\n" + "=" * 66)
     print("核心链路自检通过。模型调用需在 .env 里配置 VLM_API_KEY 后测试。")

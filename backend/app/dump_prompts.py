@@ -33,7 +33,7 @@ from .services.vlm import VLMClient
 
 
 def _pass1_user_sample() -> str:
-    """用真实参数造一条 Pass1 用户消息 —— 单帧列表 + 用户画面说明。"""
+    """用真实参数造一条 Pass1 用户消息 —— 帧列表 + 运动数据 + 用户画面说明。"""
     return templates.build_pass1_user(
         chunk_start=0.0,
         chunk_end=12.0,
@@ -47,6 +47,14 @@ def _pass1_user_sample() -> str:
         chunk_index=0,
         chunk_total=1,
         content_hint="一镜到底的跟拍运镜，全程没有切镜；主角是白发少女，穿黑色风衣。",
+        # 客观运动数据的示例。实际运行时由 motion.analyze_shots_motion 算出来。
+        motion_text=(
+            "shot 1: dolly-in; content moves +0.42 px horizontally and -0.08 px vertically "
+            "per frame (positive = right / down), i.e. 2.5 px per second; total movement "
+            "across the whole shot: 30.2 px (the camera really moves); horizontal scale "
+            "change +0.71 (positive = content spreading outward = camera moving closer); "
+            "frame-to-frame brightness change 3.10%"
+        ),
     )
 
 
@@ -59,7 +67,8 @@ def _pass2_user_sample() -> str:
             end=12.0,
             shots=[
                 ShotObservation(
-                    shot="1", timecode="00:00.000", shot_size="medium close-up",
+                    shot="1", timecode="00:00.000", start_ms=0, end_ms=3400,
+                    shot_size="medium close-up",
                     camera="slow dolly-in, small amplitude",
                     subject="a young woman, white hair, black trench coat",
                     action="she turns toward the lens and speaks, jaw moving with each syllable",

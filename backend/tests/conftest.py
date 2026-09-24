@@ -37,6 +37,21 @@ def _database() -> None:
     init_db()
 
 
+@pytest.fixture(autouse=True)
+def _no_local_whisper(monkeypatch):
+    """测试里绝不加载本地 whisper 模型。
+
+    ⚠️ 装了 faster-whisper 之后，只要走 enable_asr=True 的测试都会真的去
+    HuggingFace 下载 460MB 的 small 权重 —— 测试会挂几分钟，还依赖外网，
+    表现成「pytest 卡住不动」。所以默认把它关掉；
+    真要测转写的地方自己 monkeypatch 覆盖这个 fixture。
+    """
+    from app.services import asr
+
+    monkeypatch.setattr(asr, "_local_whisper_available", lambda: False)
+    yield
+
+
 @pytest.fixture(scope="session")
 def ffmpeg_bin() -> str:
     path = resolve_ffmpeg()

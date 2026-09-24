@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from pathlib import Path
 
@@ -34,10 +35,12 @@ from ..schemas import (
     Job,
     JobResult,
     Shot,
+    ShotObservation,
 )
 from . import asr as asr_mod
+from . import audio_features, selection, templates
 from . import ffmpeg as ff
-from . import selection, templates
+from . import motion as motion_mod
 from .jobs import store
 from .vlm import VLMClient, VLMError
 
@@ -139,6 +142,26 @@ async def run_pipeline(job: Job, video_path: Path) -> JobResult:
         log.info("未检测到足够的场景切换，退化为 %d 个均匀逻辑镜头", len(raw_shots))
 
     shots = [Shot(index=i, start=a, end=b) for i, (a, b) in enumerate(raw_shots)]
+
+    # ---------------- 3.5 客观运动分析 ----------------
+    #
+    # 必须放在镜头切分之后：测的是「每个镜头内部画面移动了多少」。
+    # 为什么需要它 —— 单帧图像里没有运动信息，模型拿不准就一律写 static。
+    # 实测一支有运镜的 MV 38 个镜头全是 static。给它实测数据它才有依据下判断。
+    motions: list[motion_mod.ShotMotion] = []
+    if s.motion_analysis and raw_shots:
+        await step("scenes", 24, f"测量 {len(raw_shots)} 个镜头的运动")
+        try:
+            motions = await asyncio.to_thread(
+                motion_mod.analyze_shots_motion, str(video_path), raw_shots
+            )
+            moved = sum(1 for m in motions if not m.camera_static)
+            log.info("运动分析：%d/%d 个镜头检出相机运动", moved, len(motions))
+        except Exception as exc:  # noqa: BLE001
+            # 运动分析是增强项，失败就退回「模型自己看帧判断」，不中断管线
+            log.warning("运动分析失败，退回模型自行判断: %s", exc)
+            motions = []
+    store.raise_if_cancelled(job_id)
 
     # ---------------- 4. 帧预算分配 ----------------
     budget = opts.max_total_frames or s.max_total_frames
@@ -268,6 +291,15 @@ async def run_pipeline(job: Job, video_path: Path) -> JobResult:
                     "但只描述确实听到的，不确定就说不确定。"
                 )
 
+        # 该块内每个镜头的运动数据。analyze_shots_motion 用的是全局镜头序号，
+        # 而 Pass1 只看到本块的镜头，所以按块内偏移切片。
+        motion_text = ""
+        if motions:
+            base = sum(len(chunks[k]) for k in range(ci))
+            motion_text = motion_mod.summarize_for_prompt(
+                motions[base:base + len(chunks[ci])]
+            )
+
         user = templates.build_pass1_user(
             chunk_start=cstart,
             chunk_end=cend,
@@ -277,6 +309,7 @@ async def run_pipeline(job: Job, video_path: Path) -> JobResult:
             chunk_index=ci,
             chunk_total=total_chunks,
             content_hint=opts.content_hint,
+            motion_text=motion_text,
         )
         # 拼图模式要告诉模型「这是网格，不是单帧」，否则它会把整张图当成一帧。
         # 同时列出每张网格覆盖的时间点，模型才能把格子映射回时间轴。
@@ -293,19 +326,47 @@ async def run_pipeline(job: Job, video_path: Path) -> JobResult:
     store.raise_if_cancelled(job_id)
 
     observations: list[ChunkObservation] = []
+    merge_stats = {"collapsed": 0, "merged": 0, "offscreen": 0}
     for ci, raw in enumerate(raw_outputs):
         parsed = templates.parse_pass1_json(raw)
         # 模型报 unknown 但只给了 1 个条目 = 没找到切点，等同 continuous。
         # 归一之后成文阶段才能拿到明确的「不许写切点标记」指令。
         structure = templates.resolve_edit_structure(parsed.edit_structure, parsed.shots)
         chunk = chunks[ci]
+
+        # 两道代码兜底，都是「模型知道规则也照样违反」的情况：
+        #   1) 一镜到底被按帧拆成 N 条 → 合并成一条
+        #   2) 同一机位被拆成 N 条复读内容（实测 23 条交替的「三人跳舞」/「三人继续」）
+        raw_count = len(parsed.shots)
+        shot_list = templates.collapse_continuous_shots(parsed.shots, structure)
+        collapsed = raw_count - len(shot_list)
+        merge_stats["collapsed"] += collapsed
+
+        merged = 0
+        if s.merge_adjacent_shots:
+            before = len(shot_list)
+            shot_list = templates.merge_adjacent_shots(shot_list)
+            merged = before - len(shot_list)
+            merge_stats["merged"] += merged
+
+        #   3) 特写镜头描述里的画面外属性（实测 `Extreme close-up` 里写了袜子）
+        if s.strict_frame_visibility:
+            shot_list, hits = templates.strip_offscreen_attributes(shot_list)
+            for h in hits:
+                log.info("画面外属性清理：%s", h)
+            merge_stats["offscreen"] += len(hits)
+
+        if len(shot_list) != raw_count:
+            log.info(
+                "分块 %d 镜头条目 %d → %d（一镜到底合并 %d、复读合并 %d）",
+                ci + 1, raw_count, len(shot_list), collapsed, merged,
+            )
+
         observations.append(ChunkObservation(
             chunk_index=ci,
             start=chunk[0].start,
             end=chunk[-1].end,
-            # 模型经常「判断对了但写不对」：报 continuous 却仍按帧给 20 个条目。
-            # 判断归模型，后果归代码 —— 这里强制合并。
-            shots=templates.collapse_continuous_shots(parsed.shots, structure),
+            shots=shot_list,
             subjects=parsed.subjects,
             global_notes=parsed.global_notes,
             # 模型自己判断的剪辑结构 —— 我们的场景检测只是抽帧采样单位，
@@ -318,7 +379,7 @@ async def run_pipeline(job: Job, video_path: Path) -> JobResult:
         await store.emit(job_id, {
             "type": "chunk",
             "index": ci,
-            "shots": len(parsed.shots),
+            "shots": len(shot_list),
             "subjects": len(parsed.subjects),
             "edit_structure": parsed.edit_structure,
             "total": total_chunks,
@@ -327,6 +388,11 @@ async def run_pipeline(job: Job, video_path: Path) -> JobResult:
     merged = templates.merge_observations(observations)
     if not merged:
         raise RuntimeError(_explain_empty_observations(raw_outputs, client.last_errors))
+
+    # 补全并校正每个镜头的时间区间。模型经常漏填 end_ms，或者把末镜算短一截，
+    # 而分镜表、`[Shot N] At MM:SS.mmm`、Seedance 的节拍图都要用这些数字 ——
+    # 错一截整条提示词的时间轴就歪了。
+    _align_shot_spans(merged, eff_duration)
 
     subjects = templates.merge_subjects(observations, merged)
     log.info("观察完成：%d 个镜头，%d 个主体", len(merged), len(subjects))
@@ -410,6 +476,16 @@ async def run_pipeline(job: Job, video_path: Path) -> JobResult:
             word_count, limit,
         )
 
+    # 音频分析术语的强制清理。放在压缩之后 —— 压缩也是一次模型编辑，可能重新引入。
+    #
+    # ⚠️ 为什么用代码而不是提示词：试过在提示词里列禁用词，结果模型把这份清单
+    # 本身抄进了输出（「不要写 content unanalysed」反而让它记住了这个词）。
+    # 这类泄漏只能在输出侧堵。
+    prompt, jargon_hits = audio_features.sanitize_audio_jargon(prompt)
+    if jargon_hits:
+        log.warning("提示词里出现了音频分析术语，已清理：%s", ", ".join(jargon_hits))
+        word_count = len(prompt.split())
+
     # ---------------- 8. 汇总 ----------------
     frame_urls = [
         f"/api/media/frame/{job_id}/{p.parent.name}/{p.name}"
@@ -472,6 +548,29 @@ async def run_pipeline(job: Job, video_path: Path) -> JobResult:
                 sheet_cells=s.frame_sheet_cells,
                 actual_frames=total_frames,
             ),
+            # ---- 质量管线（v2）的执行情况 ----
+            # 这些数字是排查用的：镜头数没降下来、运镜还是全 static 时，
+            # 一眼就能看出是哪一步没生效。
+            "motion": {
+                "enabled": bool(s.motion_analysis),
+                "measured": len(motions),
+                "with_camera_movement": sum(1 for m in motions if not m.camera_static),
+                "suggestions": [motion_mod.suggest_camera(m) for m in motions],
+            },
+            "shot_merges": merge_stats,
+            "audio_jargon_removed": jargon_hits,
+            "vocal_isolation": audio.vocal_isolation,
+            "music_bpm": audio.bpm,
+            # 每个镜头的时间区间（验收要求：都有 start_ms/end_ms，末镜 end 到总时长）
+            "shot_spans": [
+                {
+                    "shot": sh.shot,
+                    "start_ms": sh.start_ms,
+                    "end_ms": sh.end_ms,
+                    "is_continuous": sh.is_continuous,
+                }
+                for sh in merged
+            ],
         },
     )
     return result
@@ -480,6 +579,70 @@ async def run_pipeline(job: Job, video_path: Path) -> JobResult:
 # ---------------------------------------------------------------------------
 # 内部工具
 # ---------------------------------------------------------------------------
+
+_TC_RE = re.compile(r"^(\d{1,2}):(\d{2})(?:\.(\d{1,3}))?$")
+
+
+def _parse_timecode_ms(tc: str) -> int:
+    """把 `MM:SS.mmm` 解析成毫秒。解析不出来返回 0。"""
+    m = _TC_RE.match((tc or "").strip())
+    if not m:
+        return 0
+    mm, ss = int(m.group(1)), int(m.group(2))
+    frac = (m.group(3) or "0").ljust(3, "0")[:3]
+    return (mm * 60 + ss) * 1000 + int(frac)
+
+
+def _align_shot_spans(shots: list[ShotObservation], duration: float) -> None:
+    """补全并校正每个镜头的起止毫秒，就地修改。
+
+    为什么必须用代码兜底：模型给的时间区间经常有三类问题 ——
+    漏填（整段都是 0）、末镜算短（实测比实际总时长短了 0.4s）、
+    以及**把非末镜的 end 填成总时长**，导致后面的镜头全被挤成零长度。
+    而分镜表、`[Shot N] At MM:SS.mmm`、Seedance 的节拍图全部依赖这些数字。
+
+    规则：
+      * `timecode`（该镜首帧的真实时间戳）是**最可靠的锚点**，优先用它；
+      * 时间轴相对**片段**（用户截取后的片段），所以第一个镜头从 0 开始；
+      * 交叠时收**上一条**的 end，而不是推后本条的 start ——
+        推后 start 会让本条和后面所有镜头一起被挤扁（踩过：末镜变成 0 长度）；
+      * **末镜的 end 强制等于片段总时长** —— 这是验收要求，也是唯一一个
+        我们知道正确答案的锚点。
+    """
+    if not shots:
+        return
+    total_ms = max(0, int(round(duration * 1000)))
+
+    # --- 先定 start ---
+    for i, s in enumerate(shots):
+        from_tc = _parse_timecode_ms(s.timecode)
+        if from_tc > 0:
+            s.start_ms = from_tc
+        elif i > 0:
+            s.start_ms = shots[i - 1].end_ms
+        else:
+            s.start_ms = 0
+
+    # --- 再补 end ---
+    for i, s in enumerate(shots):
+        if s.end_ms > s.start_ms:
+            continue
+        nxt = _parse_timecode_ms(shots[i + 1].timecode) if i + 1 < len(shots) else 0
+        s.end_ms = nxt if nxt > s.start_ms else s.start_ms + 1000
+
+    # --- 消交叠：收上一条的 end，不动本条的 start ---
+    for i in range(1, len(shots)):
+        if shots[i].start_ms < shots[i - 1].end_ms:
+            shots[i - 1].end_ms = max(shots[i - 1].start_ms + 1, shots[i].start_ms)
+
+    # --- 锚点：首镜从 0 开始，末镜落在总时长上 ---
+    shots[0].start_ms = 0
+    if total_ms > 0:
+        shots[-1].end_ms = total_ms
+        # 末镜的 start 不能因为上面的收口被顶到总时长之后
+        if shots[-1].start_ms >= total_ms:
+            shots[-1].start_ms = max(0, shots[-1].end_ms - 1000)
+
 
 def _explain_empty_observations(raw_outputs: list[str], errors: list[str]) -> str:
     """Pass1 全军覆没时，拼一条能直接定位问题的报错。
@@ -516,20 +679,36 @@ def _explain_empty_observations(raw_outputs: list[str], errors: list[str]) -> st
 def _safe_detect_shots(
     path: Path, duration: float, threshold: float, min_shot_seconds: float
 ) -> tuple[list[tuple[float, float]], int, float, str]:
-    """自适应镜头检测，失败时返回空（由调用方退化为均匀分镜）。"""
+    """自适应镜头检测，失败时返回空（由调用方退化为均匀分镜）。
+
+    ⚠️ 捕获 `BaseException` 而不是 `Exception` —— 某些运行环境在删除临时文件时
+    会抛 `SystemExit`（批量删除保护），而 `SystemExit` 继承 `BaseException`，
+    `except Exception` 拦不住。任务级的问题绝不该升级成进程级事故。
+    """
     try:
         return ff.detect_shots_adaptive(
             path, duration, threshold=threshold, min_shot_seconds=min_shot_seconds
         )
-    except Exception as exc:  # noqa: BLE001
+    except KeyboardInterrupt:
+        raise
+    except BaseException as exc:  # noqa: BLE001
         log.warning("场景检测失败，将退化为均匀分镜: %s", exc)
         return [], 0, threshold, ""
 
 
 def _safe_audio(path: Path, enable_asr: bool) -> AudioReport:
+    """音频分析，失败时返回带原因的降级报告。
+
+    ⚠️ 必须捕获 `BaseException`。踩过：本地 whisper 首次加载会走 HuggingFace
+    的缓存流程，清理临时目录时触发了批量删除保护并抛 `SystemExit` ——
+    而这里原来只捕获 `Exception`，`SystemExit` 直接穿过去把整个任务带走了，
+    表现是「跑音频分析那一步进程就没了，日志里只有一句删除保护」。
+    """
     try:
         return asr_mod.analyze_audio(path, enable_asr=enable_asr)
-    except Exception as exc:  # noqa: BLE001
+    except KeyboardInterrupt:
+        raise
+    except BaseException as exc:  # noqa: BLE001
         log.warning("音频分析失败: %s", exc)
         report = AudioReport()
         report.note = f"音频分析失败：{exc}"
@@ -623,7 +802,12 @@ def _split_budget(
 
 
 def _audio_slice(audio: AudioReport, start: float, end: float) -> str:
-    """截取落在该时间窗内的转写片段，附给对应分块。"""
+    """截取落在该时间窗内的转写片段 + 整片音乐画像，附给对应分块。
+
+    ⚠️ 这里同样**不给 dB 数字和频段名**。Pass1 的 `global_notes` 会原样喂进
+    Pass2，写进去的措辞会被模型学去（实测最终输出里出现过
+    `measured energy mostly voice band`）。只给人类可读的描述。
+    """
     if not audio.has_audio:
         return "【音频】该视频没有音轨。所有音频字段请写 N/A。"
 
@@ -642,13 +826,13 @@ def _audio_slice(audio: AudioReport, start: float, end: float) -> str:
         lines.append("  ⚠ 音轨存在但音频内容未知：禁止写台词、歌词、BGM 乐器、")
         lines.append("    具体音效类型。音频字段只能留空或写 N/A。")
 
-    meta: list[str] = []
-    if audio.mean_volume_db is not None:
-        meta.append(f"平均音量 {audio.mean_volume_db:.1f}dB")
-    if audio.silence_ratio is not None:
-        meta.append(f"静音占比 {audio.silence_ratio * 100:.0f}%")
-    if meta:
-        lines.append("【音频能量】" + "；".join(meta))
+    # 音乐画像：实测得出的人类可读描述，可以直接用
+    if audio.music_profile:
+        lines.append("【整片音乐与声音（实测描述，可以直接引用或改写措辞）】")
+        lines.append("  " + audio.music_profile)
+        if audio.bpm and audio.has_beat:
+            lines.append(f"  （节奏约 {audio.bpm:.0f} BPM）")
+
     return "\n".join(lines)
 
 

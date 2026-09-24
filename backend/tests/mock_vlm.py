@@ -54,9 +54,18 @@ def _make_pass1_response(payload: dict, user_text: str) -> str:
     for i, ts in enumerate(stamps):
         secs = float(ts)
         m, s = divmod(secs, 60)
+        # 时间区间：用下一个时间戳当本条的结束。最后一条故意给一个**偏小**的值，
+        # 用来验证代码兜底会把末镜的 end_ms 拉齐到片段总时长。
+        start_ms = int(round(secs * 1000))
+        if i + 1 < len(stamps):
+            end_ms = int(round(float(stamps[i + 1]) * 1000))
+        else:
+            end_ms = start_ms + 200
         shots.append({
             "shot": str(i + 1),
             "timecode": f"{int(m):02d}:{s:06.3f}",
+            "start_ms": start_ms,
+            "end_ms": end_ms,
             "shot_size": "medium close-up" if i % 2 == 0 else "wide",
             "camera": "slow dolly-in, small amplitude" if i % 3 else "static",
             "subject": f"a performer in frame at {ts}s, wearing a dark jacket",

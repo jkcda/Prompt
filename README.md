@@ -187,6 +187,100 @@ ffmpeg -i in.mp4 -vf "select='gt(scene,0.30)',showinfo" -an -f null -
 
 ---
 
+## 四个实测质量缺陷与修补（v2 管线）
+
+拿一段 3 人偶像演唱会 MV 实测，输出 38 个镜头，暴露了四个缺陷。四个都不是
+「提示词没写好」，而是**管线里缺东西**——模型没有依据，只能编或者保守。
+
+### 一、38 个镜头全部标 static
+
+**根因**：单帧图像里没有运动信息。模型拿不准运镜时一律选最保守的答案。
+
+**修法**：加 `motion.py` —— ffmpeg 抽 160×90 灰度小图，纯 Python 算全局位移。
+
+- 四角分区取中位数，而不是整幅一起估。整幅估计有个致命弱点：**主体在画面里
+  移动会被当成相机运动**。实测一段相机固定在三脚架上的素材，整幅估计报出
+  9.5 像素的假位移，分四角后降到 0.2 以内。
+- 迭代 warp 而不是图像金字塔。金字塔在**周期性纹理**上会混叠到错误的峰
+  （实测一张正弦条纹图里 8 像素的位移被解成 28.9）；迭代 warp 是连续逼近，
+  不会跳到别的周期上。
+- 判「静止」只看**位移**，不看画面变化量：主体在跳舞而相机架在三脚架上，
+  画面变化很大但位移接近 0，运镜仍然是 static。
+
+实测判定（合成素材，已知真值）：
+
+| 素材 | 累计位移 | 判定 |
+|---|---|---|
+| 固定取景（画面里有主体在动） | 0.0 | `static` ✅ |
+| 固定取景 + 噪声 | 0.2 | `static` ✅ |
+| 相机右摇 | 100.8 | `pan-right` ✅ |
+
+**只有累计位移低于阈值才允许写 `static`** —— 这条规则写进了 Pass1 提示词。
+
+### 二、特写镜头里列出了画面外的属性
+
+`[Shot 1] Extreme close-up` 的描述里出现了 `white socks, black ankle boots`。
+特写根本看不到袜子。
+
+**根因**：每一帧都在重新识别角色，然后把整套外观标签一次性倒出来。
+
+**修法**（两层）：
+
+1. Pass1 提示词加硬约束：**只描述本帧可见内容**，外观由主体登记表统一负责，
+   特写不许提袜子/鞋/裤。
+2. 代码兜底 `strip_offscreen_attributes()`：`close-up` / `extreme close-up` /
+   `medium close-up` 的描述里出现下肢词就按**短语**删掉（先按逗号切，再按 `and`
+   切，所以 "a black jacket and white socks" 只丢后半截）。中景不清理——
+   中景可能拍到腰以下。
+
+### 三、23 个镜头交替重复
+
+`[Shot 10]`–`[Shot 32]` 内容只有 `Three performers dance.` 和
+`Three performers continue.` 两句。
+
+**根因**：抽帧按固定间隔，同一个镜头被抽成十几帧、每帧独立成一个「镜头」。
+
+**修法**：抽帧本来就已经挂在镜头切分上（见上一章），真正缺的是**合并兜底**。
+提示词里写明了「条目数 = 机位数量，不是帧数」并给了自检，实测照样输出 23 条。
+所以加 `merge_adjacent_shots()`：
+
+判据是「景别同类 + 运镜同类 + 动作是**复读内容**」。用复读而不是相似度当主判据，
+是因为 `dance` 和 `continue` 互相的相似度并不高，但各自在整段里重复了十几次——
+**一条描述在几分钟素材里以完全相同的话出现三次以上，它就不可能是对独立镜头的
+描述**。真实的不同镜头各有各的说法，不会误合并。
+
+### 四、音频输出是频谱术语
+
+实际输出：
+
+```
+Sound present, content unanalysed
+measured energy mostly voice band with notable low-frequency component
+inferred from energy distribution alone
+```
+
+**根因**：只做了频谱能量分析，没做语义分析；而且**我们自己的 system prompt 里
+就写着 `inferred from energy distribution`**，模型照抄得很自然。
+
+**修法**：
+
+1. **加音乐画像** `audio_features.py`：ffmpeg 抽 PCM → 纯 Python 算能量包络 →
+   自相关估 BPM + 音头密度 + 瞬态簇 + 频段平衡 → 生成一句人类可读的描述：
+
+   > The soundtrack reads as a fast pulse of roughly 128 BPM with strong,
+   > clearly accented beats; with a strong low end, the kind a kick drum and
+   > bass produce, bright high-frequency content.
+
+2. **加人声分离再转写**：带通滤掉 180Hz 以下和 4kHz 以上（首选 Demucs，装了
+   才用，因为它要 torch 2GB+）。MV 里鼓和贝斯能量很强，whisper 会被伴奏带偏。
+
+3. **输出侧强制清理** `sanitize_audio_jargon()`。⚠️ **这一条必须用代码**：
+   试过在提示词里列出禁用词，结果模型把这份清单本身抄进了输出——
+   「不要写 content unanalysed」反而让它记住了这个词。所以清单只留在服务端，
+   输出时按句删除命中的内容。
+
+---
+
 ## 项目结构
 
 ```
@@ -634,12 +728,43 @@ Pass1 本身更快（26s vs 46s），但多出来的镜头让 Pass2 输出变长
 | 变量 | 说明 |
 |---|---|
 | `ASR_BASE_URL` / `ASR_API_KEY` / `ASR_MODEL` | 任意 OpenAI 兼容的 `/audio/transcriptions` |
+| `ASR_HF_ENDPOINT` | 本地 whisper 的权重下载源，留空用 `https://hf-mirror.com` |
+| `VOCAL_ISOLATION` | 转写前先做人声频段分离（默认开） |
 
-留空则跳过语音识别。也可以装 `pip install -e ".[local-asr]"` 用本地 faster-whisper，
-代码会优先走本地。
+留空则跳过语音识别。也可以装本地 faster-whisper：
+
+```bash
+pip install -e ".[local-asr]"
+```
+
+代码会优先走本地，**不需要配 `ASR_*`**。
 
 **但要反推有台词/唱歌的视频，ASR 基本是必需的** —— 画面帧推不出逐字台词和口型，
 而 H3 的 `<d>[Language] ...</d>` 要求原文逐字。没有 ASR 时这些字段只能是 `N/A`。
+
+#### 为什么转写前要滤掉低频和高频
+
+MV / 现场录音里鼓和贝斯能量很强，whisper 会被伴奏带偏，把歌词听成别的东西。
+`isolate_vocals()` 先做带通（滤掉 180Hz 以下和 4kHz 以上）再送转写，
+人声清晰度明显提升，而且零额外依赖。
+
+装了 Demucs 会自动优先用它（真正的音源分离，效果更好），但它要 torch（2GB+），
+所以只在已经装好时才用。
+
+#### ⚠️ 首次使用先预热一次
+
+模型权重约 460MB，第一次运行时会从 HuggingFace 下载。**建议单独先跑一次预热**：
+
+```bash
+python -c "from faster_whisper import WhisperModel; WhisperModel('small', device='cpu', compute_type='int8')"
+```
+
+原因：下载过程会创建大量临时文件，某些带「批量删除保护」的运行环境
+（比如 WorkBuddy 的沙箱）会在清理这些临时文件时中断进程。预热把权重放进缓存后，
+正式运行时就不会再有这个下载动作。**生产服务器上一般没有这层保护，可以直接跑。**
+
+模型不指定 `language`，让它自己检测 —— 指定成 `zh` 会把日语歌词硬翻成中文，
+而我们要的是**保留原语言**。
 
 ### 音频维度：三条路，能力不同
 

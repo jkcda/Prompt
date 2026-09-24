@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections import Counter
 from dataclasses import dataclass, field
 
 from ..schemas import AudioReport, ChunkObservation, MediaInfo, ShotObservation, SubjectEntry
@@ -76,6 +77,13 @@ against the number of cuts you actually identified. If you are emitting roughly 
 entry per frame, you have done it wrong — go back and merge the runs of frames that
 show one continuous setup. A 20-second music video is typically 5-20 shots.
 
+Then check for REPEATED CONTENT. If two consecutive entries would end up carrying
+nearly the same text — e.g. "three performers dance" followed by "three performers
+continue" — you have split one shot in two. Merge them. An entry whose action is only
+"continues", "keeps going" or "same as before" carries no information at all; it exists
+only because a frame boundary got mistaken for a cut. Real consecutive shots differ in
+setup: different framing, different angle, a cut to another performer or another place.
+
 ⚠️ Decide `edit_structure` from the FOOTAGE ALONE, **before** you write any entries,
 and do not revisit it afterwards:
 
@@ -111,16 +119,29 @@ shifting bar"). Everything you do not mention as moving stops moving, including 
 Your `global_notes` is passed verbatim into the next stage, so forbidden phrasing written here \
 contaminates the final prompt. If little is moving, say what IS moving — do not rank it as the \
 sole motion.
-4. Estimate camera movement from how the framing changes between frames (subject position, \
-background parallax, horizon tilt). Distinguish: static / pan / tilt / dolly-in / dolly-out / \
-truck / crane / handheld shake / orbit / whip.
+4. Judge camera movement by **comparing the frames of the same shot against each other**, \
+never from a single frame. You receive several frames per shot (head / middle / tail and more) \
+plus a measured motion report in the user message. That report is objective data taken from the \
+footage: it gives the per-frame pixel movement, its direction, and whether the framing expands or \
+contracts. Use it.
+   * **You may only answer `static` when the measurement says the movement is effectively zero.** \
+If the report says the content shifts, the camera is moving — say which way (pan / tilt / truck / \
+dolly / crane / handheld / orbit / whip) and how fast (slow / moderate / fast). \
+A video with obvious camera work must NOT come back with every shot marked `static`; that is a \
+failure to look, not a finding.
+   * Movement that comes from the subject alone (the camera is locked off) is still `static` for \
+the camera — but then say so explicitly, e.g. "static camera, the movement comes entirely from the \
+performer". That is a real observation and it is useful.
 5. Transcribe any on-screen text, captions, subtitles or logos VERBATIM into `on_screen_text`. \
 If a watermark or platform logo is present, note it. If there is none, write "none".
 6. Align the audio transcript to the shots by timestamp. Put spoken words or lyrics that fall \
 inside a shot into that shot's `dialogue` field, preserving the original language. Put \
 non-verbal sound (footsteps, impact, whoosh, ambience) into `sfx`.
 7. `timecode` must be the real timestamp of that shot's first supplied frame, formatted as \
-MM:SS.mmm.
+MM:SS.mmm. Also fill `start_ms` and `end_ms` — the shot's span in the source video, in \
+milliseconds, as plain integers. The shots must tile the whole segment end to end with no gaps: \
+the first shot starts at the segment start and **the last shot's `end_ms` equals the segment's \
+total duration in milliseconds**.
 8. After the per-shot list, build a SUBJECT REGISTRY. A subject is anything that must look the \
 same if it reappears: a person, an environment, a prop, a wardrobe piece, or the overall visual \
 style itself. Give each one a short lowercase label, list every shot index it appears in, and \
@@ -136,6 +157,19 @@ Every distinct recurring subject in the footage must appear in it. Emit `subject
 burned-in captions as subjects. They are artefacts of the source file, not content to \
 reproduce — registering them invites the generator to render them into the new video. \
 Mention them only in `on_screen_text`, never in `subjects`.
+9. **Describe ONLY what is visible inside THIS frame.** This is a hard rule and it is the most \
+common source of wrong detail. The subject registry above already defines everyone's full \
+appearance ONCE, so a per-shot description must not re-list attributes that fall outside the \
+framing or are hidden. Concretely:
+   * If the shot is a close-up on a face, do NOT mention socks, shoes, trousers, hems or anything \
+below the framing. If it is a head-and-shoulders shot, do not describe the lower body.
+   * Do not mention what a person is holding if their hands are outside the frame.
+   * Do not describe the room behind them if the background is out of focus to the point that \
+nothing is identifiable.
+   * Refer to people by the label you gave them in the registry ("the lead performer"), not by \
+re-describing their whole outfit.
+   Naming an off-screen attribute is a **factual error about this shot**, not extra helpfulness — \
+it makes the final prompt describe a shot that does not exist.
 
 """ + _PASS1_EDIT_STRUCTURE_RULES + """
 
@@ -156,9 +190,11 @@ Output STRICT JSON only, no markdown fence, no commentary, matching exactly this
     {
       "shot": "1",
       "timecode": "00:00.000",
+      "start_ms": 0,
+      "end_ms": 3400,
       "shot_size": "extreme close-up | close-up | medium close-up | medium | medium wide | wide | extreme wide",
-      "camera": "movement type + amplitude + speed, e.g. 'static' / 'slow dolly-in, small amplitude'",
-      "subject": "who or what is in frame, with appearance, wardrobe, key props",
+      "camera": "movement type + amplitude + speed, e.g. 'static' / 'slow dolly-in, small amplitude'. Only 'static' when the measured movement is effectively zero.",
+      "subject": "who or what is in frame, with appearance, wardrobe, key props — ONLY what this frame shows",
       "action": "what happens, described with physical detail and motion verbs",
       "setting": "environment, location, background elements, depth",
       "lighting": "light source, direction, quality, contrast",
@@ -190,12 +226,17 @@ def build_pass1_user(
     chunk_index: int,
     chunk_total: int,
     content_hint: str = "",
+    motion_text: str = "",
 ) -> str:
     """组织 Pass1 的用户消息文本（图片由调用方按顺序附在后面）。
 
     `content_hint` 是用户自己写的画面说明。**这东西很有用**：静态帧看不出
     「这段是一镜到底还是多镜头切换」「这是什么作品/角色」「动作的前因后果」，
     而这些直接影响产出质量。让用户补一句话，比让模型瞎猜强得多。
+
+    `motion_text` 是 ffmpeg + 光流算出来的**客观**运动数据。为什么要给：
+    单帧推不出运动，模型拿不准时会一律写 static —— 实测一支有运镜的 MV
+    38 个镜头全是 static。给了实测数据它才有依据下判断。
     """
     lines: list[str] = []
     lines.append(
@@ -218,6 +259,31 @@ def build_pass1_user(
         "you see, and report it in `edit_structure` / `cut_points`."
     )
     lines.append("")
+
+    # 客观运动数据。放在帧清单之后、音频之前 —— 紧挨着「判断运镜」这条规则。
+    if motion_text.strip():
+        lines.append("=== MEASURED CAMERA MOVEMENT (computed from the footage, not guessed) ===")
+        lines.append(motion_text.strip())
+        lines.append("")
+        lines.append(
+            "How to use this: it is objective measurement, so trust it over your own "
+            "impression. `content moves ... per frame` tells you the direction and speed; "
+            "`total movement across the whole shot` tells you whether the camera moved at "
+            "all. **Write `static` only for shots where the total movement is effectively "
+            "zero.** Where the numbers say the content moves, name the camera move and its "
+            "speed. If a measurement is flagged unreliable (low texture), fall back to "
+            "comparing the frames yourself."
+        )
+        lines.append(
+            "⚠️ These measurements are given per SAMPLING shot (the detector's grouping). "
+            "The number of shots you finally report may differ — match them by timestamp, "
+            "and if a shot of yours has no measurement line, judge it from the frames alone. "
+            "Also note the two cases are different: movement of the SUBJECT with a locked-off "
+            "camera is still a static camera, and you should say so explicitly rather than "
+            "listing a camera move that did not happen."
+        )
+        lines.append("")
+
     lines.append(audio_text)
 
     # 用户补充的画面说明。放在音频之后、正式指令之前 ——
@@ -311,6 +377,276 @@ def collapse_continuous_shots(
     return [merged]
 
 
+# ---------------------------------------------------------------------------
+# 相邻镜头合并（代码兜底）
+# ---------------------------------------------------------------------------
+#
+# ⚠️ 为什么必须用代码做：提示词里已经把话说尽了 ——「条目数 = 机位数量，不是
+# 帧数」、给了自检（「如果你输出的条数和帧数差不多，你搞错了」）、还专门写了
+# 「相邻条目内容重复就是没合并」。实测照样出现：一段 3 人 MV 输出 23 个交替的
+# 「Three performers dance.」/「Three performers continue.」。
+# **判断归模型，后果归代码。**
+
+# 景别归类。分得比「特写/中景/全景」细一档：极特写和特写是明显不同的构图，
+# 混成一类会把它们误合并。
+_SIZE_RULES: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("extreme close", "大特写", "极特写"), "ecu"),
+    (("medium close", "近景", "中近景"), "mcu"),
+    (("close", "特写"), "cu"),
+    (("medium", "中景", "mid shot"), "ms"),
+    (("wide", "long shot", "full shot", "全景", "远景", "wide shot"), "ws"),
+)
+
+_CAMERA_KEYS = (
+    "static", "fixed", "locked", "pan", "tilt", "dolly", "zoom", "truck",
+    "crane", "handheld", "orbit", "whip", "push", "pull", "steadicam",
+)
+
+
+def _size_class(size: str) -> str:
+    s = (size or "").lower().strip()
+    if not s:
+        return ""
+    for keys, label in _SIZE_RULES:
+        if any(k in s for k in keys):
+            return label
+    return s[:12]
+
+
+def _camera_class(camera: str) -> str:
+    s = (camera or "").lower().strip()
+    if not s:
+        return ""
+    for key in _CAMERA_KEYS:
+        if key in s:
+            return "static" if key in ("fixed", "locked") else key
+    return s[:12]
+
+
+_STOP_WORDS = frozenset(
+    [
+        "the", "a", "an", "and", "or", "of", "in", "on", "at", "to", "with",
+        "is", "are", "be", "as", "it", "its", "their", "his", "her",
+        "this", "that", "these", "those", "same", "again", "continues", "continue",
+    ]
+)
+
+
+def _action_tokens(action: str) -> frozenset[str]:
+    words = re.findall(r"[a-z\u4e00-\u9fff]+", (action or "").lower())
+    return frozenset(w for w in words if w not in _STOP_WORDS and len(w) > 1)
+
+
+def _action_key(action: str) -> str:
+    """把 action 归一成一个可比较的键（词序无关，去标点与停用词）。"""
+    return " ".join(sorted(_action_tokens(action)))
+
+
+def merge_adjacent_shots(
+    shots: list[ShotObservation],
+    repeat_threshold: int = 3,
+) -> list[ShotObservation]:
+    """把「同一个机位被拆成好几条」的相邻条目合并。
+
+    判据（必须同时满足）：
+      1. 景别同类（`_size_class`）且运镜同类（`_camera_class`）；
+      2. 动作要么高度相似，要么是**复读内容**。
+
+    为什么用「复读」而不是「相似度」当主判据：实测的坏输出长这样 ——
+    23 条交替的 "Three performers dance." 和 "Three performers continue."。
+    这两句互相的相似度并不高（dance vs continue），但各自在整段里重复了
+    十几次。**一条描述在几分钟的素材里以完全相同的话出现三次以上，它就不
+    可能是对独立镜头的描述**，只能是同一机位的重复采样。
+
+    反过来，真实的不同镜头各有各的描述，不会出现这种复读，所以不会误合并。
+    """
+    if len(shots) <= 1:
+        return shots
+
+    keys = [_action_key(s.action) for s in shots]
+    counts = Counter(k for k in keys if k)
+    repeated = {k for k, n in counts.items() if n >= repeat_threshold}
+
+    out: list[ShotObservation] = []
+    for shot, key in zip(shots, keys, strict=True):
+        if not out:
+            out.append(shot.model_copy(deep=True))
+            continue
+
+        prev = out[-1]
+        if _mergeable(prev, shot, key, keys[len(out) - 1], repeated):
+            _absorb(prev, shot)
+            continue
+        out.append(shot.model_copy(deep=True))
+
+    for i, s in enumerate(out, start=1):
+        s.shot = str(i)
+    return out
+
+
+def _mergeable(
+    prev: ShotObservation,
+    cur: ShotObservation,
+    cur_key: str,
+    prev_key: str,
+    repeated: set[str],
+) -> bool:
+    # 缺景别信息时保守处理：不合并。宁可多留一条，也不要合并掉真实切镜。
+    if not prev.shot_size or not cur.shot_size:
+        return False
+    if _size_class(prev.shot_size) != _size_class(cur.shot_size):
+        return False
+
+    pc, cc = _camera_class(prev.camera), _camera_class(cur.camera)
+    if pc and cc and pc != cc:
+        return False
+
+    if cur_key and cur_key == prev_key:
+        return True
+    if cur_key in repeated or prev_key in repeated:
+        return True
+
+    # 兜底：动作描述高度相似（同一件事的两种说法）
+    a, b = _action_tokens(prev.action), _action_tokens(cur.action)
+    if a and b:
+        inter = len(a & b)
+        union = len(a | b)
+        if union and inter / union >= 0.6:
+            return True
+    return False
+
+
+def _absorb(prev: ShotObservation, cur: ShotObservation) -> None:
+    """把 cur 并进 prev，保留两边的信息。"""
+    acts: list[str] = []
+    for text in (prev.action, cur.action):
+        t = (text or "").strip()
+        if t and t not in acts:
+            acts.append(t)
+    if acts:
+        prev.action = "; ".join(acts)[:900]
+
+    if cur.end_ms > prev.end_ms:
+        prev.end_ms = cur.end_ms
+    if cur.transition:
+        prev.transition = cur.transition
+    prev.confidence = max(prev.confidence or 0.0, cur.confidence or 0.0)
+    prev.is_continuous = True
+    # 景别/运镜取更具体的那个（原来空的用新的补上）
+    if not prev.shot_size:
+        prev.shot_size = cur.shot_size
+    if not prev.camera:
+        prev.camera = cur.camera
+    if not prev.setting:
+        prev.setting = cur.setting
+
+
+# ---------------------------------------------------------------------------
+# 特写镜头的画面外属性自检
+# ---------------------------------------------------------------------------
+#
+# 实测：`[Shot 1] Extreme close-up` 的描述里出现了 `white socks, black ankle boots`。
+# 特写根本看不到袜子。根因是每一帧都在重新识别角色，然后把整套外观标签
+# 一次性倒出来，而不是描述这一帧能看到什么。
+#
+# 提示词里已经加了硬约束（「只描述本帧可见内容」），但这类泄漏和「条目数」一样
+# 属于「模型知道规则也照样违反」的范畴，所以代码侧再兜一道。
+
+_LOWER_BODY_TERMS = (
+    "sock", "socks", "shoe", "shoes", "boot", "boots", "sneaker", "sneakers",
+    "heel", "heels", "sandal", "sandals", "trouser", "trousers", "pant", "pants",
+    "jean", "jeans", "skirt", "thigh", "knee", "knees", "ankle", "ankles",
+    "calf", "calves", "foot", "feet", "toe", "toes", "hem", "hems",
+    "waist", "hip", "hips", "belt", "legging", "leggings",
+    "袜子", "鞋", "靴", "裤", "裙", "大腿", "膝", "脚", "踝", "腰带",
+)
+
+# 只有这些景别才「看不到下肢」。中景（medium）可能拍到腰以下，不算。
+_CLOSE_SIZE_KEYS = ("close", "特写", "近景", "medium close")
+
+# 出现这些词，说明画面主体是上半身/面部 —— 那么下肢属性就是画面外的。
+# ⚠️ 必须**同时**有上半身证据才清理。踩过：一个「低机位拍腿和裙子」的特写
+# （shot_size 也是 close-up），主体本来就是下肢，把 skirt/legs 删掉等于把
+# 整个镜头描述删空。判据要落在「主体在哪」而不是「景别叫什么」。
+_UPPER_BODY_TERMS = (
+    "face", "head", "hair", "eye", "lip", "mouth", "chin", "cheek",
+    "shoulder", "chest", "neck", "collar", "jacket", "shirt", "blouse",
+    "halter", "arm", "hand", "finger", "bust",
+    "脸", "头", "发", "眼", "嘴", "唇", "肩", "胸", "颈", "手", "臂",
+)
+
+
+def _is_close_shot(size: str) -> bool:
+    s = (size or "").lower()
+    return any(k in s for k in _CLOSE_SIZE_KEYS)
+
+
+def _has_lower_body(text: str) -> bool:
+    low = (text or "").lower()
+    return any(t in low for t in _LOWER_BODY_TERMS)
+
+
+def _has_upper_body(text: str) -> bool:
+    low = (text or "").lower()
+    return any(t in low for t in _UPPER_BODY_TERMS)
+
+
+def strip_offscreen_attributes(
+    shots: list[ShotObservation],
+) -> tuple[list[ShotObservation], list[str]]:
+    """删掉特写镜头描述里越界的下肢属性。返回 (清理后的镜头, 命中记录)。
+
+    只在**两个条件同时成立**时才动手：景别是特写/近景，**且**描述里有上半身
+    证据（脸、头发、肩、胸、手……）。第二个条件是为了不误伤「低机位拍腿」那类
+    镜头 —— 它同样叫 close-up，但主体就是下肢。
+
+    按**短语**删而不是整句：一句里通常还混着脸、发型、上半身服装这些正确内容，
+    整句删掉损失太大。切分走两级 —— 先按逗号/分号，再按 `and` / `、`，
+    这样 "a black jacket and white socks" 只丢后半截。
+    """
+    hits: list[str] = []
+    out: list[ShotObservation] = []
+
+    for shot in shots:
+        if not _is_close_shot(shot.shot_size):
+            out.append(shot)
+            continue
+
+        combined = f"{shot.subject or ''} {shot.action or ''}"
+        if not _has_lower_body(combined) or not _has_upper_body(combined):
+            out.append(shot)
+            continue
+
+        cleaned = shot.model_copy(deep=True)
+        for attr in ("subject", "action"):
+            text = getattr(cleaned, attr) or ""
+            if not text or not _has_lower_body(text):
+                continue
+            kept = _drop_lower_body_clauses(text)
+            # 全被删光说明这句本来只写了画面外的东西 —— 那也不能留，
+            # 留一条错误的描述比留空更糟。退化成一句中性说明。
+            if not kept.strip():
+                kept = "see the subject registry for appearance"
+                hits.append(f"shot {shot.shot or '?'} {attr}: 整句都是画面外属性，已替换")
+            else:
+                hits.append(f"shot {shot.shot or '?'} {attr}: 删掉画面外属性")
+            setattr(cleaned, attr, kept.strip())
+        out.append(cleaned)
+
+    return out, hits
+
+
+def _drop_lower_body_clauses(text: str) -> str:
+    """按两级分隔符切短语，丢掉含下肢词的，再拼回去。"""
+    pieces: list[str] = []
+    for chunk in re.split(r"[,;，；]", text):
+        sub = [p for p in re.split(r"\s+and\s+|\s*、\s*", chunk) if p.strip()]
+        keep = [p for p in sub if not _has_lower_body(p)]
+        if keep:
+            pieces.append(" and ".join(p.strip() for p in keep))
+    return ", ".join(pieces)
+
+
 def parse_pass1_json(raw: str) -> Pass1Parse:
     """宽容解析 Pass1 的 JSON 输出（模型偶尔会包 markdown 围栏或加前后缀）。
 
@@ -387,15 +723,50 @@ def _parse_shots(shots_raw: object) -> list[ShotObservation]:
     for item in shots_raw:
         if not isinstance(item, dict):
             continue
+        data: dict = {}
+        for k, v in item.items():
+            if k not in ShotObservation.model_fields:
+                continue
+            if k in ("start_ms", "end_ms"):
+                data[k] = _coerce_int(v)
+            elif k == "confidence":
+                data[k] = _coerce_float(v)
+            elif k == "is_continuous":
+                data[k] = bool(v)
+            else:
+                # 模型偶尔把数字填进字符串字段，直接 str() 兜住，
+                # 否则 pydantic 校验失败会让整条 shot 被丢掉。
+                data[k] = "" if v is None else (v if isinstance(v, str) else str(v))
         try:
-            shots.append(ShotObservation(**{
-                k: (v if v is not None else "")
-                for k, v in item.items()
-                if k in ShotObservation.model_fields
-            }))
+            shots.append(ShotObservation(**data))
         except Exception:  # noqa: BLE001
             continue
     return shots
+
+
+def _coerce_int(value: object) -> int:
+    """毫秒字段的宽松解析。模型会写成 3400 / "3400" / "3.4s" / 3400.0。"""
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, (int, float)):
+        return int(value)
+    if isinstance(value, str):
+        m = re.search(r"-?\d+(?:\.\d+)?", value)
+        if m:
+            return int(float(m.group(0)))
+    return 0
+
+
+def _coerce_float(value: object) -> float:
+    if isinstance(value, bool):
+        return 0.0
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        m = re.search(r"-?\d+(?:\.\d+)?", value)
+        if m:
+            return float(m.group(0))
+    return 0.0
 
 
 def _parse_subjects(subjects_raw: object) -> list[SubjectEntry]:
@@ -445,32 +816,48 @@ with no motion description renders as a frozen mannequin.
 3. NEVER use static or terminal verbs: stop, freeze, hold, pause, rest, stay, remain, settle, \
 end, ending, final frame, final pose, holds. Never declare that any motion is the only motion \
 in frame. If you write "the only movement is X", everything else freezes, including the mouth.
-4. When a person speaks or sings on camera, their mouth movement must be described explicitly \
-in that shot: which words or syllables the lips move through, and that the movement is \
-continuous through the line. Never place a dialogue line in a shot without stating the mouth \
-movement.
+4. Mouth movement — describe it as a VISUAL fact, never as audio content.
+   * If you DO know the lyrics or dialogue (they appear in the audio report), state which words \
+or syllables the lips move through, and that the movement is continuous through the line.
+   * If the audio content is unknown, describe only the visible articulation — "her lips move \
+continuously, opening and closing in a steady rhythm" — and do NOT call it speaking, singing, \
+a line, a lyric or dialogue. You cannot see what the words are, so naming the activity is a \
+guess about audio you were told you do not have. (Seen in real output: "her lips move \
+continuously through a spoken line" while the audio was never transcribed.)
 5. Preserve the original language of dialogue and lyrics. Mark unintelligible spans as [unclear]. \
 Never paraphrase dialogue.
 6. Do not mention watermarks, logos, platform UI, or the fact that this is a reverse-engineered \
 prompt. If the observation notes on-screen text, either transcribe it as diegetic text when it \
 is part of the scene, or omit it.
-7. Audio: distinguish CONTENT from SPECTRUM. If the audio report says the audio was not \
-transcribed, you do not know what the audio contains — never write dialogue, lyrics, music \
-instrumentation, tempo, or specific sound-effect types, not even hedged ("as if", "appears to \
-be"). Spectral measurements (band energy, volume, silence, beat points) ARE valid input: you may \
-write a hedged tendency based on them, e.g. "the track reads as voice-dominant with little \
-low-frequency content", and you must make clear it is inferred from energy distribution, not \
-identified. Never upgrade a spectral tendency into a concrete claim — "voice-dominant energy" \
-does not license "someone is singing".
-   Do NOT convert visual events into sound events either. Seeing a person walk does not license \
-"footsteps"; seeing fabric move does not license "cloth rustle". Those are inferences about audio \
-content, which is exactly what is unknown. Describe the visual action itself and leave the sound \
-unspecified.
+7. Audio — use the audio report, and ONLY the audio report.
+   * If the report contains a music description (tempo, instruments, whether there are vocals, \
+whether there is an audience), write that. Use plain musical language a person would say out \
+loud. You may rephrase it, but keep it true to what it says — do not add instruments or a genre \
+it does not mention.
+   * If the report contains lyrics or dialogue with timestamps, quote them in their ORIGINAL \
+language, placed in the shots they fall in.
+   * If the report says the audio content is unknown, then you do not know it. Never write \
+dialogue, lyrics, instrumentation, tempo or specific sound-effect types, not even hedged \
+("as if", "appears to be"). Leave the field empty or write N/A. An empty field is correct here; \
+a plausible-sounding guess is not.
+   * Do NOT convert visual events into sound events. Seeing a person walk does not license \
+"footsteps"; seeing fabric move does not license "cloth rustle". Those are claims about audio \
+content, which is exactly what is unknown.
+   * Never put audio-ANALYSIS vocabulary into the prompt: no frequency-band names, no energy or \
+spectral wording, no decibel or hertz figures, no "not analysed / not identified" status notes. \
+Those are internal working notes — a video model can do nothing with them.
    Fabricated sound is worse than an empty field: the generated video will not match the source.
 8. Keep each subject's appearance wording IDENTICAL across shots. A character described as "a \
 performer in a dark quilted jacket" in shot 1 must not become "a woman in a leather coat" in \
 shot 3 — inconsistent wording is read as a different person and the identity drifts.
-9. Write in {language_instruction}."""
+9. Each shot must describe ONLY what that shot actually shows. The observation report records \
+the framing of every shot — if a shot is a close-up on a face, do not put socks, shoes, \
+trousers or anything below the framing into it. Naming an off-screen attribute invents a shot \
+the source never had, and the generator will draw it.
+10. Every shot needs a time range. Use the `start_ms` / `end_ms` from the observation report for \
+`[Shot N] At MM:SS.mmm` markers and for any beat map. The final shot must end at the total \
+duration of the source — never leave the last beat short.
+11. Write in {language_instruction}."""
 
 
 _PASS2_H3 = """{common}
@@ -856,6 +1243,11 @@ def build_pass2_user(
             f"audio {'present' if media.has_audio else 'absent'}"
         )
     lines.append(f"shot structure: {shots_summary}")
+    if media and media.duration > 0:
+        lines.append(
+            f"The source runs {media.duration:.2f}s. Your last shot must reach that end time — "
+            "do not leave the final beat short."
+        )
     if target_duration:
         lines.append(f"target duration for the generated video: {target_duration:.2f}s")
     lines.append(f"target mode: {MODE_LABELS.get(mode_of(fmt), fmt or 'unknown')}")
@@ -950,7 +1342,12 @@ def build_pass2_user(
 
 
 def _format_shot(s: ShotObservation) -> str:
-    parts = [f"[Shot {s.shot or '?'}] @ {s.timecode or '?'}"]
+    head = f"[Shot {s.shot or '?'}] @ {s.timecode or '?'}"
+    if s.start_ms or s.end_ms:
+        head += f" (source span {s.start_ms}-{s.end_ms} ms)"
+    if s.is_continuous:
+        head += " [merged with the previous entry: same camera setup]"
+    parts = [head]
     for label, value in (
         ("size", s.shot_size),
         ("camera", s.camera),

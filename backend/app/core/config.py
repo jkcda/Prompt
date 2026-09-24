@@ -85,6 +85,10 @@ class Settings(BaseSettings):
     asr_api_key: str = ""
     asr_base_url: str = ""
     asr_model: str = "whisper-1"
+    # 本地 faster-whisper 的模型权重从 HuggingFace 下载，国内直连很慢。
+    # 留空则用 https://hf-mirror.com（国内镜像）；海外部署可以显式写
+    # https://huggingface.co。也可以自己在环境变量里设 HF_ENDPOINT。
+    asr_hf_endpoint: str = ""
 
     # ---- ffmpeg ----
     ffmpeg_path: str = ""
@@ -135,6 +139,28 @@ class Settings(BaseSettings):
     # ---- 镜头分割 ----
     scene_threshold: float = 0.30
     min_shot_seconds: float = 0.8
+
+    # ---- 反推质量管线（v2）----
+    #
+    # 这四项是针对实测出来的四个质量缺陷做的修补，**每一项都能单独关掉**，
+    # 方便定位问题（如果改完质量反而变差，至少知道是哪一步的锅）。
+    # 关掉任何一项都会退回 v1 的行为。
+
+    # 1) 客观运动分析。ffmpeg 抽灰度小图 + 纯 Python 光流，算出每个镜头的
+    #    位移方向和速度，作为**数据**喂给模型。
+    #    没有它的时候模型拿不准运镜就一律写 static —— 实测一支有运镜的 MV
+    #    38 个镜头全是 static，整条提示词的镜头语言就废了。
+    motion_analysis: bool = True
+    # 2) 相邻镜头合并。把「同一个机位被拆成好几条」的复读条目合并成一个。
+    #    实测出现过 23 条交替的「三人跳舞」/「三人继续」，全是同一个机位。
+    #    提示词里已经写明了规则但模型照样违反，所以代码侧兜底。
+    merge_adjacent_shots: bool = True
+    # 3) 特写镜头的画面外属性清理。实测 `Extreme close-up` 的描述里出现了
+    #    `white socks, black ankle boots` —— 特写根本看不到袜子。
+    strict_frame_visibility: bool = True
+    # 4) 转写前做人声频段分离。MV / 现场录音里鼓和贝斯能量很强，whisper 会被
+    #    伴奏带偏；带通滤掉 180Hz 以下和 4kHz 以上之后歌词准确率明显更高。
+    vocal_isolation: bool = True
 
     # ---- 长视频分块 ----
     chunk_threshold_seconds: float = 90.0

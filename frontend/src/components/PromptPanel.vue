@@ -26,6 +26,26 @@ const charCount = computed(() => prompt.value.length)
 /** 超过服务端设的词数上限时提醒 —— 视频模型会截断或忽略超长提示词。 */
 const overLimit = computed(() => store.stats.prompt_over_limit === true)
 
+/** 客观运动分析的覆盖情况。用来一眼看出「运镜是不是还全是 static」。 */
+const motion = computed(
+  () => (store.stats.motion ?? {}) as { measured?: number; with_camera_movement?: number },
+)
+
+/** 代码兜底合并掉多少条镜头条目（一镜到底合并 + 复读内容合并）。 */
+const mergedShots = computed(() => {
+  const m = (store.stats.shot_merges ?? {}) as { collapsed?: number; merged?: number }
+  return (m.collapsed ?? 0) + (m.merged ?? 0)
+})
+
+/** 合并明细。stats 是 Record<string, unknown>，类型要在脚本里收窄。 */
+const mergeDetail = computed(() => {
+  const m = (store.stats.shot_merges ?? {}) as { collapsed?: number; merged?: number }
+  return { collapsed: m.collapsed ?? 0, merged: m.merged ?? 0 }
+})
+
+/** 提示词里被自动清理掉的音频分析术语。 */
+const jargonRemoved = computed(() => (store.stats.audio_jargon_removed ?? []) as string[])
+
 /** 各格式的段落切分，用于侧栏做锚点导航。 */
 const sections = computed(() => {
   if (!prompt.value) return []
@@ -194,6 +214,34 @@ function fmtTime(sec: number): string {
             <span v-if="store.stats.subjects" class="faint">
               {{ store.stats.subjects }} 主体
             </span>
+            <!-- 运镜覆盖率。全是 static 时标黄，提醒去看运动分析有没有生效。 -->
+            <span
+              v-if="motion.measured"
+              class="badge"
+              :class="motion.with_camera_movement ? 'ok' : 'warn'"
+              :title="`对 ${motion.measured} 个镜头做了客观运动分析，其中 ${motion.with_camera_movement} 个检出相机运动`"
+            >
+              运镜 {{ motion.with_camera_movement }}/{{ motion.measured }}
+            </span>
+            <span
+              v-if="mergedShots"
+              class="badge info"
+              :title="'同一个机位被模型拆成多条时由代码合并：一镜到底 ' +
+                mergeDetail.collapsed + ' 条，复读内容 ' + mergeDetail.merged + ' 条'"
+            >
+              合并 {{ mergedShots }} 条
+            </span>
+            <span v-if="store.stats.music_bpm" class="faint" title="音轨节奏">
+              {{ Math.round(Number(store.stats.music_bpm)) }} BPM
+            </span>
+            <!-- 提示词里漏出音频分析术语时会被自动清理，这里如实告知 -->
+            <span
+              v-if="jargonRemoved.length"
+              class="badge warn"
+              :title="'提示词里出现了音频分析术语，已自动清理：' + jargonRemoved.join('、')"
+            >
+              已清理音频术语
+            </span>
             <span v-if="store.stats.scene_adaptive" class="badge info" title="镜头检测触发了自适应重检">
               镜头自适应
             </span>
@@ -210,7 +258,19 @@ function fmtTime(sec: number): string {
               <div class="shot-head">
                 <span class="shot-no">镜头 {{ o.shot || i + 1 }}</span>
                 <span v-if="o.timecode" class="mono faint">{{ o.timecode }}</span>
+                <!-- 时间区间由后端补全并对齐（末镜一定落在总时长上），
+                     所以这里直接展示即可，不用前端再算 -->
+                <span v-if="o.end_ms" class="mono faint" title="该镜头在源视频里的时间区间">
+                  {{ (o.start_ms / 1000).toFixed(1) }}–{{ (o.end_ms / 1000).toFixed(1) }}s
+                </span>
                 <span v-if="o.shot_size" class="badge">{{ o.shot_size }}</span>
+                <span
+                  v-if="o.is_continuous"
+                  class="badge info"
+                  title="这一条由代码把相邻的同一机位条目合并而来"
+                >
+                  连续
+                </span>
                 <span v-if="o.confidence" class="badge" :class="o.confidence < 0.6 ? 'warn' : ''">
                   置信 {{ (o.confidence * 100).toFixed(0) }}%
                 </span>
@@ -294,12 +354,24 @@ function fmtTime(sec: number): string {
             该视频没有音轨，音频维度无法反推
           </div>
           <template v-else>
+            <!-- 音乐描述是真正会进提示词的东西，放最前面 -->
+            <div v-if="store.audio.music_profile" class="music-block">
+              <div class="music-label">音乐与声音（会写进提示词）</div>
+              <div class="music-text">{{ store.audio.music_profile }}</div>
+            </div>
+            <div v-else class="empty" style="margin-bottom: 12px">
+              未能得出音乐描述（音轨过短或抽取失败）
+            </div>
+
             <div class="row row-wrap" style="gap: 8px; margin-bottom: 14px">
-              <span v-if="store.audio.mean_volume_db !== null" class="badge">
-                平均 {{ store.audio.mean_volume_db.toFixed(1) }} dB
+              <span v-if="store.audio.bpm" class="badge ok" title="从音轨的能量包络估出的节拍">
+                {{ Math.round(store.audio.bpm) }} BPM{{ store.audio.has_beat ? '' : '（节拍不稳）' }}
               </span>
-              <span v-if="store.audio.peak_volume_db !== null" class="badge">
-                峰值 {{ store.audio.peak_volume_db.toFixed(1) }} dB
+              <span v-if="store.audio.language" class="badge">
+                语言 {{ store.audio.language }}
+              </span>
+              <span v-if="store.audio.vocal_isolation" class="badge info">
+                {{ store.audio.vocal_isolation }}
               </span>
               <span v-if="store.audio.silence_ratio !== null" class="badge">
                 静音 {{ (store.audio.silence_ratio * 100).toFixed(0) }}%
@@ -316,7 +388,34 @@ function fmtTime(sec: number): string {
             <div v-else-if="store.audio.transcript" class="prompt-box">
               {{ store.audio.transcript }}
             </div>
-            <div v-else class="empty">未获得语音转写文本（可能无对白，或未配置 ASR）</div>
+            <div v-else class="empty">
+              未获得语音转写文本（可能无对白，或未配置 ASR）
+            </div>
+
+            <!-- 频谱数字只是诊断信息：它们**不会**写进提示词 -->
+            <details class="raw-audio">
+              <summary>原始测量数据（仅诊断用，不会写进提示词）</summary>
+              <div class="row row-wrap" style="gap: 8px; margin-top: 8px">
+                <span v-if="store.audio.mean_volume_db !== null" class="badge">
+                  平均 {{ store.audio.mean_volume_db.toFixed(1) }} dB
+                </span>
+                <span v-if="store.audio.peak_volume_db !== null" class="badge">
+                  峰值 {{ store.audio.peak_volume_db.toFixed(1) }} dB
+                </span>
+                <span v-if="store.audio.low_band_db !== null" class="badge">
+                  低频 {{ store.audio.low_band_db.toFixed(1) }} dB
+                </span>
+                <span v-if="store.audio.speech_band_db !== null" class="badge">
+                  中频 {{ store.audio.speech_band_db.toFixed(1) }} dB
+                </span>
+                <span v-if="store.audio.high_band_db !== null" class="badge">
+                  高频 {{ store.audio.high_band_db.toFixed(1) }} dB
+                </span>
+                <span v-if="store.audio.onset_rate" class="badge">
+                  音头 {{ store.audio.onset_rate }}/s
+                </span>
+              </div>
+            </details>
           </template>
         </template>
       </template>
@@ -413,6 +512,39 @@ function fmtTime(sec: number): string {
   overflow-y: auto;
   font-size: 12.5px;
   line-height: 1.8;
+}
+
+/* 音乐描述是真正会进提示词的内容，给它一个显眼的位置 */
+.music-block {
+  padding: 10px 12px;
+  margin-bottom: 12px;
+  border: 1px solid var(--border-soft);
+  border-left: 3px solid var(--accent, #4a9eff);
+  border-radius: 4px;
+  background: var(--surface-soft, transparent);
+}
+
+.music-label {
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-bottom: 5px;
+}
+
+.music-text {
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+/* 原始测量数据折叠起来 —— 它们是诊断信息，不该抢走注意力 */
+.raw-audio {
+  margin-top: 16px;
+  font-size: 11.5px;
+  color: var(--text-dim);
+}
+
+.raw-audio summary {
+  cursor: pointer;
+  user-select: none;
 }
 
 .seg {
