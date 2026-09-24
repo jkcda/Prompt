@@ -647,6 +647,31 @@ def _align_shot_spans(shots: list[ShotObservation], duration: float) -> None:
         if shots[i].start_ms < shots[i - 1].end_ms:
             shots[i - 1].end_ms = max(shots[i - 1].start_ms + 1, shots[i].start_ms)
 
+    # --- 起点重复：模型把好几个镜头标在了同一时刻 ---
+    #
+    # 实测：4 个镜头都写成 `00:12.551`，上面那句收口把它们压成了
+    # `12551-12552`（1 毫秒）—— 分镜表和节拍图全废。
+    # 做法：把「共享同一 start」的一组镜头，用组后面第一个不同的 start
+    # （或总时长）当这一组的结束，在组内均分。
+    i = 1
+    while i < len(shots):
+        if shots[i].start_ms > shots[i - 1].start_ms:
+            i += 1
+            continue
+        j = i
+        while j < len(shots) and shots[j].start_ms <= shots[i - 1].start_ms:
+            j += 1
+        group_start = shots[i - 1].start_ms
+        group_end = shots[j].start_ms if j < len(shots) else (total_ms or group_start + 1000)
+        if group_end <= group_start:
+            group_end = group_start + 1000
+        count = j - (i - 1)
+        step = (group_end - group_start) / count
+        for k in range(i - 1, j):
+            shots[k].start_ms = int(group_start + step * (k - (i - 1)))
+            shots[k].end_ms = int(group_start + step * (k - (i - 1) + 1))
+        i = j
+
     # --- 锚点：首镜从 0 开始，末镜落在总时长上 ---
     shots[0].start_ms = 0
     if total_ms > 0:

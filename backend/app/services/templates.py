@@ -112,6 +112,18 @@ and lower the `confidence` value. Never fill gaps with plausible-sounding guesse
 2. Describe PHYSICS, not just nouns. A person who moves must have their motion described with \
 its physical consequences: how weight shifts, how hair swings, how fabric ripples, how \
 accessories react to gravity. Movement that has no physical description reads as frozen.
+   **A shot is a span of TIME, not a picture** — write what UNFOLDS across it. The frames you \
+receive are samples of one continuous event: they are evidence for the motion, not the thing to \
+describe. Your job is to reconstruct the event, not to caption each still.
+   * ⚠️ **Inferring the motion BETWEEN the sampled frames is required, and it is NOT \
+fabrication.** Fabrication means inventing what is absent from the footage entirely — a person \
+who never appears, a location never shown, a prop never visible. Motion continuity is different: \
+if a hand is raised in one frame and lowered in the next, the arm moved through the space \
+between, and that is a fact about the footage, not a guess. Do not leave that gap empty just \
+because no frame was sampled inside it.
+   * **Spend the bulk of each shot on the action.** Appearance, setting, lighting and colour are \
+supporting detail — a few words each, not a paragraph. If your `subject` + `setting` + `lighting` \
++ `color` wording ends up longer than your `action` wording, you have written it backwards.
 3. Use MOTION VERBS, never static verbs. Write "she rises and turns", "the camera tracks left", \
 "his shoulders roll with the step". Never write "she stays", "the pose holds", "remains still", \
 "hands rest" — those words make generated video freeze.
@@ -206,11 +218,11 @@ Output STRICT JSON only, no markdown fence, no commentary, matching exactly this
       "end_ms": 3400,
       "shot_size": "extreme close-up | close-up | medium close-up | medium | medium wide | wide | extreme wide",
       "camera": "movement type + amplitude + speed, e.g. 'static' / 'slow dolly-in, small amplitude'. Only 'static' when the measured movement is effectively zero.",
-      "subject": "who or what is in frame, with appearance, wardrobe, key props — ONLY what this frame shows",
-      "action": "what happens, described with physical detail and motion verbs",
-      "setting": "environment, location, background elements, depth",
-      "lighting": "light source, direction, quality, contrast",
-      "color": "palette, grade, contrast, saturation",
+      "subject": "who or what is in frame, with appearance, wardrobe, key props — ONLY what this frame shows. Keep it brief: the `action` field is where the detail belongs",
+      "action": "what UNFOLDS in this shot from its first frame to its last — one continuous event with physical detail, NOT a list of what each still contains. **This is the most important field; give it the most space.**",
+      "setting": "environment and background — one short phrase, not a paragraph",
+      "lighting": "light source, direction, quality — one short phrase",
+      "color": "palette and grade — a few words",
       "motion_energy": "low | medium | high, plus the rhythm or beat the motion follows",
       "on_screen_text": "verbatim text or 'none'",
       "dialogue": "spoken words or lyrics in this shot, original language, or empty string",
@@ -859,6 +871,17 @@ new subjects, locations, props or events.
 2. Describe MOTION with physical consequence. Every moving subject must carry its physics: \
 weight shift, hair swing, fabric ripple, accessory sway, contact with the ground. A subject \
 with no motion description renders as a frozen mannequin.
+   **Lead with the action.** A shot is a span of TIME, not a picture — the description must read \
+as something unfolding, not as a caption for a still. Framing, appearance, environment and \
+lighting are supporting detail: they come after the action and stay short. \
+A shot that opens with the subject's outfit and ends with one verb is written backwards.
+   **Keep the supporting detail to about ONE sentence per shot** (framing + appearance + \
+environment + lighting combined). Everything else goes to what happens. Measured on a real \
+sample: descriptions that ran four sentences of appearance and one of action read as photo \
+captions — the generator then produces a still image, not a shot.
+   **Reconstruct the motion between the sampled frames.** The observation report's frames are \
+samples of one continuous event; the movement that happened between them is a fact about the \
+footage, not an invention. Write it out.
 3. NEVER use static or terminal verbs: stop, freeze, hold, pause, rest, stay, remain, settle, \
 end, ending, final frame, final pose, holds. Never declare that any motion is the only motion \
 in frame. If you write "the only movement is X", everything else freezes, including the mouth.
@@ -924,8 +947,11 @@ BEFORE the first shot marker.
 - Then write every shot as its own paragraph starting with `[Shot 1]`, `[Shot 2]`, and so on. \
 `[Shot 1]` carries no timestamp; every later shot starts `[Shot N] At MM:SS.mmm, ...` using the \
 cut time from the observation report.
-- Inside each shot, establish in this order: framing and camera movement, subject appearance and \
-position, environment and lighting, the action with its physical detail, and the current sound.
+- Inside each shot, **lead with what HAPPENS** — the action and how it develops through the shot. \
+Then the framing and camera movement, then just enough appearance / environment / lighting to \
+support the action, then the current sound. A shot that reads like a photo caption (subject, \
+background, lighting, one verb tacked on at the end) is wrong — the action is what the shot is \
+about, not an afterthought.
 - Because there are no reference assets, appearance must be stated in full the first time a \
 subject appears, and the same wording must be reused for that subject afterwards. Never write \
 `<Subject 1>`, `<Video 1>`, `<Audio 1>` or any other reference label — they are meaningless in \
@@ -1016,6 +1042,8 @@ with the shot list taken verbatim from the registry entry. The reason after the 
 the observation report says its appearance changes.
 - `detailed_description`: the main body, 420 words. One or two sentences of style before \
 `[Shot 1]`. Then `[Shot 1]` with no timestamp, and `[Shot N] At MM:SS.mmm, ...` for later shots. \
+**Each shot leads with the action** — what unfolds through it — and only then the appearance, \
+environment and lighting, kept short. \
 Insert subject labels at first appearance and wherever their role applies. Speakers use `(Sx)` \
 and dialogue uses `<d>[Language] ...</d>`.
 - `overall_soundscape` / `non_diegetic_music`: ambience and physical sound vs. audience-only \
@@ -1037,7 +1065,9 @@ one sentence each for 环境, 风格, 镜头, 声音.
 because there are no reference images in this mode — vague words like 漂亮、高级、电影感十足 \
 carry no information and are forbidden.
 - 动作 must carry its physical consequence: 重心转移、头发摆动、衣料起伏、配饰晃动、与地面的接触。\
-A subject without motion description renders as a frozen mannequin.
+A subject without motion description renders as a frozen mannequin. \
+**动作要写在最前面**，画面是时间的流动不是一张照片 —— 先写这个镜头里发生了什么、\
+怎么发展，再补环境与外观，且只补动作需要的那点。样本帧之间的动作要自己推断出来写进去。
 - 镜头 sentence: express shot sizes and camera movement as a continuous progression, e.g. \
 「以全景开场，随后缓慢推轨至中近景，浅景深」. If the video does not cut at all, say 全片不切镜. \
 If it does cut, state the shot count and beat map at the end of the camera sentence, and the beat \
@@ -1065,7 +1095,7 @@ For each shot, one block:
 镜头 N｜MM:SS.mmm–MM:SS.mmm
   景别 / 角度：
   运镜：
-  画面内容：subject, action with physical detail, environment, lighting
+  画面内容：**先写动作**（这个镜头里发生了什么、怎么发展），再写主体、环境、光线
   台词 / 人声：exact words in original language, or 无
   音效：
   转场：
