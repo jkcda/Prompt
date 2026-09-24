@@ -362,7 +362,7 @@ python -m app.selfcheck path/to/video.mp4
 
 | 变量 | 说明 |
 |---|---|
-| `MOTION_ANALYSIS` | 客观运动分析。关掉后模型拿不准运镜会一律写 `static` |
+| `MOTION_ANALYSIS` | 客观运动分析（ffmpeg 光流算相机位移）。**默认关** —— 默认 2fps 抽帧下模型自己能判断运镜，开着只会让端到端慢 2.7 倍 |
 | `MERGE_ADJACENT_SHOTS` | 合并被拆碎的同一机位条目 |
 | `STRICT_FRAME_VISIBILITY` | 清理特写镜头里越界的画面外属性 |
 | `VOCAL_ISOLATION` | 转写前做人声频段分离，提高歌词准确率 |
