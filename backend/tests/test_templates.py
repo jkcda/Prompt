@@ -450,8 +450,9 @@ def test_seedance_mode_has_no_h3_markup():
 
 
 def test_seedance_beat_map_must_cover_every_shot():
+    """Seedance 是中文提示词，断言用中文短语 —— 别在中文提示词里断言英文大写词。"""
     system = build_pass2_system("seedance", "en")
-    assert "EVERY shot" in system
+    assert "每一个镜头" in system
 
 
 def test_pass2_user_renders_subject_registry():
@@ -1024,16 +1025,20 @@ def test_missing_edit_structure_defaults_to_unknown():
     assert r.cut_points == []
 
 
-def test_pass1_system_explains_the_detector_is_not_ground_truth():
-    """必须说清「时间戳来自检测器，不等于剪辑结构」。
+def test_pass1_system_says_frame_boundaries_are_not_cuts():
+    """必须说清「帧边界不等于剪辑切点」。
 
     踩过：原来只说「按时间戳分组」，模型就把检测器切的每一段当成一个镜头。
     用户反馈「很多镜头其实是一镜到底的但是被切镜头了」。
+
+    ⚠️ 这段曾经有 4220 字符（占系统提示词 30%），大半在解释检测器的三种失败
+    模式 —— 而那个错位是我们自己造的：把「采样分组」当「镜头」送给了模型，
+    再花篇幅求它别信。现在只保留结论（帧边界不是切点）与后果（过度切分会
+    让生成视频变碎），不再枚举检测器的缺陷。
     """
     s = PASS1_SYSTEM
-    assert "sampling heuristic, not ground truth" in s
-    assert "split a single continuous take" in s
-    assert "emit **ONE** entry in `shots`" in s
+    assert "a frame boundary is NOT a cut" in s
+    assert "exactly ONE entry in `shots`" in s
     assert "tells the video model to cut there" in s, "要说清过度切分的后果"
 
 

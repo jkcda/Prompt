@@ -24,192 +24,96 @@ from ..schemas import AudioReport, ChunkObservation, MediaInfo, ShotObservation,
 # Pass 1 —— 结构化镜头观察
 # ---------------------------------------------------------------------------
 
-_PASS1_EDIT_STRUCTURE_RULES = """
-HOW TO DECIDE THE SHOT STRUCTURE — read this carefully
+PASS1_SYSTEM = """You are a senior film analyst and prompt engineer. You receive a sequence of still frames \
+sampled from ONE continuous video segment, each labelled with its exact timestamp, plus the \
+audio transcript with timestamps.
 
-The frame timestamps you receive were chosen by an automated scene-change detector.
-**That detector is a sampling heuristic, not ground truth.** It splits on pixel
-difference, so it will:
-
-  * split a single continuous take into several "shots" whenever the camera moves
-    fast, something large enters frame, or the exposure changes
-  * miss real hard cuts that happen during motion or a flash
-  * fire several times around one soft transition
-
-So do NOT treat the timestamps as the edit structure. **Judge it yourself from what
-you see**, and report it in `edit_structure`:
-
-  * `continuous` — one uninterrupted take. The camera may move, the subject may move,
-    the framing may change — but there is no instant where the image jumps to a
-    different setup. Continuous movement, continuous lighting, continuous subject
-    position across the boundary = still one shot.
-  * `multi_shot` — there are real cuts: an instant where the frame content changes
-    discontinuously (different setup, jump in position, hard change of light).
-
-If it is `continuous`, emit **ONE** entry in `shots` covering the whole segment, even
-if the frames you were given span several detector groups. Then list `cut_points` as
-an empty array. Getting this right matters: a `[Shot N]` marker in the final prompt
-tells the video model to cut there, so over-splitting a continuous take produces a
-choppy result that does not match the source.
-
-If it is `multi_shot`, put the real cut timecodes in `cut_points` (MM:SS.mmm), and
-make the `shots` array follow those cuts — again, not the detector's grouping.
-
-When you genuinely cannot tell, use `unknown`, keep the detector's grouping, and say
-so in `continuity_notes`. Never invent a cut you cannot see.
-
-HOW MANY ENTRIES GO IN `shots` — this is the most common mistake
-
-The number of `shots` entries is the number of **camera setups**, NOT the number of
-frames you were given. You are given several frames per second of footage; the vast
-majority of them belong to the same shot.
-
-  * One `shots` entry covers a RANGE of consecutive frames — from where that setup
-    begins to where it ends.
-  * If frame N and frame N+1 show the same setup continuing (same subject, same
-    framing, same location, the motion simply progressed), they are the SAME shot.
-    Merge them into one entry.
-  * Only start a new entry where the image actually jumps: a different setup, a hard
-    jump in subject position, an abrupt change of location or lighting.
-  * Consecutive frames that differ only by small motion are ONE shot, not several.
-
-Sanity check before you answer: compare the number of entries you are about to emit
-against the number of cuts you actually identified. If you are emitting roughly one
-entry per frame, you have done it wrong — go back and merge the runs of frames that
-show one continuous setup. A 20-second music video is typically 5-20 shots.
-
-Then check for REPEATED CONTENT. If two consecutive entries would end up carrying
-nearly the same text — e.g. "three performers dance" followed by "three performers
-continue" — you have split one shot in two. Merge them. An entry whose action is only
-"continues", "keeps going" or "same as before" carries no information at all; it exists
-only because a frame boundary got mistaken for a cut. Real consecutive shots differ in
-setup: different framing, different angle, a cut to another performer or another place.
-
-⚠️ Decide `edit_structure` from the FOOTAGE ALONE, **before** you write any entries,
-and do not revisit it afterwards:
-
-  * `continuous` → exactly ONE entry in `shots`, and `cut_points` empty.
-  * `multi_shot` → one entry per interval between real cuts; `cut_points` lists them.
-
-**Do NOT pick the label that happens to match how many entries you already wrote.**
-The label describes the source footage, not your output. Writing one entry per frame
-is never a reason to call something `multi_shot` — it is a reason to merge your
-entries. If your entry count and the label disagree, re-examine the footage and fix
-whichever is wrong; when in doubt, the footage wins and you merge.
-"""
-
-
-PASS1_SYSTEM = """You are a senior film analyst and prompt engineer. You will receive a \
-sequence of still frames sampled from ONE continuous video segment, each labelled with its \
-exact timestamp, plus the audio transcript with timestamps.
-
-Your ONLY job is faithful, exhaustive observation. You do NOT write marketing copy, you do \
-NOT invent anything that is not visible or audible, and you do NOT summarise.
+Your job is faithful observation — not copywriting, not summarising. Never invent anything you \
+cannot see or hear.
 
 Hard rules:
-1. Report ONLY what the frames actually show. If something is ambiguous or occluded, say so \
-and lower the `confidence` value. Never fill gaps with plausible-sounding guesses.
-2. Describe PHYSICS, not just nouns. A person who moves must have their motion described with \
-its physical consequences: how weight shifts, how hair swings, how fabric ripples, how \
-accessories react to gravity. Movement that has no physical description reads as frozen.
-   **A shot is a span of TIME, not a picture** — write what UNFOLDS across it. The frames you \
-receive are samples of one continuous event: they are evidence for the motion, not the thing to \
-describe. Your job is to reconstruct the event, not to caption each still.
-   * ⚠️ **Inferring the motion BETWEEN the sampled frames is required, and it is NOT \
-fabrication.** Fabrication means inventing what is absent from the footage entirely — a person \
-who never appears, a location never shown, a prop never visible. Motion continuity is different: \
-if a hand is raised in one frame and lowered in the next, the arm moved through the space \
-between, and that is a fact about the footage, not a guess. Do not leave that gap empty just \
-because no frame was sampled inside it.
-   * **Spend the bulk of each shot on the action.** Appearance, setting, lighting and colour are \
-supporting detail — a few words each, not a paragraph. If your `subject` + `setting` + `lighting` \
-+ `color` wording ends up longer than your `action` wording, you have written it backwards.
-   * ⚠️ **But do not invent movement to fill the space.** If a shot genuinely has none (a locked-off \
-empty landscape, a static title card), write that in one line — "very little moves in this shot" \
-is a valid observation. Fabricating motion is as wrong as omitting it.
-3. Use MOTION VERBS, never static verbs. Write "she rises and turns", "the camera tracks left", \
-"his shoulders roll with the step". Never write "she stays", "the pose holds", "remains still", \
-"hands rest" — those words make generated video freeze.
-   Also never declare that one motion is the ONLY motion in frame (e.g. "the only motion is the \
-shifting bar"). Everything you do not mention as moving stops moving, including the mouth. \
-Your `global_notes` is passed verbatim into the next stage, so forbidden phrasing written here \
-contaminates the final prompt. If little is moving, say what IS moving — do not rank it as the \
-sole motion.
-4. Judge camera movement by **comparing the frames of the same shot against each other**, \
-never from a single frame. You receive several frames per shot (head / middle / tail and more): \
-track how the subject's position against the background, the background parallax and the horizon \
-shift between them. (When the user message also carries a **measured motion report**, that is \
-objective data taken from the footage — use it and prefer it over your own impression. It is not \
-always present; when it is absent, judge from the frames alone.)
-   * **Only answer `static` when the frames genuinely do not change framing.** If the content \
-shifts position between them, the camera is moving — name the move (pan / tilt / truck / dolly / \
-crane / handheld / orbit / whip) and its speed (slow / moderate / fast). A video with obvious \
-camera work must NOT come back with every shot marked `static`; that is a failure to look, not a \
-finding.
-   * **A static camera does NOT mean a static subject.** Movement that comes from the subject \
-alone is still `static` for the camera — say so explicitly ("static camera; the movement is in \
-the subject, not the camera"). But do NOT let that verdict leak into the action field: compare \
-the frames of the shot, and if the subject's position changes between them — further left, nearer \
-the lens, higher in frame, larger or smaller — then the subject is MOVING, and you must write the \
-movement and its direction (walking across, stepping forward, approaching, receding). Writing \
-"she stands" / "he stands facing her" for a shot where the subject actually walks is a **wrong \
-observation**, and the generated video will show a person rooted to the spot.
-   * In any single frame a walking person and a standing person look almost identical — that is \
-precisely why subject displacement must be read ACROSS frames, never from one. Displacement is \
-the one thing a still cannot show. When a shot has only one usable frame, say the subject's \
-motion is uncertain rather than defaulting to "standing".
-5. Transcribe any on-screen text, captions, subtitles or logos VERBATIM into `on_screen_text`. \
-If a watermark or platform logo is present, note it. If there is none, write "none".
-6. Align the audio transcript to the shots by timestamp. Put spoken words or lyrics that fall \
-inside a shot into that shot's `dialogue` field, preserving the original language. Put \
-non-verbal sound (footsteps, impact, whoosh, ambience) into `sfx`.
-7. `timecode` must be the real timestamp of that shot's first supplied frame, formatted as \
-MM:SS.mmm. Also fill `start_ms` and `end_ms` — the shot's span in the source video, in \
-milliseconds, as plain integers. The shots must tile the whole segment end to end with no gaps: \
-the first shot starts at the segment start and **the last shot's `end_ms` equals the segment's \
-total duration in milliseconds**.
-8. After the per-shot list, build a SUBJECT REGISTRY. A subject is anything that must look the \
-same if it reappears: a person, an environment, a prop, a wardrobe piece, or the overall visual \
-style itself. Give each one a short lowercase label, list every shot index it appears in, and \
-spell out the features that must stay consistent. If the same person or place appears in \
-several shots, it must be ONE entry covering all of them — not one entry per shot. This registry \
-is what lets the final prompt keep identities from drifting, so be precise about the traits that \
-are easy to get wrong (eye colour, hair length and parting, garment cut and hardware, tattoo \
-placement, the exact grade).
-   A response whose `subjects` array is missing or empty is INCOMPLETE and will be rejected. \
-Every distinct recurring subject in the footage must appear in it. Emit `subjects` BEFORE \
-`shots` so you do not run out of output budget before writing it.
-   Do NOT register watermarks, platform logos, channel bugs, UI overlays, subtitles or \
-burned-in captions as subjects. They are artefacts of the source file, not content to \
-reproduce — registering them invites the generator to render them into the new video. \
-Mention them only in `on_screen_text`, never in `subjects`.
-9. **Describe ONLY what is visible inside THIS frame.** This is a hard rule and it is the most \
-common source of wrong detail. The subject registry above already defines everyone's full \
-appearance ONCE, so a per-shot description must not re-list attributes that fall outside the \
-framing or are hidden. Concretely:
-   * If the shot is a close-up on a face, do NOT mention socks, shoes, trousers, hems or anything \
-below the framing. If it is a head-and-shoulders shot, do not describe the lower body.
-   * Do not mention what a person is holding if their hands are outside the frame.
-   * Do not describe the room behind them if the background is out of focus to the point that \
-nothing is identifiable.
-   * Refer to people by the label you gave them in the registry ("the lead performer"), not by \
-re-describing their whole outfit.
-   Naming an off-screen attribute is a **factual error about this shot**, not extra helpfulness — \
-it makes the final prompt describe a shot that does not exist.
+1. Report only what the frames actually show. If something is ambiguous or occluded, say so and \
+lower `confidence`. Never fill a gap with a plausible-sounding guess.
+2. **A shot is a span of TIME, not a picture.** Write what UNFOLDS across it. The frames are \
+evidence for the motion, not things to caption.
+   * **Inferring the motion BETWEEN the sampled frames is required, and it is NOT fabrication.** \
+Fabrication means inventing what is absent from the footage — a person who never appears, a place \
+never shown. If a hand is raised in one frame and lowered in the next, the arm moved through the \
+space between; that is a fact about the footage, not a guess.
+   * Give motion its physical consequence: weight shift, hair swing, fabric ripple, accessory \
+sway, contact with the ground. Motion with no physical description renders as frozen.
+   * Never invent movement to fill space. If a shot genuinely has none, say so — "very little \
+moves in this shot" is a valid observation.
+   * Appearance, setting, lighting and colour are supporting detail; they must not crowd out \
+what happens.
+3. Use motion verbs, never static ones. Never write "stays", "holds", "remains still", "hands rest" — \
+those words freeze the generated video. Never declare that one motion is the ONLY motion in \
+frame: everything you do not mention as moving stops moving, including the mouth. (`global_notes` \
+is passed verbatim into the next stage, so bad phrasing here contaminates the final prompt.)
+4. Judge camera movement by COMPARING the frames of a shot against each other, never from one \
+frame. `static` is allowed only when the framing genuinely does not change between them; \
+otherwise name the move (pan / tilt / truck / dolly / crane / handheld / orbit / whip) and its \
+speed.
+   * **A static camera does NOT mean a static subject.** If the subject's position changes across \
+the frames — further left, nearer the lens, higher in frame, larger or smaller — the subject is \
+MOVING; write the movement and its direction (walking across, stepping forward, approaching, \
+receding). Writing "she stands" for a shot where she walks is a wrong observation, and the \
+generated video will show a person rooted to the spot.
+5. Transcribe on-screen text, captions, subtitles and logos VERBATIM into `on_screen_text`. Write \
+"none" if there is none.
+6. Put speech and lyrics that fall inside a shot into that shot's `dialogue`, in the ORIGINAL \
+language. Put non-verbal sound into `sfx`.
+7. `timecode` = the timestamp of that shot's first frame, as MM:SS.mmm. Also fill `start_ms` and \
+`end_ms` — the shot's span in milliseconds, as plain integers. Shots must tile the segment with \
+no gaps: the first starts at 0, and **the last shot's `end_ms` equals the segment duration**.
+8. Build a SUBJECT REGISTRY: everything that must look the same if it reappears — a person, an \
+environment, a prop, a wardrobe piece, the overall grade. Each subject **must be ONE entry covering ALL the \
+shots it appears in** — never one entry per shot — with a short lowercase label and the traits that \
+are easy to get wrong (eye colour, hair length and parting, garment cut, tattoo placement). Emit \
+`subjects` BEFORE `shots` — you may run out of output budget otherwise. A missing or empty `subjects` array is INCOMPLETE. Do NOT register \
+watermarks, platform logos, subtitles or UI overlays — they are artefacts of the source file, not content \
+to reproduce; mention them only in `on_screen_text`, never in `subjects`.
+9. **Describe only what is visible inside THIS shot.** The registry defines everyone's appearance \
+once, so do not re-list attributes that fall outside the framing or are hidden: no socks, shoes \
+or hems in a face close-up; nothing a subject holds if their hands are out of frame; no \
+background detail if it is blurred beyond recognition. Refer to people by their registry label. \
+Naming an off-screen attribute is a factual error about the shot — it makes the final prompt \
+describe a shot that does not exist.
 
-""" + _PASS1_EDIT_STRUCTURE_RULES + """
+HOW TO DECIDE THE SHOT STRUCTURE
 
-Output STRICT JSON only, no markdown fence, no commentary, matching exactly this shape \
-(`subjects` first, then `shots`):
+The frames were sampled automatically at fixed intervals, so a frame boundary is NOT a cut. \
+Decide the shot structure yourself from what you see.
+
+* One `shots` entry = one camera setup, covering a RANGE of consecutive frames from where that \
+setup begins to where it ends.
+* Consecutive frames showing the same setup continuing (same subject, same framing, same \
+location, the motion simply progressed) are the SAME shot — merge them. Start a new entry only \
+where the image actually jumps: a different setup, a hard jump in subject position, an abrupt \
+change of location or lighting.
+* A new entry must differ in SETUP. If two consecutive entries would carry nearly the same text \
+("three performers dance" / "three performers continue"), you have split one shot — merge them. \
+An entry whose action is only "continues" carries no information.
+* `continuous` = one uninterrupted take: the camera and subject may move and the framing may \
+change, but there is no instant where the image jumps to a different setup. → exactly ONE entry \
+in `shots`, and `cut_points` empty. (A `[Shot N]` marker tells the video model to cut there, so over-splitting a continuous take produces a choppy result.)
+  `multi_shot` = real cuts: an instant where the frame content changes discontinuously. → one \
+entry per interval between real cuts, and `cut_points` lists them (MM:SS.mmm).
+* Decide `edit_structure` from the footage BEFORE writing entries, and do not revisit it. Do NOT \
+pick the label that happens to match your entry count — if the two disagree, re-examine the \
+footage and merge.
+
+Output STRICT JSON only — no markdown fence, no commentary — in exactly this shape (`subjects` \
+first, then `shots`):
 
 {
   "subjects": [
     {
-      "label": "short lowercase label, e.g. performer / rooftop / jacket / grade",
-      "kind": "person | environment | prop | wardrobe | style | other",
+      "label": "short lowercase label",
+      "kind": "person | environment | prop | wardrobe | style",
       "description": "appearance, material, colour, identifying features",
-      "shots": ["1", "2", "5"],
-      "notes": "what must stay consistent, and which traits are prone to drifting"
+      "shots": ["1", "2"],
+      "notes": "what must stay consistent; which traits drift easily"
     }
   ],
   "shots": [
@@ -219,26 +123,26 @@ Output STRICT JSON only, no markdown fence, no commentary, matching exactly this
       "start_ms": 0,
       "end_ms": 3400,
       "shot_size": "extreme close-up | close-up | medium close-up | medium | medium wide | wide | extreme wide",
-      "camera": "movement type + amplitude + speed, e.g. 'static' / 'slow dolly-in, small amplitude'. Only 'static' when the measured movement is effectively zero.",
-      "subject": "who or what is in frame, with appearance, wardrobe, key props — ONLY what this frame shows. Keep it brief: the `action` field is where the detail belongs",
-      "action": "what UNFOLDS in this shot from its first frame to its last — one continuous event with physical detail, NOT a list of what each still contains. **This is the most important field; give it the most space.**",
-      "setting": "environment and background — one short phrase, not a paragraph",
-      "lighting": "light source, direction, quality — one short phrase",
+      "camera": "move type + speed, e.g. 'static' / 'slow dolly-in, small amplitude'",
+      "subject": "who or what is in frame — only what this shot shows; keep it brief",
+      "action": "what UNFOLDS from the shot's first frame to its last — **the most important field, give it the most space**",
+      "setting": "environment — one short phrase",
+      "lighting": "source, direction, quality — one short phrase",
       "color": "palette and grade — a few words",
-      "motion_energy": "low | medium | high, plus the rhythm or beat the motion follows",
-      "on_screen_text": "verbatim text or 'none'",
-      "dialogue": "spoken words or lyrics in this shot, original language, or empty string",
-      "sfx": "non-verbal sounds in this shot",
-      "transition": "how the shot ends / how it hands off to the next shot",
+      "motion_energy": "low | medium | high, plus the rhythm it follows",
+      "on_screen_text": "verbatim, or 'none'",
+      "dialogue": "speech or lyrics in this shot, original language, or ''",
+      "sfx": "non-verbal sound in this shot",
+      "transition": "how the shot hands off to the next",
       "confidence": 0.0
     }
   ],
   "edit_structure": "continuous | multi_shot",
-  "cut_points": ["00:03.400", "00:07.900"],
-  "continuity_notes": "why you judge the edit structure this way",
-  "global_notes": "cross-shot observations: overall style, recurring subjects, wardrobe continuity, \
-colour consistency, pacing pattern, anything the per-shot fields cannot capture"
-}"""
+  "cut_points": ["00:03.400"],
+  "continuity_notes": "why you judged the structure this way",
+  "global_notes": "cross-shot observations the per-shot fields cannot capture"
+}
+"""
 
 
 
@@ -864,142 +768,110 @@ def _parse_subjects(subjects_raw: object) -> list[SubjectEntry]:
 # Pass 2 —— 成文
 # ---------------------------------------------------------------------------
 
-_COMMON_RULES = """You are a prompt engineer writing the FINAL generation prompt for a video \
-model, based on a shot-by-shot observation report of an existing video.
+_COMMON_RULES = """You are a prompt engineer writing the FINAL generation prompt for a video model, from a \
+shot-by-shot observation report of an existing video.
 
 Absolute rules — these override everything else:
-1. Use ONLY information present in the observation report and the audio report. Never invent \
-new subjects, locations, props or events.
-2. Describe MOTION with physical consequence. Every moving subject must carry its physics: \
-weight shift, hair swing, fabric ripple, accessory sway, contact with the ground. A subject \
-with no motion description renders as a frozen mannequin.
-   **Lead with the action.** A shot is a span of TIME, not a picture — the description must read \
-as something unfolding, not as a caption for a still. Framing, appearance, environment and \
-lighting are supporting detail: they come after the action and stay short. \
-A shot that opens with the subject's outfit and ends with one verb is written backwards.
-   **Keep the supporting detail to about ONE sentence per shot** (framing + appearance + \
-environment + lighting combined). Everything else goes to what happens. Measured on a real \
-sample: descriptions that ran four sentences of appearance and one of action read as photo \
-captions — the generator then produces a still image, not a shot.
-   ⚠️ **But do not invent movement to fill the space.** If a shot genuinely has none (a locked-off \
-empty landscape, a static title card), say that in one line and describe what the frame holds. \
-"Very little moves in this shot" is a valid, useful observation. Fabricating motion is as wrong \
-as omitting it.
-   **Reconstruct the motion between the sampled frames.** The observation report's frames are \
-samples of one continuous event; the movement that happened between them is a fact about the \
-footage, not an invention. Write it out.
+1. Use ONLY what the observation report and the audio report contain. Never invent subjects, \
+locations, props or events.
+2. **Lead with the action.** A shot is a span of TIME, not a picture: it must read as something \
+unfolding, not as a caption for a still. Framing, appearance, environment and lighting come after \
+the action and stay short — a shot that opens with an outfit and ends with one verb is written \
+backwards. Give every motion its physical consequence (weight shift, hair swing, fabric ripple, \
+accessory sway, contact with the ground); a subject with no motion description renders as a \
+frozen mannequin.
+   The report's frames are samples of one continuous event — reconstruct the motion that happened \
+between them. That is a fact about the footage, not an invention. Do not invent movement to fill \
+space either: if a shot genuinely has none, say so in one line ("very little moves in this shot").
 3. NEVER use static or terminal verbs: stop, freeze, hold, pause, rest, stay, remain, settle, \
-end, ending, final frame, final pose, holds. Never declare that any motion is the only motion \
-in frame. If you write "the only movement is X", everything else freezes, including the mouth.
-4. Mouth movement — describe it as a VISUAL fact, never as audio content.
-   * If you DO know the lyrics or dialogue (they appear in the audio report), state which words \
-or syllables the lips move through, and that the movement is continuous through the line.
-   * If the audio content is unknown, describe only the visible articulation — "her lips move \
-continuously, opening and closing in a steady rhythm" — and do NOT call it speaking, singing, \
-a line, a lyric or dialogue. You cannot see what the words are, so naming the activity is a \
-guess about audio you were told you do not have. (Seen in real output: "her lips move \
-continuously through a spoken line" while the audio was never transcribed.)
-5. Preserve the original language of dialogue and lyrics. Mark unintelligible spans as [unclear]. \
-Never paraphrase dialogue.
-6. Do not mention watermarks, logos, platform UI, or the fact that this is a reverse-engineered \
-prompt. If the observation notes on-screen text, either transcribe it as diegetic text when it \
-is part of the scene, or omit it.
-7. Audio — use the audio report, and ONLY the audio report.
-   * If the report contains a music description (tempo, instruments, whether there are vocals, \
-whether there is an audience), write that. Use plain musical language a person would say out \
-loud. You may rephrase it, but keep it true to what it says — do not add instruments or a genre \
-it does not mention.
-   * If the report contains lyrics or dialogue with timestamps, quote them in their ORIGINAL \
-language, placed in the shots they fall in.
-   * If the report says the audio content is unknown, then you do not know it. Never write \
-dialogue, lyrics, instrumentation, tempo or specific sound-effect types, not even hedged \
-("as if", "appears to be"). Leave the field empty or write N/A. An empty field is correct here; \
-a plausible-sounding guess is not.
-   * Do NOT convert visual events into sound events. Seeing a person walk does not license \
-"footsteps"; seeing fabric move does not license "cloth rustle". Those are claims about audio \
-content, which is exactly what is unknown.
-   * Never put audio-ANALYSIS vocabulary into the prompt: no frequency-band names, no energy or \
-spectral wording, no decibel or hertz figures, no "not analysed / not identified" status notes. \
-Those are internal working notes — a video model can do nothing with them.
-   Fabricated sound is worse than an empty field: the generated video will not match the source.
-8. Keep each subject's appearance wording IDENTICAL across shots. A character described as "a \
-performer in a dark quilted jacket" in shot 1 must not become "a woman in a leather coat" in \
-shot 3 — inconsistent wording is read as a different person and the identity drifts.
-9. Each shot must describe ONLY what that shot actually shows. The observation report records \
-the framing of every shot — if a shot is a close-up on a face, do not put socks, shoes, \
-trousers or anything below the framing into it. Naming an off-screen attribute invents a shot \
-the source never had, and the generator will draw it.
-10. Every shot needs a time range. Use the `start_ms` / `end_ms` from the observation report for \
-`[Shot N] At MM:SS.mmm` markers and for any beat map. The final shot must end at the total \
-duration of the source — never leave the last beat short.
-11. Write in {language_instruction}."""
+end, ending, final frame, final pose. Never declare that any motion is the only motion in frame \
+— if you write "the only movement is X", everything else freezes, including the mouth.
+4. Mouth movement is a VISUAL fact, never audio content.
+   * If the lyrics or dialogue ARE in the audio report, state which words or syllables the lips \
+move through, and that the movement is continuous through the line.
+   * If the audio is unknown, describe only the visible articulation ("her lips move \
+continuously, opening and closing in a steady rhythm") and do NOT call it speaking, singing, a \
+line, a lyric or dialogue — that names audio content you were told you do not have.
+5. Keep dialogue and lyrics verbatim in their ORIGINAL language. Mark unintelligible spans \
+[unclear]. Never paraphrase.
+6. Do not mention watermarks, logos, platform UI, or that this is a reverse-engineered prompt. If \
+the report notes on-screen text, transcribe it as diegetic text or omit it.
+7. Audio — use the audio report, and ONLY it.
+   * If it describes the music (tempo, instruments, vocals, audience), write that in plain \
+musical language. Rephrase freely, but do not add instruments or a genre it does not mention.
+   * If it carries lyrics or dialogue with timestamps, quote them in their original language, in \
+the shots they fall in.
+   * If it says the audio content is unknown, then you do not know it. Never write dialogue, lyrics, \
+instrumentation, tempo or specific sound-effect types — not even hedged ("as if", "appears to \
+be"). Leave the field empty or write N/A — an empty field is correct here. Fabricated sound is worse than an empty field: the generated video will not match the source.
+   * Do NOT convert visual events into sound events: seeing someone walk does not license \
+"footsteps"; seeing fabric move does not license "cloth rustle".
+   * No audio-ANALYSIS vocabulary: no frequency-band names, no energy or spectral wording, no \
+decibel or hertz figures, no "not analysed / not identified" status notes — those are internal \
+working notes a video model can do nothing with.
+8. Keep each subject's appearance wording IDENTICAL across shots — inconsistent wording is read \
+as a different person and the identity drifts.
+9. Each shot describes ONLY what that shot shows; the report records every shot's framing. Do not \
+put socks, shoes or anything below the framing into a face close-up — naming an off-screen \
+attribute makes the generator draw a shot the source never had.
+10. Every shot needs a time range. Use `start_ms` / `end_ms` from the report for the \
+`[Shot N] At MM:SS.mmm` markers and any beat map. The final shot must end at the source's total \
+duration — never leave the last beat short.
+11. Write in {language_instruction}.
+"""
 
 
 _PASS2_H3 = """{common}
 
-TARGET MODE — MiniMax H3, text-to-video with audio (T2VA). There are NO reference assets in this \
-task, so the prompt must be fully self-contained: everything the model needs is in the text.
+TARGET MODE — MiniMax H3, text-to-video with audio (T2VA). There are NO reference assets, so the \
+prompt must be fully self-contained.
 
-Output exactly three fields, in this order, each starting at the beginning of a line with its \
-bare name followed by a colon. Do NOT wrap the field names in angle brackets or any other markup.
+Output exactly three fields, in this order, each starting at the beginning of a line as a bare \
+name followed by a colon. Do NOT wrap the names in angle brackets.
 
 integrated_multimodal_description: <the main body>
 overall_soundscape: <ambience and physical sounds>
 non_diegetic_music: <audience-only score, or N/A>
 
-Rules for `integrated_multimodal_description`:
-- Begin with one or two sentences establishing the overall style, format and grade of the video, \
-BEFORE the first shot marker.
-- Then write every shot as its own paragraph starting with `[Shot 1]`, `[Shot 2]`, and so on. \
-`[Shot 1]` carries no timestamp; every later shot starts `[Shot N] At MM:SS.mmm, ...` using the \
-cut time from the observation report.
-- Inside each shot, **lead with what HAPPENS** — the action and how it develops through the shot. \
-Then the framing and camera movement, then just enough appearance / environment / lighting to \
-support the action, then the current sound. A shot that reads like a photo caption (subject, \
-background, lighting, one verb tacked on at the end) is wrong — the action is what the shot is \
-about, not an afterthought.
-- Because there are no reference assets, appearance must be stated in full the first time a \
-subject appears, and the same wording must be reused for that subject afterwards. Never write \
-`<Subject 1>`, `<Video 1>`, `<Audio 1>` or any other reference label — they are meaningless in \
-T2VA and will be read as literal text.
-- Assign speakers stable IDs `(S1)`, `(S2)` in order of first vocal event. Write dialogue and \
-lyrics as `<d>[Language] the exact words</d>`. When a speaker is on camera, state their mouth \
+`integrated_multimodal_description`:
+- Open with one or two sentences of overall style, format and grade, BEFORE the first shot marker.
+- Then one paragraph per shot: `[Shot 1]` with no timestamp, then `[Shot N] At MM:SS.mmm, ...` for \
+later shots, using the cut times from the report.
+- Inside each shot lead with what HAPPENS, then framing and camera movement, then just enough \
+appearance / environment / lighting to support the action, then the current sound.
+- With no reference assets, state each subject's appearance in full at first appearance and reuse \
+the same wording afterwards. Never write `<Subject 1>`, `<Video 1>` or `<Audio 1>` — those labels \
+are meaningless in T2VA and will be read as literal text.
+- Speakers get stable IDs `(S1)`, `(S2)` in order of first vocal event. Dialogue and lyrics are \
+written `<d>[Language] the exact words</d>`. When a speaker is on camera, state their mouth \
 movement in the same shot.
-- **LENGTH BUDGET — hard requirement.** The generated video model has a limited prompt window. \
-Keep `integrated_multimodal_description` to **420 words or fewer**. Oversized prompts get \
-truncated or ignored by the generator. Write tight, information-dense sentences — no filler, no \
-restating the style, no repeating a subject's appearance after its first mention. If you are \
-running long, cut adjectives and scene-setting, never the action or the mouth movement.
-- The description must not end with any closing or resolution marker. It ends on the last \
-described action, mid-flow.
+- **LENGTH BUDGET — hard.** 420 words or fewer; oversized prompts get truncated. Cut adjectives \
+and scene-setting if you run long — never the action or the mouth movement.
+- No closing or resolution marker: stop mid-flow on the last described action.
 
-Rules for `overall_soundscape`:
-- Summarise ambience and physical action sounds across the whole video in one or two sentences.
-- Do NOT repeat dialogue or lyrics here.
+`overall_soundscape`: one or two sentences of ambience and physical action sound across the whole \
+video. Do not repeat dialogue or lyrics.
 
-Rules for `non_diegetic_music`:
-- Describe audience-only score with instrumentation, tempo and dynamics. Write `N/A` if the \
-observation report indicates there is no score."""
+`non_diegetic_music`: audience-only score — instrumentation, tempo, dynamics. `N/A` if there is \
+no score.
+"""
 
 
 _PASS2_H3_REF = """{common}
 
-TARGET MODE — MiniMax H3 full-reference (Ref2VA) FORMAT. "Reference" here means the prompt \
-FORMAT, not the source video. The source video is only being MINED for content — it is NOT a \
-reference asset and must NOT be cited as one.
+TARGET MODE — MiniMax H3 full-reference (Ref2VA) FORMAT. "Reference" here means the prompt FORMAT, \
+not the source video. The source video is only being MINED for content — it is NOT a reference \
+asset and must NOT be cited as one.
 
-That means:
-- Do NOT define or mention `<Video 1>` or `<Audio 1>`. There is no video reference and no audio \
-reference in this task.
-- The `<Subject N>` labels are the reusable content you extracted from the footage. The user will \
-supply their OWN reference images for these labels, so each definition must be self-contained \
-enough to identify the thing from the text alone.
+- Do NOT define or mention `<Video 1>` or `<Audio 1>` — there is no video reference and no audio reference.
+- `<Subject N>` labels are the reusable content extracted from the footage. The user will supply \
+their OWN reference images for them, so each definition must identify the thing from text alone.
 
-A SUBJECT REGISTRY is provided in the user message. Use it as the authoritative source for labels \
-— do not invent subjects that are not in it, and do not split one registry entry into several.
+The SUBJECT REGISTRY in the user message is authoritative for labels: do not invent subjects \
+outside it, and do not split one entry into several.
 
-Output exactly six sections, in this order, each starting at the beginning of a line with its \
-bare name followed by a colon. Do NOT wrap field names in angle brackets or any other markup.
+Output exactly six sections, in this order, each starting at the beginning of a line as a bare \
+name followed by a colon (no angle brackets):
 
 subject_definitions:
 summary:
@@ -1008,110 +880,98 @@ detailed_description:
 overall_soundscape:
 non_diegetic_music:
 
-## LENGTH BUDGET — this is a hard requirement, not a suggestion
-
-The generated video model has a limited prompt window. **The entire output must be under \
-700 words.** Oversized prompts get truncated or ignored by the generator, which makes the whole \
-rewrite useless. Hit these per-section budgets:
+LENGTH BUDGET — hard requirement. **The entire output must be under 700 words** or the generator \
+truncates it and the whole rewrite is wasted.
 
 | section | budget |
 |---|---|
-| `subject_definitions` | **at most 6 entries**, 15 words each — see selection rule below |
+| `subject_definitions` | at most 6 entries, 15 words each |
 | `summary` | 40 words |
 | `retention_analysis` | one line per subject, 15 words each |
-| `detailed_description` | **420 words** — the bulk of the budget belongs here |
+| `detailed_description` | **420 words** — the bulk of the budget |
 | `overall_soundscape` | 40 words |
 | `non_diegetic_music` | 25 words |
 
-If you are running long, cut words from the definition and analysis lines, never from \
-`detailed_description`. Write tight, information-dense sentences — no filler, no restating the \
-style, no repeating a subject's appearance after its first mention.
+If you run long, cut the definitions and analysis lines — never from `detailed_description`. No filler, \
+no restating the style, no repeating an appearance after its first mention.
 
-**Subject selection rule**: the registry may list more than 6 items. Pick at most 6 — the ones \
-that most need a reference image, in this priority: people > wardrobe/props > environment > \
-style/grade. Drop the least important ones entirely rather than giving everyone a half-line.
+**Subject selection**: the registry may exceed 6 items. Pick the 6 that most need a reference \
+image, in this priority: people > wardrobe/props > environment > style/grade. Drop the least important ones \
+entirely rather than giving everyone a half-line.
 
-## Section rules
-
-- `subject_definitions`: one line per SELECTED registry entry, numbered in registry order as \
-`<Subject 1>`, `<Subject 2>`, ... Each line: what the label denotes, then its identifying \
-features, in 15 words or fewer. Registry entries whose `kind` is `style` should be defined as the \
-look and grade to carry across, not as an object. Do not add a `<Video 1>` or `<Audio 1>` line.
-- `summary`: one short paragraph beginning with a bracketed task-type prefix, e.g. \
-`[reference generation]` or `[reference generation + style transfer]`. Do not introduce new \
-labels here, and do not describe the source clip as a reference.
-- `retention_analysis`: one line per `<Subject N>` label ONLY — no video or audio line. Use the \
-fixed markers: `fully_preserved` / `partially_preserved` / `attribute_transfer` / \
-`weak_reference`. Format: `<Subject 1> (appears in [Shot 1], [Shot 3]): fully_preserved - ...` \
-with the shot list taken verbatim from the registry entry. The reason after the dash must be \
-15 words or fewer. Every tracked subject is `fully_preserved` or `partially_preserved` unless \
-the observation report says its appearance changes.
-- `detailed_description`: the main body, 420 words. One or two sentences of style before \
-`[Shot 1]`. Then `[Shot 1]` with no timestamp, and `[Shot N] At MM:SS.mmm, ...` for later shots. \
-**Each shot leads with the action** — what unfolds through it — and only then the appearance, \
-environment and lighting, kept short. \
-Insert subject labels at first appearance and wherever their role applies. Speakers use `(Sx)` \
-and dialogue uses `<d>[Language] ...</d>`.
-- `overall_soundscape` / `non_diegetic_music`: ambience and physical sound vs. audience-only \
-score, 40 / 25 words. Write `N/A` when a category is absent. Never repeat dialogue here."""
+Sections:
+- `subject_definitions`: one line per selected entry, numbered in registry order `<Subject 1>`, \
+`<Subject 2>`, ... — what the label denotes plus identifying features, 15 words or fewer. A `style` \
+entry is defined as the look and grade to carry across, not as an object. Do not add a `<Video 1>` or \
+`<Audio 1>` line.
+- `summary`: one short paragraph opening with a bracketed task-type prefix, e.g. \
+`[reference generation]` or `[reference generation + style transfer]`. No new labels; do not call \
+the source clip a reference.
+- `retention_analysis`: one line per `<Subject N>` label ONLY — no video or audio line. Use the fixed \
+markers `fully_preserved` / `partially_preserved` / `attribute_transfer` / `weak_reference`, \
+formatted `<Subject 1> (appears in [Shot 1], [Shot 3]): fully_preserved - ...`, shot list verbatim \
+from the registry, reason in 15 words or fewer. Default is `fully_preserved` unless the report \
+says the appearance changes.
+- `detailed_description`: 420 words. One or two sentences of style before `[Shot 1]`. Then \
+`[Shot 1]` with no timestamp and `[Shot N] At MM:SS.mmm, ...` afterwards. Each shot leads with the \
+action, then short appearance / environment / lighting. Insert labels at first appearance and \
+wherever their role applies. Speakers use `(Sx)`; dialogue uses `<d>[Language] ...</d>`.
+- `overall_soundscape` / `non_diegetic_music`: ambience and physical sound vs. audience-only score, \
+40 / 25 words. `N/A` when a category is absent. Never repeat dialogue.
+"""
 
 
 _PASS2_SEEDANCE = """{common}
 
-TARGET MODE — Seedance 2.0 / 即梦. Write ONE coherent natural-language prompt in CHINESE. The \
-official element order is 主体 → 动作 → 环境 → 风格 → 镜头 → 声音.
+TARGET MODE — Seedance 2.0 / 即梦. Write ONE coherent natural-language prompt in CHINESE. Element \
+order: 主体 → 动作 → 环境 → 风格 → 镜头 → 声音.
 
-Hard constraints for this mode:
-- Write in Chinese only. Do not use English words except for proper nouns and on-screen text.
-- Do NOT use field labels. Do NOT use `[Shot N]` markers. Do NOT use H3's colon structure or any \
-`<Subject N>` / `<d>` markup. This mode is plain prose, not a structured document.
-- Write flowing prose, not a bullet list. Roughly: 主体 + 动作 take about half the length, then \
-one sentence each for 环境, 风格, 镜头, 声音.
-- Be concrete. 主体 must be pinned down by colour, material, garment cut and identifying features, \
-because there are no reference images in this mode — vague words like 漂亮、高级、电影感十足 \
-carry no information and are forbidden.
-- 动作 must carry its physical consequence: 重心转移、头发摆动、衣料起伏、配饰晃动、与地面的接触。\
-A subject without motion description renders as a frozen mannequin. \
-**动作要写在最前面**，画面是时间的流动不是一张照片 —— 先写这个镜头里发生了什么、\
-怎么发展，再补环境与外观，且只补动作需要的那点。样本帧之间的动作要自己推断出来写进去。
-- 镜头 sentence: express shot sizes and camera movement as a continuous progression, e.g. \
-「以全景开场，随后缓慢推轨至中近景，浅景深」. If the video does not cut at all, say 全片不切镜. \
-If it does cut, state the shot count and beat map at the end of the camera sentence, and the beat \
-map must cover EVERY shot in the observation report without gaps or overlap, e.g. \
-「全片四个镜头，节拍为 0–2.5 秒、2.5–5 秒、5–7.5 秒、7.5–10 秒」.
-- 声音 sentence: list ambience, action sounds, music and dialogue compactly, separated by 分号. \
-If there is no dialogue, end with 无对白. Append the score description at the very end.
-- Add explicit negative instructions on their own at the end when the observation report shows \
-text, subtitles, logos or watermarks: 「不要出现字幕、文字、水印」.
-- Do not write duration or aspect ratio into the prompt — those are separate parameters.
-- Keep dialogue and lyrics in their original language, quoting them inline. When a speaker is on \
-camera, state their mouth movement in that part of the 动作 description.
-- The prompt must not end with a closing or resolution marker."""
+Hard constraints:
+- Chinese only. No English except proper nouns and on-screen text.
+- Do NOT use field labels, `[Shot N]` markers, H3's colon structure, or any `<Subject N>` / `<d>` markup. \
+Plain prose, not a structured document.
+- Flowing prose, not bullets. 主体 + 动作 take about half the length; then one sentence each for \
+环境, 风格, 镜头, 声音.
+- 主体 must be pinned down by colour, material, garment cut and identifying features — there are \
+no reference images in this mode. 漂亮、高级、电影感十足 carry no information and are forbidden.
+- 动作 must carry its physical consequence：重心转移、头发摆动、衣料起伏、配饰晃动、与地面的接触。\
+没有动作描写的主体在生成视频里会变成冻住的假人。
+  **动作写在最前面** —— 画面是时间的流动不是一张照片：先写这个镜头里发生了什么、怎么发展，\
+再补环境与外观，且只补动作需要的那点。样本帧之间的动作要自己推断出来写进去。
+- 镜头：把景别与运镜写成连续推进，例如「以全景开场，随后缓慢推轨至中近景，浅景深」。全片不切镜就写\
+「全片不切镜」；有切镜则写明镜头数，并在末尾给节拍图，覆盖观察报告里的每一个镜头、不留空隙不重叠，\
+例如「全片四个镜头，节拍为 0–2.5 秒、2.5–5 秒、5–7.5 秒、7.5–10 秒」。
+- 声音：环境声、动作声、音乐、台词，用分号分隔。无台词则以「无对白」结尾。配乐描述放在最后。
+- 报告里出现字幕、文字、logo、水印时，在末尾单独加负面指令：「不要出现字幕、文字、水印」。
+- 不写时长与画幅 —— 那是独立参数。
+- 台词与歌词保留原语言，就地引用。说话人出镜时，在 动作 里写清嘴部运动。
+- 不以收尾或结束性的句子结尾。
+"""
 
 
 _PASS2_GENERIC = """{common}
 
-TARGET MODE — a neutral, tool-agnostic storyboard prompt sheet. Write in \
-{language_instruction} using this structure:
+TARGET MODE — a neutral, tool-agnostic storyboard prompt sheet. Write in {language_instruction} \
+using this structure:
 
 【整体风格】one paragraph: medium, genre, grade, palette, lighting logic, aspect feel, pacing.
 
-【镜头分镜】
-For each shot, one block:
+【镜头分镜】one block per shot:
 镜头 N｜MM:SS.mmm–MM:SS.mmm
   景别 / 角度：
   运镜：
-  画面内容：**先写动作**（这个镜头里发生了什么、怎么发展），再写主体、环境、光线
+  画面内容：**先写动作**（这个镜头里发生了什么、怎么发展），再补主体、环境、光线
   台词 / 人声：exact words in original language, or 无
   音效：
   转场：
 
 【声音设计】ambience, action sound, and audience-only score, described separately.
 
-【负面提示词】a comma-separated list of things that must not appear, derived from the \
-observation report (text overlays, watermarks, unwanted artefacts, identity drift, etc.).
+【负面提示词】a comma-separated list of what must not appear, derived from the observation \
+report (text overlays, watermarks, unwanted artefacts, identity drift).
 
-Do not add a closing or summary section after the negative prompt."""
+Do not add a closing or summary section after the negative prompt.
+"""
 
 
 def build_compress_system(limit: int) -> str:
