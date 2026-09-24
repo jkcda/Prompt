@@ -1206,16 +1206,45 @@ uvicorn app.main:app --reload
 
 单机自用定位，没有鉴权。**对外暴露前先加认证**（见「已知限制」）。
 
-### 1. 拉代码
+两种方式。**推荐 Docker** —— 它把「装 Python 依赖、装 ffmpeg、构建前端」三步
+都封在镜像里，而且**不需要把仓库那 155MB 的二进制拉下来**
+（`.dockerignore` 排掉了 Windows 那份，构建上下文只有几十 MB）。
+
+### 方式一：Docker（推荐）
+
+```bash
+git clone --depth 1 <repo> && cd <repo>   # --depth 1：不要历史，快很多
+cp backend/.env.example backend/.env      # 填 VLM_API_KEY / VLM_BASE_URL / VLM_MODEL
+docker compose up -d --build
+docker compose logs -f                    # 看启动日志
+```
+
+访问 `http://<服务器IP>:8000`。
+
+**数据落在宿主的 `./data/`**（compose 里挂了卷），重建容器不会丢任务历史。
+但要注意**权限**：容器以 uid 1000 运行，如果宿主目录属主不是它，
+启动后上传会失败 —— 先 `sudo chown -R 1000:1000 ./data`。
+
+镜像里的 ffmpeg 用的是**仓库自带那份**（`backend/vendor/ffmpeg/ffmpeg`，6.1.1），
+不是 apt 装的 —— 这样版本可控，和本地开发行为一致。Dockerfile 里有一句
+`chmod 0755` 是必需的：Windows 工作区里这个文件的可执行位会丢，
+不补上的话 ffmpeg 调不起来。
+
+资源限制在 `docker-compose.yml` 里默认是 `cpus: 3.0` / `mem_limit: 3g`
+（按 4 核机器留一个核给系统）。按自己机器改。
+
+### 方式二：直接跑 Python
+
+#### 1. 拉代码
 
 ```bash
 git clone <repo> && cd <repo>
 ```
 
 ffmpeg 跟着仓库来，不用另装。注意仓库里带了**两个平台**的二进制（共 155 MB），
-克隆会比一般项目慢一些。
+克隆会比一般项目慢一些 —— 或者用 `git clone --depth 1` 只要最新版本。
 
-### 2. 后端
+#### 2. 后端
 
 ```bash
 cd backend
@@ -1249,7 +1278,7 @@ ASR_MODEL=FunAudioLLM/SenseVoiceSmall
 > **服务器上不需要任何模型权重。** 语音识别走线上 API，
 > ffmpeg 是仓库自带的静态二进制 —— `git clone` + `pip install -e .` 就够了。
 
-### 3. 前端
+#### 3. 前端
 
 ```bash
 cd frontend
@@ -1259,7 +1288,7 @@ npm run build        # 产物在 frontend/dist，后端会自动托管
 
 后端启动时会挂载 `frontend/dist`，所以**不用单独跑前端服务**。
 
-### 4. 起服务
+#### 4. 起服务
 
 ```bash
 cd backend
@@ -1270,7 +1299,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1
 > 多 worker 会导致「提交任务的进程」和「查询进度的进程」不是同一个，
 > 进度会查不到。
 
-### 5. 反向代理（可选）
+#### 5. 反向代理（可选）
 
 用 nginx / caddy 套一层 TLS。SSE 进度推送需要关掉缓冲：
 

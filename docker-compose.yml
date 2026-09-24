@@ -1,0 +1,43 @@
+# 视频提示词反推 —— Docker 部署
+#
+#   cp backend/.env.example backend/.env   # 填 VLM_API_KEY 等
+#   docker compose up -d --build
+#   docker compose logs -f                 # 看启动日志
+#
+# 起来后访问 http://<服务器IP>:8000
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: video-prompt-reverse:latest
+    container_name: video-prompt-reverse
+    restart: unless-stopped
+
+    ports:
+      - "8000:8000"
+
+    # 密钥从 backend/.env 注入（pydantic-settings 读环境变量，优先级高于文件）。
+    # 先 `cp backend/.env.example backend/.env` 再起，否则 compose 会因为文件不存在报错。
+    env_file:
+      - backend/.env
+
+    volumes:
+      # 上传的视频、抽帧图片、SQLite 库都在这里，**必须挂出来** ——
+      # 不然重建容器就把任务历史全丢了。
+      - ./data:/app/data
+      # 反向代理要加 TLS / 限流时改这里的端口映射就行，不用动镜像。
+
+    # ⚠️ 反推是 CPU 密集的（ffmpeg 抽帧 + 镜头检测），别让它把宿主机吃满。
+    # 4 核的机器留一个核给系统，2G 内存足够（走线上 ASR 的话不吃内存）。
+    # 用 deploy.resources 的写法需要 swarm；这里是 compose 直接支持的简写。
+    cpus: 3.0
+    mem_limit: 3g
+
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=4).status == 200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3

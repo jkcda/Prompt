@@ -1,0 +1,53 @@
+# Docker 构建上下文。目标是**尽量小** —— 仓库里那两个 ffmpeg 二进制
+# 加起来 155MB，其中 Windows 那份在 Linux 镜像里完全用不上。
+#
+# 构建时真正需要的只有：
+#   backend/{pyproject.toml,README.md,app/}、backend/vendor/ffmpeg/ffmpeg
+#   frontend/{package*.json,src/,index.html,配置文件,tsconfig 等}
+
+# ---- 版本库与编辑器 ----
+.git
+.gitignore
+.github
+.vscode
+.idea
+*.swp
+
+# ---- Windows 专用的 ffmpeg（镜像里用的是 Linux 那份）----
+# 这一条就省掉 79MB 的构建上下文
+backend/vendor/ffmpeg/ffmpeg.exe
+
+# ---- 本地语音转写模型（可选，且单个 460MB）----
+# 走线上 ASR API 时完全用不到；要用本地兜底就在镜像里单独挂载。
+backend/vendor/whisper
+
+# ---- 运行时数据 ----
+data
+backend/runtime
+backend/prompts-dump
+*.db
+*.sqlite3
+
+# ---- 密钥 ----
+# .env 通过 docker compose 的 env_file 注入，不进构建上下文
+backend/.env
+.env
+.env.*
+
+# ---- Python 产物 ----
+**/__pycache__
+**/*.py[cod]
+**/.pytest_cache
+**/.ruff_cache
+**/*.egg-info
+.venv
+venv
+
+# ---- 前端产物 ----
+# node_modules 在镜像里重装（保证和 lock 文件一致）
+frontend/node_modules
+frontend/dist
+
+# ---- 文档与脚本 ----
+# 镜像里不需要（后端只要 backend/README.md，它是 pyproject 声明的 readme）
+scripts
