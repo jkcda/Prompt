@@ -31,6 +31,13 @@ prompts-dump/
 *.sqlite
 *.sqlite3
 
+# ---------------- 第三方二进制与模型 ----------------
+# ffmpeg 体积可控（两个平台共 156MB），进仓库是为了部署可复现。
+# 但语音转写的模型权重单个 460MB，**会被远端仓库的大文件限制直接拒掉**，
+# 所以不进 git。它放在 backend/vendor/whisper/ 下，打包 / rsync / docker COPY
+# 会照常带上；纯 git 部署的话在服务器上跑一次 scripts/fetch-whisper-model.py。
+backend/vendor/whisper/
+
 # ---------------- Node / 前端 ----------------
 node_modules/
 frontend/dist/

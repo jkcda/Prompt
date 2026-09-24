@@ -16,7 +16,7 @@ from pathlib import Path
 
 import httpx
 
-from ..core.config import TMP_DIR, get_settings
+from ..core.config import TMP_DIR, VENDOR_WHISPER_DIR, get_settings
 from ..schemas import AudioReport, TranscriptSegment
 from . import audio_features
 from . import ffmpeg as ff
@@ -39,23 +39,76 @@ def _local_whisper_available() -> bool:
         return False
 
 
+# 模型常驻内存，避免每次反推都重新加载（加载一次要 2~8 秒）。
+# 键里带上线程数：改了配置要重新加载，不能复用旧实例。
+_MODEL_CACHE: dict[str, object] = {}
+
+
+def resolve_model_source() -> tuple[str, str]:
+    """决定用哪个 whisper 模型，返回 (来源, 人类可读的说明)。
+
+    优先级：
+      1. `ASR_MODEL_PATH` 显式指定的目录
+      2. **仓库自带** `backend/vendor/whisper/<规格>/`
+      3. 按规格名交给 HuggingFace（首次会下载约 460MB）
+
+    为什么要自带：服务器常常不方便联网，而且首次下载会让第一次反推卡住几分钟。
+    模型文件不进 git（460MB 会被远端的大文件限制拒掉），但放进 vendor 就能
+    跟着打包 / rsync / docker COPY 一起走。见 `scripts/fetch-whisper-model.py`。
+    """
+    s = get_settings()
+
+    if s.asr_model_path:
+        p = Path(s.asr_model_path)
+        if (p / "model.bin").is_file():
+            return str(p), f"配置指定的模型目录：{p}"
+        log.warning("ASR_MODEL_PATH=%s 下没有 model.bin，忽略这项配置", p)
+
+    name = (s.asr_whisper_model or "small").strip() or "small"
+    direct = VENDOR_WHISPER_DIR / name
+    if (direct / "model.bin").is_file():
+        return str(direct), f"仓库自带模型：{direct}"
+
+    # 兼容「直接解压进 vendor/whisper/」的布局（只有一层子目录）
+    if VENDOR_WHISPER_DIR.is_dir():
+        for sub in sorted(VENDOR_WHISPER_DIR.iterdir()):
+            if sub.is_dir() and (sub / "model.bin").is_file():
+                return str(sub), f"仓库自带模型：{sub}"
+
+    return name, f"按规格名 {name} 从 HuggingFace 取（首次会下载约 460MB）"
+
+
+def _load_whisper(source: str, threads: int):
+    """加载并缓存模型。"""
+    key = f"{source}|{threads}"
+    model = _MODEL_CACHE.get(key)
+    if model is None:
+        from faster_whisper import WhisperModel  # type: ignore
+
+        model = WhisperModel(source, device="cpu", compute_type="int8", cpu_threads=threads)
+        _MODEL_CACHE[key] = model
+    return model
+
+
 def _transcribe_local(audio_path: Path) -> tuple[str, list[TranscriptSegment], str]:
     """本地 faster-whisper 转写。返回 (全文, 分句, 语言)。
 
     **不指定 language**，让模型自己检测 —— 指定成 zh/en 会把日语歌词
     硬翻成中文，而我们要的是**保留原语言**。
 
-    模型权重从 HuggingFace 下载，国内直连很慢或直接失败，所以默认把
-    HF_ENDPOINT 指向镜像站（可用 ASR_HF_ENDPOINT 覆盖，或自己先设好环境变量）。
+    模型优先用仓库自带的（`backend/vendor/whisper/`），找不到才去
+    HuggingFace 下载；下载源默认走国内镜像。
     """
     import os
 
     if not os.environ.get("HF_ENDPOINT"):
         os.environ["HF_ENDPOINT"] = get_settings().asr_hf_endpoint or "https://hf-mirror.com"
 
-    from faster_whisper import WhisperModel  # type: ignore
+    source, why = resolve_model_source()
+    threads = get_settings().asr_cpu_threads or max(1, min(4, os.cpu_count() or 4))
+    log.info("语音转写模型：%s（线程 %d）", why, threads)
 
-    model = WhisperModel("small", device="cpu", compute_type="int8")
+    model = _load_whisper(source, threads)
     segments, info = model.transcribe(str(audio_path), vad_filter=True)
     out: list[TranscriptSegment] = []
     for seg in segments:
@@ -96,41 +149,55 @@ def _slice_audio(audio_path: Path, duration: float) -> list[tuple[float, Path]]:
     return out
 
 
-def _transcribe_api(audio_path: Path, duration: float) -> tuple[str, list[TranscriptSegment], str]:
+def _transcribe_api(audio_path: Path, duration: float) -> tuple[str, list[TranscriptSegment], str, str]:
+    """调 OpenAI 兼容的 `/audio/transcriptions`。返回 (全文, 分句, 语言, 说明)。
+
+    ⚠️ **不同服务商对 `response_format` 的支持不一样**，这是最容易踩的坑：
+      * OpenAI / Groq 支持 `verbose_json`，能拿到分句时间戳
+      * 硅基流动的 `SenseVoiceSmall` / `TeleSpeechASR` 只保证 `json`
+
+    时间戳决定歌词能不能对齐到镜头，所以先要 `verbose_json`，
+    拿不到就降级成 `json`（只有整段文本，交给 Pass1 按语义对齐），
+    并把实际用的格式写进备注 —— 否则「歌词对齐不准」会变成一个查不到原因的现象。
+    """
     s = get_settings()
     base = s.asr_base_url.rstrip("/")
     url = f"{base}/audio/transcriptions" if not base.endswith("/audio/transcriptions") else base
     key = s.asr_api_key or s.vlm_api_key
 
-    all_segments: list[TranscriptSegment] = []
-    language = ""
     pieces = _slice_audio(audio_path, duration)
+    all_segments: list[TranscriptSegment] = []
+    plain_parts: list[str] = []
+    language = ""
+    used_format = ""
 
     with httpx.Client(timeout=300.0) as client:
         for offset, piece in pieces:
-            try:
-                with piece.open("rb") as fh:
-                    resp = client.post(
-                        url,
-                        headers={"Authorization": f"Bearer {key}"},
-                        files={"file": (piece.name, fh, "audio/wav")},
-                        data={
-                            "model": s.asr_model,
-                            "response_format": "verbose_json",
-                            "temperature": "0",
-                        },
-                    )
-                if resp.status_code >= 400:
-                    log.warning("ASR 分片失败 %s: %s", resp.status_code, resp.text[:200])
-                    continue
-                payload = resp.json()
-            except Exception as exc:  # noqa: BLE001
-                log.warning("ASR 请求异常: %s", exc)
+            payload = None
+            # 先试带时间戳的，再退到纯文本
+            for fmt in ("verbose_json", "json"):
+                try:
+                    with piece.open("rb") as fh:
+                        resp = client.post(
+                            url,
+                            headers={"Authorization": f"Bearer {key}"},
+                            files={"file": (piece.name, fh, "audio/wav")},
+                            data={"model": s.asr_model, "response_format": fmt},
+                        )
+                    if resp.status_code >= 400:
+                        log.warning("ASR(%s) 分片失败 %s: %s", fmt, resp.status_code, resp.text[:200])
+                        continue
+                    payload = resp.json()
+                    used_format = used_format or fmt
+                    break
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("ASR(%s) 请求异常: %s", fmt, exc)
+            if payload is None:
                 continue
 
-            # verbose_json 会带检测到的语言；拿第一个分片的就够
             language = language or str(payload.get("language") or "")
-            for seg in payload.get("segments") or []:
+            segments = payload.get("segments") or []
+            for seg in segments:
                 text = (seg.get("text") or "").strip()
                 if not text:
                     continue
@@ -139,19 +206,28 @@ def _transcribe_api(audio_path: Path, duration: float) -> tuple[str, list[Transc
                     end=float(seg.get("end") or 0.0) + offset,
                     text=text,
                 ))
-            if not payload.get("segments") and payload.get("text"):
-                all_segments.append(TranscriptSegment(
-                    start=offset, end=offset + SLICE_SECONDS,
-                    text=str(payload["text"]).strip(),
-                ))
+            if not segments:
+                text = str(payload.get("text") or "").strip()
+                if text:
+                    plain_parts.append(text)
 
     # 清理分片临时文件
     for _off, piece in pieces:
         if piece != audio_path:
             ff.cleanup(piece)
 
-    full = " ".join(s.text for s in all_segments)
-    return full, all_segments, language
+    if all_segments:
+        full = " ".join(s.text for s in all_segments)
+    else:
+        full = " ".join(plain_parts)
+
+    if not used_format:
+        note = "API 转写全部失败"
+    elif used_format == "verbose_json":
+        note = "API 转写（带时间戳）"
+    else:
+        note = "API 转写（服务商不支持 verbose_json，无时间戳，歌词按语义对齐）"
+    return full, all_segments, language, note
 
 
 # ---------------------------------------------------------------------------
@@ -226,23 +302,23 @@ def analyze_audio(video_path: str | Path, enable_asr: bool = True) -> AudioRepor
         else:
             report.vocal_isolation = "未做人声分离（VOCAL_ISOLATION 关闭）"
 
-        if _local_whisper_available():
+        # **线上 API 优先。** 本地模型要 460MB 权重 + 约 1.2GB 内存，
+        # 而免费的线上 ASR 额度足够（硅基流动 / Groq 都有免费档），部署轻得多。
+        # 本地 faster-whisper 只在装了包时作为兜底，没装就跳过。
+        if s.asr_enabled:
+            (
+                report.transcript,
+                report.segments,
+                report.language,
+                api_note,
+            ) = _transcribe_api(asr_input, info.duration)
+            report.note = f"{report.note}；{api_note}".strip("；")
+        elif _local_whisper_available():
             try:
                 report.transcript, report.segments, report.language = _transcribe_local(asr_input)
                 report.note = f"{report.note}；本地 faster-whisper 转写".strip("；")
-                return report
             except Exception as exc:  # noqa: BLE001
-                log.warning("本地 whisper 失败，回退 API: %s", exc)
-
-        # 只有 ASR 真的配了才去调。原来这里写的是 `or s.vlm_api_key`，
-        # 结果只要配了视觉模型的 key 就会拿它去调 ASR —— 而 ASR_BASE_URL
-        # 是空的，请求直接报 "URL is missing an 'http://' protocol"。
-        # 视觉模型的 key 跟语音转写是两回事，不能互相顶替。
-        if s.asr_enabled:
-            report.transcript, report.segments, report.language = _transcribe_api(
-                asr_input, info.duration
-            )
-            report.note = f"{report.note}；{'API 转写' if report.transcript else 'API 转写返回空结果'}"
+                report.note = f"{report.note}；本地 whisper 失败：{exc}".strip("；")
         else:
             report.note = (
                 f"{report.note}；未配置 ASR（ASR_API_KEY / ASR_BASE_URL 为空），已跳过语音转写"

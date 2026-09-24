@@ -24,7 +24,9 @@ dependencies = [
 [project.optional-dependencies]
 # 拼联络表预览图（缺省不影响主流程）
 images = ["Pillow>=10.0"]
-# 本地语音转写（不装则走 ASR API 或跳过音频维度）
+# 本地语音转写（**可选兜底**）。推荐直接用线上 ASR API —— 免费额度够用
+# （硅基流动 / Groq），不用下 460MB 权重也不用占 1.2GB 内存。
+# 装了它、且没配 ASR_BASE_URL / ASR_API_KEY 时才会走到本地。
 local-asr = ["faster-whisper>=1.0.0"]
 dev = [
     "pytest>=8.0",

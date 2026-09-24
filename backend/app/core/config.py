@@ -25,6 +25,9 @@ RUNTIME_DIR = BACKEND_DIR / "runtime"
 # 也避免服务器上的版本差异影响行为。
 VENDOR_DIR = BACKEND_DIR / "vendor"
 VENDOR_FFMPEG_DIR = VENDOR_DIR / "ffmpeg"
+# 本地语音转写的模型权重（faster-whisper）。**不进 git**（单文件 460MB，
+# 会被远端仓库的大文件限制拒掉），但放在这里能跟着打包/rsync/docker 一起走。
+VENDOR_WHISPER_DIR = VENDOR_DIR / "whisper"
 FRONTEND_DIR = PROJECT_ROOT / "frontend"
 
 for _d in (DATA_DIR, UPLOAD_DIR, FRAME_DIR, TMP_DIR, RUNTIME_DIR):
@@ -85,6 +88,21 @@ class Settings(BaseSettings):
     asr_api_key: str = ""
     asr_base_url: str = ""
     asr_model: str = "whisper-1"
+    # 本地 whisper 用哪个规格。可选 tiny / base / small / medium。
+    #
+    # **4 核 4G 的服务器建议 small 或 base**：small 的 int8 权重约 460MB，
+    # 推理峰值内存约 1.2GB；base 只有 74MB / 约 300MB，但歌词准确率明显下降
+    # （尤其是唱词）。内存吃紧就换 base。
+    asr_whisper_model: str = "small"
+    # 显式指定模型目录。留空则自动找 `backend/vendor/whisper/<规格>/`，
+    # 再找不到才按规格名去 HuggingFace 下载（首次约 460MB）。
+    asr_model_path: str = ""
+    # whisper 用几个线程。0 = 自动，取 min(4, CPU 核数)。
+    #
+    # ⚠️ 别占满。管线里镜头检测和抽帧也要 CPU，而它们和音频分析是**并行**跑的
+    # （`asyncio.create_task` 两条线），抢起来两边都慢。
+    # 4 核机器留 1~2 个核给 ffmpeg 更划算。
+    asr_cpu_threads: int = 0
     # 本地 faster-whisper 的模型权重从 HuggingFace 下载，国内直连很慢。
     # 留空则用 https://hf-mirror.com（国内镜像）；海外部署可以显式写
     # https://huggingface.co。也可以自己在环境变量里设 HF_ENDPOINT。

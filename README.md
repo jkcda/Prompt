@@ -723,48 +723,79 @@ Pass1 本身更快（26s vs 46s），但多出来的镜头让 Pass2 输出变长
 | `CHUNK_SECONDS` | `60` | 每块目标时长 |
 | `MAX_DURATION_SECONDS` | `1800` | 超长视频截断，`0` 表示不限制 |
 
-### 语音转写（可选）
+### 语音转写
 
-| 变量 | 说明 |
+**推荐接线上 API**，免费额度就够用，不用下模型、不占内存、部署轻。
+
+| 服务 | 免费额度 | 配置 |
+|---|---|---|
+| **硅基流动**（国内可直连） | `FunAudioLLM/SenseVoiceSmall`、`TeleAI/TeleSpeechASR` 标为免费 | `ASR_BASE_URL=https://api.siliconflow.cn/v1`<br>`ASR_MODEL=FunAudioLLM/SenseVoiceSmall` |
+| **Groq** | `whisper-large-v3-turbo`，Free Plan 2000 次/日 | `ASR_BASE_URL=https://api.groq.com/openai/v1`<br>`ASR_MODEL=whisper-large-v3-turbo` |
+
+⚠️ 硅基流动的域名是 **`.cn`**，旧的英文文档里写的 `.com` 会把正确的 Key 打成
+`401 Token is invalid`。注册需要先实名。
+
+只要 `ASR_BASE_URL` + `ASR_API_KEY` 都填了就走线上，**不需要装任何本地包**。
+
+| 其他变量 | 说明 |
 |---|---|
-| `ASR_BASE_URL` / `ASR_API_KEY` / `ASR_MODEL` | 任意 OpenAI 兼容的 `/audio/transcriptions` |
-| `ASR_HF_ENDPOINT` | 本地 whisper 的权重下载源，留空用 `https://hf-mirror.com` |
+| `ASR_MODEL_PATH` | 本地模型目录（仅在用本地兜底时相关） |
+| `ASR_WHISPER_MODEL` | 本地模型规格：`tiny` / `base` / `small` / `medium` |
+| `ASR_CPU_THREADS` | 本地 whisper 线程数，0 = 自动 |
 | `VOCAL_ISOLATION` | 转写前先做人声频段分离（默认开） |
 
-留空则跳过语音识别。也可以装本地 faster-whisper：
+#### 不同服务商的 `response_format` 支持不一样
 
-```bash
-pip install -e ".[local-asr]"
-```
+代码先要 `verbose_json`（带分句时间戳，歌词能对齐到镜头），
+**拿不到就自动降级成 `json`**（只有整段文本，交给 Pass1 按语义对齐），
+并把实际用的格式写进备注 —— 否则「歌词对不上镜头」会变成一个查不到原因的现象。
 
-代码会优先走本地，**不需要配 `ASR_*`**。
-
-**但要反推有台词/唱歌的视频，ASR 基本是必需的** —— 画面帧推不出逐字台词和口型，
-而 H3 的 `<d>[Language] ...</d>` 要求原文逐字。没有 ASR 时这些字段只能是 `N/A`。
+实测：OpenAI / Groq 支持 `verbose_json`；硅基流动的 SenseVoice 系列只保证 `json`。
 
 #### 为什么转写前要滤掉低频和高频
 
 MV / 现场录音里鼓和贝斯能量很强，whisper 会被伴奏带偏，把歌词听成别的东西。
 `isolate_vocals()` 先做带通（滤掉 180Hz 以下和 4kHz 以上）再送转写，
-人声清晰度明显提升，而且零额外依赖。
+人声清晰度明显提升，而且零额外依赖（纯 ffmpeg 滤镜）。
 
 装了 Demucs 会自动优先用它（真正的音源分离，效果更好），但它要 torch（2GB+），
 所以只在已经装好时才用。
 
-#### ⚠️ 首次使用先预热一次
+#### 模型不指定语言
 
-模型权重约 460MB，第一次运行时会从 HuggingFace 下载。**建议单独先跑一次预热**：
+让它自己检测 —— 指定成 `zh` 会把日语歌词硬翻成中文，而我们要的是**保留原语言**。
+实测日语素材自动检出 `ja`，歌词原样保留。
+
+#### 本地模型（可选兜底）
+
+不配 `ASR_*` 又想离线跑的话，装本地 faster-whisper：
 
 ```bash
-python -c "from faster_whisper import WhisperModel; WhisperModel('small', device='cpu', compute_type='int8')"
+pip install -e ".[local-asr]"
+python scripts/fetch-whisper-model.py     # 下载到 backend/vendor/whisper/
 ```
 
-原因：下载过程会创建大量临时文件，某些带「批量删除保护」的运行环境
-（比如 WorkBuddy 的沙箱）会在清理这些临时文件时中断进程。预热把权重放进缓存后，
-正式运行时就不会再有这个下载动作。**生产服务器上一般没有这层保护，可以直接跑。**
+优先级是 **线上 API → 本地模型 → 跳过**。
 
-模型不指定 `language`，让它自己检测 —— 指定成 `zh` 会把日语歌词硬翻成中文，
-而我们要的是**保留原语言**。
+模型权重单个 460MB，**不进 git**（会被远端仓库的大文件限制拒掉），但放在
+`backend/vendor/whisper/` 里能跟着打包走：
+
+| 部署方式 | 做法 |
+|---|---|
+| rsync / tar / docker COPY | 把 `backend/vendor/` 一起带上，服务器不用联网 |
+| 纯 git | 服务器上跑一次 `python scripts/fetch-whisper-model.py` |
+
+规格按服务器内存选（int8 推理峰值，含模型常驻）：
+
+| 规格 | 磁盘 | 内存 | 适合 |
+|---|---|---|---|
+| `tiny` | 75 MB | ~250 MB | 只求「有没有人在唱」 |
+| `base` | 145 MB | ~350 MB | **4 核 4G 求稳** |
+| `small` | 480 MB | ~1.2 GB | 准确率与内存的平衡点 |
+| `medium` | 1.5 GB | ~3 GB | 4G 机器不要碰 |
+
+4 核 4G 跑 `small`：15 秒音频转写约 10~20 秒，加载一次性 3~8 秒（之后常驻）。
+**但要串行**：`ASR_CPU_THREADS=2` 留核给 ffmpeg，别同时接多个反推任务。
 
 ### 音频维度：三条路，能力不同
 
