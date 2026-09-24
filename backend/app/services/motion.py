@@ -100,7 +100,25 @@ class ShotMotion:
     #   噪声 → 方向随机，一致性接近 0.5
     # 实测一段静止画面会测出 2 px/s 的假位移，只看大小根本分不出来。
     direction_consistency: float = 0.0
+    # 帧间**显著变化**的像素占比（0~1），以及变化区重心位移。
+    #
+    # 为什么单独测它：单帧里「走路的人」和「站着的人」几乎一样 ——
+    # 主体位移是静止图像唯一表达不出来的东西。但两帧一比就有了：
+    # 相机不动时，画面里显著变化的那些像素就是主体在动。
+    # 实测模型会把走动的人写成 "she stands"，就是因为只给了它单帧印象。
+    subject_change: float = 0.0
+    subject_dx: float = 0.0
+    subject_dy: float = 0.0
     error: str = ""               # 抽取/分析失败的原因（不抛异常，交给调用方决定）
+
+    @property
+    def subject_moving(self) -> bool:
+        """主体是否在动（**与相机无关**）。
+
+        相机静止时，画面里显著变化的像素就是主体。阈值取 2%：
+        实测走动/转身会带来 5%~20% 的显著变化，而压缩噪声在 1% 以下。
+        """
+        return self.subject_change >= 0.02
 
     # ---------- 判定 ----------
 
@@ -286,6 +304,49 @@ class _PairResult:
     vertical_divergence: float
     mae: float
     texture: float
+    # 帧间**显著变化**的像素占比（0~1）。
+    #
+    # 为什么需要它：单帧里「走路的人」和「站着的人」几乎一样 —— 主体位移是
+    # 静止图像唯一表达不出来的东西。但两帧一比就有了：相机不动时，画面里
+    # 变化的那些像素就是主体在动。实测模型会把走动的人写成 "she stands"，
+    # 就是因为只给了它单帧印象。
+    #
+    # 用阈值化差异（只算明显变化的像素）而不是整体 MAE，否则光照渐变和
+    # 压缩噪声会把它抬高。
+    change_ratio: float = 0.0
+    # 变化区域的加权重心**位置**（归一化到画面宽高，0.5 = 画面中心）。
+    #
+    # ⚠️ 这是位置不是位移。位移要拿相邻帧对的这个值相减才算得出来
+    # （见 `analyze_shot_motion`）。踩过：一开始把它当位移直接报出去，
+    # 结果每个镜头都显示「向右移动 0.48」—— 其实那只是「变化发生在画面中间」。
+    change_cx: float = 0.5
+    change_cy: float = 0.5
+
+
+def _change_stats(a: bytes, b: bytes, w: int, h: int, threshold: int = 18) -> tuple[float, float, float]:
+    """帧间显著变化：占比 + 变化区重心位置。
+
+    扣掉相机位移这一步由调用方负责（相机静止时直接用原始帧对即可）。
+    """
+    total = 0
+    sx = sy = 0.0
+    weight = 0.0
+    n = w * h
+    for i in range(n):
+        d = a[i] - b[i]
+        if d < 0:
+            d = -d
+        if d > threshold:
+            total += 1
+            x = i % w
+            y = i // w
+            sx += x * d
+            sy += y * d
+            weight += d
+    if weight <= 0 or n == 0:
+        return total / n, 0.5, 0.5
+    # 重心：变化剧烈的像素权重更大
+    return total / n, (sx / weight) / w, (sy / weight) / h
 
 
 def _measure_pair(a: bytes, b: bytes, w: int, h: int) -> _PairResult:
@@ -316,13 +377,26 @@ def _measure_pair(a: bytes, b: bytes, w: int, h: int) -> _PairResult:
     top = (vs[0] + vs[1]) / 2.0
     bottom = (vs[2] + vs[3]) / 2.0
 
+    med_u, med_v = _median(us), _median(vs)
+
+    # 帧间显著变化。相机在动时先按全局位移对齐，否则差异图里混着相机运动，
+    # 会把「相机移动」误报成「主体在动」。
+    if abs(med_u) > 0.5 or abs(med_v) > 0.5:
+        aligned = _warp(b, w, h, med_u, med_v)
+    else:
+        aligned = b
+    change_ratio, change_cx, change_cy = _change_stats(a, aligned, w, h)
+
     return _PairResult(
-        u=_median(us),
-        v=_median(vs),
+        u=med_u,
+        v=med_v,
         divergence=right - left,
         vertical_divergence=bottom - top,
         mae=_median([r[2] for r in res]),
         texture=_median([r[3] for r in res]),
+        change_ratio=change_ratio,
+        change_cx=change_cx,
+        change_cy=change_cy,
     )
 
 
@@ -353,6 +427,9 @@ def analyze_shot_motion(src: str, start: float, end: float, shot_index: int = 0)
     vdivs: list[float] = []
     maes: list[float] = []
     textures: list[float] = []
+    changes: list[float] = []
+    cxs: list[float] = []
+    cys: list[float] = []
 
     for i in range(len(frames) - 1):
         p = _measure_pair(frames[i], frames[i + 1], W, H)
@@ -362,6 +439,9 @@ def analyze_shot_motion(src: str, start: float, end: float, shot_index: int = 0)
         vdivs.append(p.vertical_divergence)
         maes.append(p.mae)
         textures.append(p.texture)
+        changes.append(p.change_ratio)
+        cxs.append(p.change_cx)
+        cys.append(p.change_cy)
 
     result.samples = len(maes)
     result.fps = round(fps, 2)
@@ -375,6 +455,12 @@ def analyze_shot_motion(src: str, start: float, end: float, shot_index: int = 0)
     result.amplitude = round(_median(maes) / 255.0 * 100.0, 2)
     result.texture = round(_median(textures), 2)
     result.direction_consistency = round(_direction_consistency(us, vs), 3)
+    result.subject_change = round(_median(changes), 4)
+    # 变化区重心的**相邻帧差**才是位移（重心本身只是位置）
+    dxs = [cxs[i + 1] - cxs[i] for i in range(len(cxs) - 1)]
+    dys = [cys[i + 1] - cys[i] for i in range(len(cys) - 1)]
+    result.subject_dx = round(_median(dxs), 4)
+    result.subject_dy = round(_median(dys), 4)
     return result
 
 
@@ -481,6 +567,23 @@ def describe_motion(m: ShotMotion, index: int | None = None) -> str:
         f"(positive = content spreading outward = camera moving closer)",
         f"frame-to-frame brightness change {m.amplitude:.2f}%",
     ]
+    # 主体是否在动 —— 这是单帧**看不出来**、只有对比帧才知道的信息。
+    # 必须显式说出来：实测模型会默认写 "she stands"，因为它从静态帧里
+    # 判断不出人在走路（走路的人和站着的人在单帧里几乎一样）。
+    if m.subject_moving:
+        parts.append(
+            f"SUBJECT MOVEMENT: {m.subject_change * 100:.1f}% of the frame changes between "
+            "consecutive frames even after compensating for camera motion — the subject is "
+            "genuinely moving (walking, turning, gesturing, shifting weight). "
+            "Do NOT describe it as standing still. "
+            f"(The change centre drifts {m.subject_dx:+.4f} right / {m.subject_dy:+.4f} down "
+            "per frame — that is a weak hint only; read the real direction from the frames.)"
+        )
+    else:
+        parts.append(
+            f"SUBJECT MOVEMENT: only {m.subject_change * 100:.1f}% of the frame changes between "
+            "frames — beyond the camera, very little is moving."
+        )
     if m.texture < 1.5:
         parts.append(
             f"WARNING: low image texture ({m.texture:.1f}) — the movement estimate is "

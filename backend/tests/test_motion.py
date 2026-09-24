@@ -42,6 +42,22 @@ def locked_off(ffmpeg_bin: str, tmp_path_factory) -> Path:
     return _make(ffmpeg_bin, d / "locked.mp4", "crop=400:225:x=100:y=50")
 
 
+@pytest.fixture(scope="module")
+def static_clip(ffmpeg_bin: str, tmp_path_factory) -> Path:
+    """**真正**静止的画面：彩条 + 固定取景，连主体都没有。
+
+    用来当反例 —— 如果阈值太低，压缩噪声会被算成运动，
+    模型就会把静止镜头写成有动作。
+    """
+    d = tmp_path_factory.mktemp("motion")
+    return _make(
+        ffmpeg_bin,
+        d / "static.mp4",
+        "scale=800:450,crop=400:225",
+        src="smptebars=size=640x480:rate=24:duration=3",
+    )
+
+
 def test_pan_is_detected(pan_right: Path):
     m = motion.analyze_shot_motion(str(pan_right), 0.2, 2.8)
 
@@ -106,3 +122,37 @@ def test_summarize_covers_every_shot(pan_right: Path):
 
     assert "shot 1" in text
     assert "shot 2" in text
+
+
+# ---------------------------------------------------------------------------
+# 主体运动（相机静止时画面里有没有东西在动）
+# ---------------------------------------------------------------------------
+
+def test_subject_change_is_measured_when_camera_is_static(locked_off: Path):
+    """相机静止时也要测出「画面里有东西在动」。
+
+    这是模型判断「主体是否在动」的唯一客观依据 —— 单帧里「走路的人」和
+    「站着的人」几乎一模一样，主体位移是静止图像唯一表达不出来的东西。
+    实测模型因此把走动的人写成 "she stands"，推出来的提示词人物原地踏步。
+    """
+    m = motion.analyze_shot_motion(str(locked_off), 0.2, 2.8)
+
+    assert m.camera_static is True, "这段素材相机是固定的"
+    # testsrc2 自带动态元素，所以一定有帧间变化
+    assert m.subject_change > 0.0, "相机静止但有东西在动，change 不该是 0"
+    # 说明里必须带上这一项，否则模型看不到
+    assert "SUBJECT MOVEMENT" in motion.describe_motion(m)
+
+
+def test_static_frame_reports_little_subject_movement(static_clip: Path):
+    """真正静止的画面不该报「主体在动」。
+
+    反例保护：如果阈值太低，压缩噪声也会被算成运动，
+    模型就会把静止镜头写成有动作。
+    """
+    m = motion.analyze_shot_motion(str(static_clip), 0.2, 2.8)
+
+    assert m.camera_static is True
+    assert m.subject_change < 0.02, f"纯色画面不该有明显变化：{m.subject_change}"
+    assert m.subject_moving is False
+    assert "very little is moving" in motion.describe_motion(m)

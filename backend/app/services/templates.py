@@ -133,6 +133,17 @@ failure to look, not a finding.
    * Movement that comes from the subject alone (the camera is locked off) is still `static` for \
 the camera — but then say so explicitly, e.g. "static camera, the movement comes entirely from the \
 performer". That is a real observation and it is useful.
+   * ⚠️ **A static camera does NOT mean a static subject.** Do not let the camera verdict leak into \
+your action descriptions. Compare the frames of the shot: if the subject's position changes between \
+them — further left, nearer the lens, higher in frame, larger or smaller — then the subject is \
+MOVING, and you must write the movement and its direction (walking across, stepping forward, \
+approaching, receding). Writing "she stands" / "he stands facing her" for a shot where the subject \
+actually walks is a **wrong observation**, and the generated video will show a person rooted to the \
+spot while the reference clearly moves.
+   * In any single frame a walking person and a standing person look almost identical — that is \
+precisely why subject displacement must be read ACROSS frames, never from one. Displacement is \
+the one thing a still cannot show. When a shot has only one usable frame, say the subject's \
+motion is uncertain rather than defaulting to "standing".
 5. Transcribe any on-screen text, captions, subtitles or logos VERBATIM into `on_screen_text`. \
 If a watermark or platform logo is present, note it. If there is none, write "none".
 6. Align the audio transcript to the shots by timestamp. Put spoken words or lyrics that fall \
