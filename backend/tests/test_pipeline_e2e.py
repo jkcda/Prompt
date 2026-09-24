@@ -454,3 +454,44 @@ def test_stats_plan_matches_actual_frames(mock_vlm_env, sample_video: Path):
     assert f"抽帧 {result.frames_used} 张" in plan_text, (
         f"说明里的帧数和实际不符：\n  {plan_text}\n  实际 {result.frames_used}"
     )
+
+
+# ---------------------------------------------------------------------------
+# 预览地址：框选了片段时要指向片段，而不是上传的原视频
+# ---------------------------------------------------------------------------
+
+def test_trimmed_job_points_preview_at_the_segment(mock_vlm_env, sample_video: Path):
+    """框选片段后，结果里要给出「实际分析的那段」的地址。
+
+    踩过：抽帧的时间戳是相对**片段**的（0.0s / 0.5s / 1.1s…），而前端预览
+    放的是上传的原视频 —— 点帧就会跳到原视频的对应位置，整条时间轴错位，
+    表现是「点哪一帧都跳到开头」。
+    """
+    mock_vlm.reset()
+    job = Job(
+        id="e2e-trim-url",
+        source="upload",
+        options=AnalyzeOptions(
+            format="h3", enable_asr=False, trim_start=1.0, trim_end=5.0
+        ),
+    )
+    result = pipeline.run_pipeline_sync(job, sample_video)
+
+    assert result.analyzed_video_url == f"/api/media/segment/{job.id}"
+    # 片段文件真的在 —— 前端要靠它播放
+    assert (ff.frame_dir_for(job.id) / "segment.mp4").is_file()
+    # 时间轴相对片段：第一个镜头从 0 附近开始
+    assert result.shots[0].start < 0.5
+
+
+def test_untrimmed_job_has_no_segment_url(mock_vlm_env, sample_video: Path):
+    """没截取片段时不给这个地址，前端回退到原视频 —— 两者本来就是同一个文件。"""
+    mock_vlm.reset()
+    job = Job(
+        id="e2e-no-trim",
+        source="upload",
+        options=AnalyzeOptions(format="h3", enable_asr=False),
+    )
+    result = pipeline.run_pipeline_sync(job, sample_video)
+
+    assert result.analyzed_video_url == ""

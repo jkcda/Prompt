@@ -71,6 +71,12 @@ class JobResult(BaseModel):
     shots: list[Shot] = Field(default_factory=list)
     frames_used: int = 0
     frame_urls: list[str] = Field(default_factory=list)
+    # 实际送去分析的那段视频。用户框选了片段时指向片段，否则为空。
+    #
+    # 为什么要单独给：抽帧的时间戳是相对**片段**的，预览如果放原视频，
+    # 点帧跳转就会整条错位（看起来像「点哪一帧都跳到开头」）。
+    # 前端应该优先用这个地址，而不是 `job.video_url`（那是上传的原视频）。
+    analyzed_video_url: str = ""
     chunks: int = 0
     stats: dict[str, Any] = Field(default_factory=dict)
 

@@ -10,6 +10,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 
+from ..core.config import FRAME_DIR
 from ..dependencies import StoreDep
 from ..schemas import Job, JobSummary
 from ..services import storage
@@ -59,7 +60,27 @@ async def get_job(job_id: str, jobs: StoreDep) -> Job:
     job = jobs.get(job_id)
     if not job:
         raise HTTPException(404, "任务不存在")
+    _backfill_segment_url(job)
     return job
+
+
+def _backfill_segment_url(job: Job) -> None:
+    """给早于 `analyzed_video_url` 字段的老任务补上片段地址。
+
+    不补的话，老任务的结果页会继续拿上传的原视频当预览 —— 抽帧时间戳是
+    相对片段的，点帧跳转整条错位（看起来像「点哪一帧都跳到开头」）。
+
+    只做只读推断：`stats.trim` 说明当时确实截取过，再确认片段文件还在，
+    两个条件都满足才补。**不写回数据库** —— 老结果保持原样，
+    免得一次读取就把历史数据改了。
+    """
+    r = job.result
+    if not r or r.analyzed_video_url:
+        return
+    if not r.stats.get("trim"):
+        return
+    if (FRAME_DIR / job.id / "segment.mp4").is_file():
+        r.analyzed_video_url = f"/api/media/segment/{job.id}"
 
 
 @router.post("/jobs/{job_id}/cancel", summary="取消任务")

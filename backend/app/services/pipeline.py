@@ -502,6 +502,13 @@ async def run_pipeline(job: Job, video_path: Path) -> JobResult:
         shots=shots,
         frames_used=total_frames,
         frame_urls=frame_urls,
+        # 有截取片段时，预览要用片段而不是原视频 ——
+        # 抽帧时间戳是相对片段的，放原视频会让点帧跳转整条错位。
+        analyzed_video_url=(
+            f"/api/media/segment/{job_id}"
+            if trim_start is not None and trim_end is not None
+            else ""
+        ),
         chunks=total_chunks,
         stats={
             "elapsed_sec": round(elapsed, 1),

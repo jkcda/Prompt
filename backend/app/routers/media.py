@@ -34,6 +34,23 @@ async def media_upload(filename: str, request: Request):
     return _range_response(path, request)
 
 
+@router.get("/segment/{job_id}", summary="反推实际分析的那段视频（支持 Range）")
+async def media_segment(job_id: str, request: Request):
+    """截取片段后，实际送去分析的那段素材。
+
+    为什么需要它：用户框选了片段时，抽帧的时间戳是**相对片段**的
+    （0.0s / 0.5s / 1.1s…），而预览如果还放原视频，点帧就会跳到原视频的
+    对应位置 —— 整条时间轴错位，看起来像「点哪一帧都跳到开头」。
+
+    片段文件在抽帧时就留在 `data/frames/<job_id>/segment.mp4` 了，
+    这里直接流式返回，不重新编码。
+    """
+    path = FRAME_DIR / Path(job_id).name / "segment.mp4"
+    if not path.is_file():
+        raise HTTPException(404, "该任务没有截取片段")
+    return _range_response(path, request)
+
+
 @router.get("/frame/{job_id}/{chunk}/{filename}", summary="抽帧图片")
 async def media_frame(job_id: str, chunk: str, filename: str) -> FileResponse:
     path = FRAME_DIR / Path(job_id).name / Path(chunk).name / Path(filename).name

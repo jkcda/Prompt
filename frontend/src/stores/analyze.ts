@@ -156,12 +156,25 @@ export const useAnalyzeStore = defineStore('analyze', () => {
   const stageMessage = computed(() => job.value?.progress.message ?? '')
 
   /** 结果页要显示的视频地址：优先任务的，其次本地预览。 */
-  // 优先级：刚上传/下载的 > 本地预览 > 任务里的地址。
+  // 优先级：刚上传/下载的 > 本地预览 > **任务实际分析的那段** > 任务的原视频。
   // 旧任务放最后 —— 换素材时虽然已经 clearJobState() 了，但多一层保险：
   // 万一某条路径漏了清理，也不会让预览显示上一个视频。
-  const videoUrl = computed(
-    () => uploadResult.value?.video_url || localPreviewUrl.value || job.value?.video_url || '',
-  )
+  //
+  // ⚠️ `analyzed_video_url` 必须排在 `job.video_url` 前面。
+  // 用户框选了片段时，抽帧的时间戳是相对**片段**的（0.0s / 0.5s / 1.1s…），
+  // 而 `job.video_url` 指向上传的原视频 —— 拿原视频当预览，
+  // 点帧就会跳到原视频的对应位置，整条时间轴错位，
+  // 看起来像「点哪一帧都跳到开头」。
+  const videoUrl = computed(() => {
+    const analyzed = job.value?.result?.analyzed_video_url || ''
+    return (
+      uploadResult.value?.video_url ||
+      localPreviewUrl.value ||
+      analyzed ||
+      job.value?.video_url ||
+      ''
+    )
+  })
 
   const prompt = computed(() => job.value?.result?.prompt ?? '')
   const observations = computed(() => job.value?.result?.observations ?? [])

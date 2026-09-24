@@ -130,6 +130,13 @@ export interface JobResult {
   shots: Shot[]
   frames_used: number
   frame_urls: string[]
+  /**
+   * 实际送去分析的那段视频（框选了片段时指向片段，否则为空）。
+   *
+   * 预览要用它而不是 `job.video_url` —— 抽帧时间戳是相对片段的，
+   * 放原视频会让点帧跳转整条错位。
+   */
+  analyzed_video_url: string
   chunks: number
   stats: Record<string, unknown>
 }
