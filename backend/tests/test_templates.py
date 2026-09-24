@@ -1213,3 +1213,56 @@ def test_resolve_keeps_explicit_labels():
     assert resolve_edit_structure("continuous", one) == "continuous"
     # unknown + 多个条目 = 真的拿不准，保持保守
     assert resolve_edit_structure("unknown", many) == "unknown"
+
+
+# ---------------------------------------------------------------------------
+# 帧间隔里的镜头边界信号
+# ---------------------------------------------------------------------------
+
+def _pass1_text(marks):
+    return build_pass1_user(
+        chunk_start=0.0,
+        chunk_end=marks[-1][0] + 0.5,
+        frame_marks=marks,
+        audio_text="",
+        media=None,
+        chunk_index=0,
+        chunk_total=1,
+    )
+
+
+def _frame_lines(txt: str) -> list[str]:
+    """只取帧列表那几行 —— 说明段落里也会提到 `sampling boundary`，
+    断言必须限定在帧行上，否则永远为真。"""
+    return [ln for ln in txt.split("\n") if ln.strip().startswith("Image ")]
+
+
+def test_shot_boundary_is_marked_in_frame_list():
+    """帧间隔突变处要标出来。
+
+    实测模型会**识别对切点却把内容归错组**：它报了 4.380 是切点，
+    却把 4.380 之后那段（花园场景）描述成前一个镜头的拖鞋。
+    时间戳它看得见，但注意力没落在「间隔突变」上 —— 标出来才知道往哪看。
+
+    抽帧是按镜头切点对齐的，所以镜头末帧（tail）和下一镜首帧（head）
+    会挨得特别近，那个位置就是切点。
+    """
+    marks = [(0.0, "head"), (0.5, "mid"), (1.0, "mid"), (1.5, "tail"), (1.6, "head"), (2.1, "mid")]
+    txt = _pass1_text(marks)
+
+    marked = [ln for ln in _frame_lines(txt) if "sampling boundary" in ln]
+    assert len(marked) == 1, f"应该只标一处，实际 {len(marked)} 处"
+    assert "0.10s after the previous frame" in marked[0]
+    # 只说「检测器在这里看到了变化」，不能说成已确认的切点 ——
+    # 我们的检测可能把一镜到底切碎，说死了反而误导。
+    assert "do not treat the marker as a confirmed cut" in txt
+
+
+def test_uniform_gaps_are_not_marked():
+    """间隔均匀时不该乱标，否则等于把每一帧都说成切点。"""
+    marks = [(i * 0.5, "mid") for i in range(6)]
+    txt = _pass1_text(marks)
+
+    assert not [ln for ln in _frame_lines(txt) if "sampling boundary" in ln]
+    # 但「看间隔」这条提示始终在
+    assert "Read the gaps, not just the timestamps" in txt

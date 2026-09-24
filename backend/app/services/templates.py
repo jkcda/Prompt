@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import re
+import statistics
 from collections import Counter
 from dataclasses import dataclass, field
 
@@ -248,8 +249,42 @@ def build_pass1_user(
         lines.append(f"Source video: {res}, {media.fps:.2f} fps, {media.duration:.2f}s total.")
     lines.append("")
     lines.append(f"The {len(frame_marks)} images attached AFTER this text are in this exact order:")
+
+    # 帧间隔本身携带信息：抽帧是按镜头切点对齐的，所以镜头末帧（tail）和
+    # 下一镜首帧（head）之间会挨得特别近 —— 那个位置就是切点。
+    #
+    # 为什么要显式标出来：实测模型会**识别对切点却把内容归错组**
+    # （说 4.380 是切点，却把 4.380 之后那段花园场景描述成拖鞋）。
+    # 时间戳它看得见，但注意力没落在「间隔突变」上，标出来才知道该往哪看。
+    #
+    # 措辞用「sampling boundary」而不是「shot boundary」：我们的切点可能
+    # 是把一镜到底切碎的误切，不能让它当成铁定的剪辑事实。
+    gaps = [frame_marks[i][0] - frame_marks[i - 1][0] for i in range(1, len(frame_marks))]
+    normal_gap = statistics.median(gaps) if gaps else 0.0
+
+    prev_t: float | None = None
+    prev_role = ""
     for i, (t, role) in enumerate(frame_marks, start=1):
-        lines.append(f"  Image {i} -> timestamp {t:.3f}s [role: {role}]")
+        note = ""
+        if prev_t is not None and role == "head" and prev_role == "tail":
+            gap = t - prev_t
+            if normal_gap > 0 and gap < normal_gap * 0.6:
+                note = (
+                    f"   ← sampling boundary: only {gap:.2f}s after the previous frame, "
+                    f"while the usual gap is ~{normal_gap:.2f}s. Sampling is aligned to "
+                    f"cuts, so this is where the detector saw a change — look carefully "
+                    f"here and decide from the images whether it is a real cut."
+                )
+        lines.append(f"  Image {i} -> timestamp {t:.3f}s [role: {role}]{note}")
+        prev_t, prev_role = t, role
+    lines.append("")
+    lines.append(
+        "**Read the gaps, not just the timestamps.** Consecutive frames are normally about "
+        f"{normal_gap:.2f}s apart; the places marked `sampling boundary` above are much closer "
+        "together. Those are where the automated detector saw a change — it may be a real cut, "
+        "or it may have split one continuous take. Compare the images on both sides and decide "
+        "yourself; do not treat the marker as a confirmed cut."
+    )
     lines.append("")
     lines.append(
         "These timestamps come from an automated scene-change detector. **They are a "
