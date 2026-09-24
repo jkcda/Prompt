@@ -388,8 +388,14 @@ function fmtTime(sec: number): string {
             <div v-else-if="store.audio.transcript" class="prompt-box">
               {{ store.audio.transcript }}
             </div>
+            <!-- 没有转写时别只说「未获得」—— 把怎么解决写出来。
+                 具体原因（未配置 / 转写失败 / 返回空）在后端 note 里，
+                 已经在上面那排徽标显示过了，这里不重复。 -->
             <div v-else class="empty">
-              未获得语音转写文本（可能无对白，或未配置 ASR）
+              <div>未获得语音转写文本</div>
+              <div class="hint">
+                配上 ASR_BASE_URL / ASR_API_KEY 就能识别歌词（硅基流动有免费额度，见 README）
+              </div>
             </div>
 
             <!-- 频谱数字只是诊断信息：它们**不会**写进提示词 -->
@@ -540,6 +546,15 @@ function fmtTime(sec: number): string {
   margin-top: 16px;
   font-size: 11.5px;
   color: var(--text-dim);
+}
+
+/* 空态里的引导文案：告诉用户怎么解决，不只是说「没有」 */
+.hint {
+  margin-top: 6px;
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--text-dim);
+  opacity: 0.85;
 }
 
 .raw-audio summary {
