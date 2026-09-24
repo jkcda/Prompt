@@ -562,6 +562,11 @@ async def run_pipeline(job: Job, video_path: Path) -> JobResult:
                 "enabled": bool(s.motion_analysis),
                 "measured": len(motions),
                 "with_camera_movement": sum(1 for m in motions if not m.camera_static),
+                # 主体是否在动（与相机无关）。单帧看不出来，只有对比帧才知道 ——
+                # 出「人物原地踏步」这类问题时，先看这里的数字对不对：
+                # 明显走动应该在 0.1 以上，纯静止画面在 0.01 以下。
+                "with_subject_movement": sum(1 for m in motions if m.subject_moving),
+                "subject_change": [round(m.subject_change, 4) for m in motions],
                 "suggestions": [motion_mod.suggest_camera(m) for m in motions],
             },
             "shot_merges": merge_stats,

@@ -28,7 +28,13 @@ const overLimit = computed(() => store.stats.prompt_over_limit === true)
 
 /** 客观运动分析的覆盖情况。用来一眼看出「运镜是不是还全是 static」。 */
 const motion = computed(
-  () => (store.stats.motion ?? {}) as { measured?: number; with_camera_movement?: number },
+  () =>
+    (store.stats.motion ?? {}) as {
+      measured?: number
+      with_camera_movement?: number
+      /** 主体在动的镜头数 —— 单帧看不出来，只有对比帧才知道 */
+      with_subject_movement?: number
+    },
 )
 
 /** 代码兜底合并掉多少条镜头条目（一镜到底合并 + 复读内容合并）。 */
@@ -218,10 +224,16 @@ function fmtTime(sec: number): string {
             <span
               v-if="motion.measured"
               class="badge"
-              :class="motion.with_camera_movement ? 'ok' : 'warn'"
-              :title="`对 ${motion.measured} 个镜头做了客观运动分析，其中 ${motion.with_camera_movement} 个检出相机运动`"
+              :class="motion.with_camera_movement || motion.with_subject_movement ? 'ok' : 'warn'"
+              :title="'客观运动分析：' + motion.measured + ' 个镜头里，' +
+                motion.with_camera_movement + ' 个有相机运动，' +
+                (motion.with_subject_movement ?? 0) + ' 个检出主体在动（帧间显著变化）。' +
+                '提示词里人物「原地踏步」时先看这两个数对不对。'"
             >
               运镜 {{ motion.with_camera_movement }}/{{ motion.measured }}
+              <template v-if="motion.with_subject_movement !== undefined">
+                · 主体 {{ motion.with_subject_movement }}/{{ motion.measured }}
+              </template>
             </span>
             <span
               v-if="mergedShots"
