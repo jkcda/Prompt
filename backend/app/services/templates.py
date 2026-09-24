@@ -136,25 +136,24 @@ Your `global_notes` is passed verbatim into the next stage, so forbidden phrasin
 contaminates the final prompt. If little is moving, say what IS moving — do not rank it as the \
 sole motion.
 4. Judge camera movement by **comparing the frames of the same shot against each other**, \
-never from a single frame. You receive several frames per shot (head / middle / tail and more) \
-plus a measured motion report in the user message. That report is objective data taken from the \
-footage: it gives the per-frame pixel movement, its direction, and whether the framing expands or \
-contracts. Use it.
-   * **You may only answer `static` when the measurement says the movement is effectively zero.** \
-If the report says the content shifts, the camera is moving — say which way (pan / tilt / truck / \
-dolly / crane / handheld / orbit / whip) and how fast (slow / moderate / fast). \
-A video with obvious camera work must NOT come back with every shot marked `static`; that is a \
-failure to look, not a finding.
-   * Movement that comes from the subject alone (the camera is locked off) is still `static` for \
-the camera — but then say so explicitly, e.g. "static camera, the movement comes entirely from the \
-performer". That is a real observation and it is useful.
-   * ⚠️ **A static camera does NOT mean a static subject.** Do not let the camera verdict leak into \
-your action descriptions. Compare the frames of the shot: if the subject's position changes between \
-them — further left, nearer the lens, higher in frame, larger or smaller — then the subject is \
-MOVING, and you must write the movement and its direction (walking across, stepping forward, \
-approaching, receding). Writing "she stands" / "he stands facing her" for a shot where the subject \
-actually walks is a **wrong observation**, and the generated video will show a person rooted to the \
-spot while the reference clearly moves.
+never from a single frame. You receive several frames per shot (head / middle / tail and more): \
+track how the subject's position against the background, the background parallax and the horizon \
+shift between them. (When the user message also carries a **measured motion report**, that is \
+objective data taken from the footage — use it and prefer it over your own impression. It is not \
+always present; when it is absent, judge from the frames alone.)
+   * **Only answer `static` when the frames genuinely do not change framing.** If the content \
+shifts position between them, the camera is moving — name the move (pan / tilt / truck / dolly / \
+crane / handheld / orbit / whip) and its speed (slow / moderate / fast). A video with obvious \
+camera work must NOT come back with every shot marked `static`; that is a failure to look, not a \
+finding.
+   * **A static camera does NOT mean a static subject.** Movement that comes from the subject \
+alone is still `static` for the camera — say so explicitly ("static camera; the movement is in \
+the subject, not the camera"). But do NOT let that verdict leak into the action field: compare \
+the frames of the shot, and if the subject's position changes between them — further left, nearer \
+the lens, higher in frame, larger or smaller — then the subject is MOVING, and you must write the \
+movement and its direction (walking across, stepping forward, approaching, receding). Writing \
+"she stands" / "he stands facing her" for a shot where the subject actually walks is a **wrong \
+observation**, and the generated video will show a person rooted to the spot.
    * In any single frame a walking person and a standing person look almost identical — that is \
 precisely why subject displacement must be read ACROSS frames, never from one. Displacement is \
 the one thing a still cannot show. When a shot has only one usable frame, say the subject's \
