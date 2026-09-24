@@ -218,6 +218,23 @@ def test_audio_prompt_marks_unknown_as_unknown(sample_video: Path):
 # 线上 API 优先于本地模型
 # ---------------------------------------------------------------------------
 
+def test_spectrum_used_as_fallback_when_no_music_profile():
+    """音乐画像拿不到时，用频段能量做**倾向性**兜底。
+
+    兜底存在的理由：音轨过短或抽取失败时如果什么都不给，模型会照着画面编 BGM。
+    但措辞不能越权 —— 「能量集中在人声频段」不等于「有人在唱歌」，
+    实测纯 440Hz 正弦的能量读起来和人声一样，所以必须标明「不是内容识别」。
+    """
+    from app.services.asr import format_transcript_for_prompt
+
+    report = AudioReport(has_audio=True, speech_band_db=-1.2, low_band_db=-19.0)
+    text = format_transcript_for_prompt(report)
+
+    assert "人声/主奏频段能量占比高" in text
+    assert "不是内容识别" in text
+    assert "别当成结论" in text
+
+
 def test_api_takes_priority_over_local_whisper(sample_video: Path, monkeypatch):
     """配了线上 ASR 就走线上，**即使本地模型可用**。
 

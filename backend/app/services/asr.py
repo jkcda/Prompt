@@ -394,7 +394,15 @@ def format_transcript_for_prompt(report: AudioReport) -> str:
         if report.bpm and report.has_beat:
             lines.append(f"  （节奏约 {report.bpm:.0f} BPM）")
     else:
-        lines.append("  未能得出音乐描述（音轨过短或抽取失败）。")
+        # 音乐画像拿不到（音轨过短、抽取失败）时，用频段能量做**倾向性**兜底。
+        # ⚠️ 措辞不能越权：「能量集中在人声频段」不等于「有人在唱歌」——
+        # 实测纯 440Hz 正弦的能量读起来和人声一样。
+        fallback = describe_spectrum(report)
+        if fallback:
+            lines.append("  " + "；".join(fallback) + "。")
+            lines.append("  （以上是能量分布的倾向，不是内容识别，写的时候别当成结论）")
+        else:
+            lines.append("  未能得出音乐描述（音轨过短或抽取失败）。")
     lines.append("")
 
     # ---- 歌词 / 台词 ----

@@ -350,7 +350,7 @@ inferred from energy distribution alone
 
 ### ffmpeg
 
-**已经打包在仓库里了**：`backend/vendor/ffmpeg/ffmpeg.exe`（79 MB，ffmpeg 6.1.1）。
+**已经打包在仓库里了**（Windows 79 MB / Linux 76 MB 各一份，ffmpeg 6.1.1）。
 部署时不需要在服务器上另装。
 
 查找顺序：
@@ -1212,7 +1212,7 @@ uvicorn app.main:app --reload
 git clone <repo> && cd <repo>
 ```
 
-ffmpeg 跟着仓库来，不用另装。注意仓库里有 79 MB 的二进制，
+ffmpeg 跟着仓库来，不用另装。注意仓库里带了**两个平台**的二进制（共 155 MB），
 克隆会比一般项目慢一些。
 
 ### 2. 后端
@@ -1233,7 +1233,21 @@ VLM_BASE_URL=https://api-inference.modelscope.cn/v1
 VLM_MODEL=Qwen/Qwen3.5-27B
 ```
 
+**强烈建议再配上语音识别**（免费的，服务器上不占资源）：
+
+```ini
+ASR_BASE_URL=https://api.siliconflow.cn/v1
+ASR_API_KEY=你的密钥
+ASR_MODEL=FunAudioLLM/SenseVoiceSmall
+```
+
+不配的话音频维度会缺一整个 —— 有台词/唱歌的视频，歌词字段只能写 `N/A`。
+详见「语音转写」一节。
+
 其余留空即可（ffmpeg 会自动用自带的那份）。
+
+> **服务器上不需要任何模型权重。** 语音识别走线上 API，
+> ffmpeg 是仓库自带的静态二进制 —— `git clone` + `pip install -e .` 就够了。
 
 ### 3. 前端
 
@@ -1278,6 +1292,10 @@ location /api/ {
 | 前端已构建 | 浏览器打开首页有界面，不是 404 |
 | 数据目录可写 | `data/` 下能创建文件（上传与抽帧都写这里） |
 | 磁盘够用 | 抽帧产物按 `jobs × 帧数 × 30KB` 估；`data/tmp/` 会自动清理 |
+| 语音识别（可选） | 反推一段有歌词的视频，看「音频」页签有没有转写文本；没有就看 `note` 里的原因 |
+
+**服务器上不需要下载任何模型权重**：语音识别走线上 API，ffmpeg 是仓库自带的
+静态二进制。`pip install -e .` 装完依赖就能跑，没有几百 MB 的额外下载。
 
 > **别把 `.env` 提交进仓库**（已在 `.gitignore` 里）。
 > 部署机上如果用了 CI/CD，密钥走环境变量或密钥管理，不要写进代码。
