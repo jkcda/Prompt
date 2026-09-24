@@ -11,6 +11,11 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      # 依赖源默认走国内镜像（Dockerfile 里 ARG 的默认值）。
+      # 海外部署取消注释换成官方源：
+      # args:
+      #   PIP_INDEX: https://pypi.org/simple
+      #   NPM_REGISTRY: https://registry.npmjs.org
     image: video-prompt-reverse:latest
     container_name: video-prompt-reverse
     restart: unless-stopped

@@ -1,14 +1,23 @@
 # syntax=docker/dockerfile:1
 
+# 依赖源。默认走国内镜像 —— 不设的话 pip 和 npm 在服务器上会慢到没法用。
+# 海外部署可以覆盖：
+#   docker compose build --build-arg PIP_INDEX=https://pypi.org/simple \
+#                        --build-arg NPM_REGISTRY=https://registry.npmjs.org
+ARG PIP_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple
+ARG NPM_REGISTRY=https://registry.npmmirror.com
+
 # ---------------------------------------------------------------------------
 # 前端构建
 # ---------------------------------------------------------------------------
 FROM node:20-alpine AS frontend
+ARG NPM_REGISTRY
 WORKDIR /build
 
 # 先只拷依赖清单，让这层能被缓存 —— 改前端代码不会重装 node_modules
 COPY frontend/package.json frontend/package-lock.json ./
-RUN npm ci
+# npm 会把 lock 文件里写死的 registry.npmjs.org 换成这里配的源
+RUN npm config set registry "$NPM_REGISTRY" && npm ci
 
 COPY frontend/ ./
 RUN npm run build
@@ -18,6 +27,7 @@ RUN npm run build
 # 运行时
 # ---------------------------------------------------------------------------
 FROM python:3.12-slim
+ARG PIP_INDEX
 
 ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
@@ -27,7 +37,7 @@ WORKDIR /app/backend
 
 # 依赖单独一层（只依赖 pyproject），改业务代码不会触发重装
 COPY backend/pyproject.toml backend/README.md ./
-RUN pip install .
+RUN pip install --index-url "$PIP_INDEX" .
 
 COPY backend/app ./app
 

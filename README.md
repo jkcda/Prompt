@@ -1212,8 +1212,27 @@ uvicorn app.main:app --reload
 
 ### 方式一：Docker（推荐）
 
+它把「装 Python 依赖、装 ffmpeg、构建前端」三步都封在镜像里，
+而且**不需要把仓库那 155MB 的二进制拉下来**
+（`.dockerignore` 排掉了 Windows 那份，构建上下文只有几十 MB）。
+
+#### 先把代码弄到服务器 —— 三条路，任选
+
+| 方式 | 适合 | 做法 |
+|---|---|---|
+| **A. 推 git 仓库再 clone** | 有 GitHub / Gitee / 自建 Git | `git push` → 服务器 `git clone --depth 1` |
+| **B. 直接传源码** | 不想建仓库 | `rsync -av --exclude-from=.dockerignore --exclude=.git ./ user@server:/opt/app/` |
+| **C. 本地构建镜像再传** | 服务器配置低、或构建要联网 | `docker build -t vpr .` → `docker save vpr \| gzip > vpr.tgz` → 传上去 `docker load` |
+
+方式 A 最省事，也方便以后更新（`git pull && docker compose up -d --build`）。
+方式 C 的服务器**完全不需要构建**，也不依赖 pip/npm 网络，代价是要传一个几百 MB 的
+tar 包。
+
+> `git clone` 加 `--depth 1` 只要最新版本，快很多。
+
+#### 起服务
+
 ```bash
-git clone --depth 1 <repo> && cd <repo>   # --depth 1：不要历史，快很多
 cp backend/.env.example backend/.env      # 填 VLM_API_KEY / VLM_BASE_URL / VLM_MODEL
 docker compose up -d --build
 docker compose logs -f                    # 看启动日志
@@ -1221,17 +1240,32 @@ docker compose logs -f                    # 看启动日志
 
 访问 `http://<服务器IP>:8000`。
 
-**数据落在宿主的 `./data/`**（compose 里挂了卷），重建容器不会丢任务历史。
-但要注意**权限**：容器以 uid 1000 运行，如果宿主目录属主不是它，
-启动后上传会失败 —— 先 `sudo chown -R 1000:1000 ./data`。
+#### 国内网络
 
-镜像里的 ffmpeg 用的是**仓库自带那份**（`backend/vendor/ffmpeg/ffmpeg`，6.1.1），
-不是 apt 装的 —— 这样版本可控，和本地开发行为一致。Dockerfile 里有一句
-`chmod 0755` 是必需的：Windows 工作区里这个文件的可执行位会丢，
-不补上的话 ffmpeg 调不起来。
+依赖源默认已经走国内镜像（pip 用清华、npm 用 npmmirror），不用额外配置。
+但**基础镜像**（`node:20-alpine`、`python:3.12-slim`）是从 Docker Hub 拉的，
+国内可能很慢 —— 给宿主配个加速器：
 
-资源限制在 `docker-compose.yml` 里默认是 `cpus: 3.0` / `mem_limit: 3g`
-（按 4 核机器留一个核给系统）。按自己机器改。
+```bash
+# /etc/docker/daemon.json
+{ "registry-mirrors": ["https://docker.m.daocloud.io"] }
+# 然后 sudo systemctl restart docker
+```
+
+#### 两个坑
+
+**数据目录权限**：容器以 uid 1000 运行，宿主目录属主不对的话上传会失败：
+
+```bash
+sudo chown -R 1000:1000 ./data
+```
+
+**重建容器不丢数据**：`data/` 挂了卷，任务历史、上传的视频、抽帧都在宿主上。
+
+#### 资源限制
+
+`docker-compose.yml` 里默认 `cpus: 3.0` / `mem_limit: 3g`（按 4 核机器留一个核
+给系统）。按自己机器改。
 
 ### 方式二：直接跑 Python
 
