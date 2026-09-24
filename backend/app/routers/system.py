@@ -105,8 +105,6 @@ async def read_settings(settings: SettingsDep) -> dict[str, Any]:
             "max_total_frames": settings.max_total_frames,
             "max_frames_per_shot": settings.max_frames_per_shot,
             "frame_interval_seconds": settings.frame_interval_seconds,
-            "sheet_cells": settings.frame_sheet_cells,
-            "sample_fps": settings.frame_sample_fps,
             "long_shot_seconds": settings.long_shot_seconds,
             "long_edge": settings.frame_long_edge,
             "jpeg_quality": settings.frame_jpeg_quality,

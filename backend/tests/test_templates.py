@@ -1,7 +1,10 @@
-"""提示词模板与解析的单元测试。
+"""提示词模板的单元测试。
 
-Pass1 的 JSON 解析必须足够宽容——模型经常包 markdown 围栏、加前后缀、
-留尾随逗号，解析失败就等于整个任务失败。
+重点测两件事：
+  1. **目标格式规则**（H3 三字段 / Ref2VA 六段 / Seedance 六要素）必须精确 ——
+     那是输出契约，错了下游解析不了。
+  2. 自由发挥模式的系统提示词**只带身份、任务和目标格式**，不再有「怎么观察」
+     的规则（那些规则实测会让输出退化）。
 """
 
 from __future__ import annotations
@@ -10,220 +13,25 @@ import json
 
 from app.schemas import (
     AudioReport,
-    ChunkObservation,
     MediaInfo,
-    ShotObservation,
-    SubjectEntry,
 )
 from app.services.templates import (
     FORMAT_LABELS,
     MODE_LABELS,
     MODE_VARIANTS,
-    PASS1_SYSTEM,
     build_compress_system,
     build_compress_user,
-    build_pass1_user,
-    build_pass2_system,
-    build_pass2_user,
+    build_system,
+    build_user,
     check_prompt_integrity,
     format_display,
-    merge_observations,
-    merge_subjects,
     mode_of,
-    parse_pass1_json,
     prompt_sections,
 )
 
-GOOD_JSON = """
-{
-  "shots": [
-    {
-      "shot": "1",
-      "timecode": "00:00.000",
-      "shot_size": "medium",
-      "camera": "static",
-      "subject": "a woman in a red coat",
-      "action": "she turns toward the window, her coat swinging with the motion",
-      "setting": "a cafe interior",
-      "lighting": "warm window light from the left",
-      "color": "warm, slightly desaturated",
-      "motion_energy": "low",
-      "on_screen_text": "none",
-      "dialogue": "你好",
-      "sfx": "cup clink",
-      "transition": "cut",
-      "confidence": 0.9
-    }
-  ],
-  "global_notes": "handheld throughout"
-}
-"""
-
-
-
-def _unpack(raw: str):
-    """把 Pass1Parse 拆成 (shots, subjects, notes) —— 沿用原来的断言写法。"""
-    r = parse_pass1_json(raw)
-    return r.shots, r.subjects, r.global_notes
-
-def test_parse_plain_json():
-    shots, subjects, notes = _unpack(GOOD_JSON)
-    assert len(shots) == 1
-    assert shots[0].shot_size == "medium"
-    assert shots[0].dialogue == "你好"
-    assert subjects == []
-    assert notes == "handheld throughout"
-
-
-def test_parse_json_with_markdown_fence():
-    shots, _, _ = _unpack(f"```json\n{GOOD_JSON}\n```")
-    assert len(shots) == 1
-
-
-def test_parse_json_with_preamble_and_trailing_text():
-    raw = f"Sure, here is the analysis:\n{GOOD_JSON}\nLet me know if you need more."
-    shots, _, _ = _unpack(raw)
-    assert len(shots) == 1
-
-
-def test_parse_json_with_trailing_comma():
-    broken = GOOD_JSON.replace('"handheld throughout"', '"handheld throughout",')
-    shots, _, _ = _unpack(broken)
-    assert len(shots) == 1
-
-
-def test_parse_garbage_returns_empty():
-    shots, subjects, notes = _unpack("I cannot analyze this video.")
-    assert shots == []
-    assert subjects == []
-    assert notes == ""
-
-
-def test_parse_empty_string():
-    shots, _, _ = _unpack("")
-    assert shots == []
-
-
-def test_parse_ignores_unknown_fields():
-    raw = '{"shots":[{"shot":"1","unknown_field":"x","action":"walks"}],"global_notes":""}'
-    shots, _, _ = _unpack(raw)
-    assert len(shots) == 1
-    assert shots[0].action == "walks"
-
-
-def test_parse_skips_non_dict_entries():
-    raw = '{"shots":["nope",{"shot":"1","action":"walks"}],"global_notes":""}'
-    shots, _, _ = _unpack(raw)
-    assert len(shots) == 1
-
-
-# ---------------------------------------------------------------------------
-# 主体登记表
-# ---------------------------------------------------------------------------
-
-SUBJECTS_JSON = """
-{
-  "shots": [{"shot": "1"}, {"shot": "2"}],
-  "subjects": [
-    {
-      "label": "performer",
-      "kind": "person",
-      "description": "a performer in a dark jacket, hair tied back",
-      "shots": ["1", "2"],
-      "notes": "the jacket and the tied-back hair must not change"
-    }
-  ],
-  "global_notes": ""
-}
-"""
-
-
-def test_parse_subjects():
-    _, subjects, _ = _unpack(SUBJECTS_JSON)
-    assert len(subjects) == 1
-    assert subjects[0].label == "performer"
-    assert subjects[0].kind == "person"
-    assert subjects[0].shots == ["1", "2"]
-    assert "jacket" in subjects[0].notes
-
-
-def test_parse_subjects_accepts_comma_string_shots():
-    """模型有时把 shots 写成逗号串而不是数组，两种都要收。"""
-    raw = '{"shots":[],"subjects":[{"label":"x","shots":"1, 2,3"}]}'
-    _, subjects, _ = _unpack(raw)
-    assert subjects[0].shots == ["1", "2", "3"]
-
-
-def test_parse_subjects_accepts_chinese_comma():
-    raw = '{"shots":[],"subjects":[{"label":"x","shots":"1，2"}]}'
-    _, subjects, _ = _unpack(raw)
-    assert subjects[0].shots == ["1", "2"]
-
-
-def test_parse_subjects_drops_empty_entries():
-    raw = '{"shots":[],"subjects":[{"label":"","description":"","notes":"","shots":[]}]}'
-    _, subjects, _ = _unpack(raw)
-    assert subjects == []
-
-
-def test_parse_subjects_missing_key_is_empty():
-    _, subjects, _ = _unpack(GOOD_JSON)
-    assert subjects == []
-
-
-def test_merge_subjects_dedupes_and_renumbers_shots():
-    """跨块同一个主体只能出现一次，镜号要映射到重排后的全局镜号。"""
-    c1 = ChunkObservation(
-        chunk_index=0, start=0.0, end=10.0,
-        shots=[ShotObservation(shot="1", subject="a performer in a dark jacket"),
-               ShotObservation(shot="2", subject="a performer in a dark jacket")],
-        subjects=[SubjectEntry(label="performer", kind="person",
-                               description="dark jacket", shots=["1", "2"])],
-    )
-    c2 = ChunkObservation(
-        chunk_index=1, start=10.0, end=20.0,
-        shots=[ShotObservation(shot="1", subject="a performer in a dark jacket"),
-               ShotObservation(shot="2", subject="rooftop vents")],
-        subjects=[SubjectEntry(label="The Performer", kind="person",
-                               description="dark jacket, hair tied back", shots=["1"])],
-    )
-    merged_shots = merge_observations([c1, c2])
-    subjects = merge_subjects([c1, c2], merged_shots)
-
-    assert len(subjects) == 1, "同一个主体被拆成了多条"
-    assert subjects[0].shots == ["1", "2", "3"]
-    # 更长的描述应该胜出
-    assert "hair tied back" in subjects[0].description
-
-
-def test_merge_subjects_falls_back_to_shot_lookup():
-    """模型没给 shots 时，用主体描述回查镜号，否则写不出 appears in [Shot N]。"""
-    c1 = ChunkObservation(
-        chunk_index=0, start=0.0, end=10.0,
-        shots=[ShotObservation(shot="1", subject="a performer in a dark jacket"),
-               ShotObservation(shot="2", subject="a performer in a dark jacket")],
-        subjects=[SubjectEntry(label="performer",
-                               description="a performer in a dark jacket", shots=[])],
-    )
-    subjects = merge_subjects([c1], merge_observations([c1]))
-    assert subjects[0].shots == ["1", "2"]
-
-
-def test_merge_subjects_keeps_distinct_subjects_apart():
-    c1 = ChunkObservation(
-        chunk_index=0, start=0.0, end=10.0,
-        shots=[ShotObservation(shot="1")],
-        subjects=[
-            SubjectEntry(label="performer", kind="person", shots=["1"]),
-            SubjectEntry(label="rooftop", kind="environment", shots=["1"]),
-        ],
-    )
-    subjects = merge_subjects([c1], merge_observations([c1]))
-    assert {s.label for s in subjects} == {"performer", "rooftop"}
-
 
 def test_pass1_user_lists_images_in_order():
-    text = build_pass1_user(
+    text = build_user(
         chunk_start=0.0,
         chunk_end=10.0,
         frame_marks=[(0.5, "head"), (5.0, "mid"), (9.5, "tail")],
@@ -236,34 +44,9 @@ def test_pass1_user_lists_images_in_order():
     assert "Image 3 -> timestamp 9.500s [role: tail]" in text
     assert "1920x1080" in text
     assert "segment 1 of 1" in text
-
-
-def test_merge_observations_renumbers_shots():
-    c1 = ChunkObservation(
-        chunk_index=0, start=0.0, end=10.0,
-        shots=[ShotObservation(shot="1"), ShotObservation(shot="2")],
-    )
-    c2 = ChunkObservation(
-        chunk_index=1, start=10.0, end=20.0,
-        shots=[ShotObservation(shot="1"), ShotObservation(shot="2")],
-    )
-    merged = merge_observations([c2, c1])  # 故意乱序传入
-    assert [s.shot for s in merged] == ["1", "2", "3", "4"]
-
-
-def test_pass2_system_contains_hard_rules_for_every_format():
-    for fmt in FORMAT_LABELS:
-        system = build_pass2_system(fmt, "en")
-        assert "NEVER use static or terminal verbs" in system
-        # 口型规则。措辞是 "Mouth movement — describe it as a VISUAL fact"，
-        # 所以只匹配词干，不匹配大小写。
-        assert "outh movement" in system
-        assert "VISUAL fact" in system
-
-
 def test_pass2_system_h3_uses_bare_field_names():
     """H3 的字段名必须是裸名 + 冒号，不能用尖括号标签包裹。"""
-    system = build_pass2_system("h3", "en")
+    system = build_system("h3", "en")
     assert "integrated_multimodal_description:" in system
     assert "<integrated_multimodal_description>" not in system
     assert "overall_soundscape:" in system
@@ -271,7 +54,7 @@ def test_pass2_system_h3_uses_bare_field_names():
 
 
 def test_pass2_system_h3_ref_has_six_sections():
-    system = build_pass2_system("h3-ref", "en")
+    system = build_system("h3-ref", "en")
     for section in (
         "subject_definitions:", "summary:", "retention_analysis:",
         "detailed_description:", "overall_soundscape:", "non_diegetic_music:",
@@ -280,49 +63,10 @@ def test_pass2_system_h3_ref_has_six_sections():
 
 
 def test_pass2_system_seedance_is_chinese():
-    system = build_pass2_system("seedance", "en")
+    system = build_system("seedance", "en")
     assert "Seedance" in system
     assert "主体" in system
     assert "无对白" in system
-
-
-def test_pass2_user_includes_audio_and_shots():
-    obs = [ChunkObservation(
-        chunk_index=0, start=0.0, end=5.0,
-        shots=[ShotObservation(shot="1", timecode="00:00.000", action="she sings")],
-        global_notes="warm tone",
-    )]
-    audio = AudioReport(
-        has_audio=True,
-        segments=[],
-        transcript="la la la",
-        mean_volume_db=-18.0,
-        silence_ratio=0.1,
-    )
-    text = build_pass2_user(
-        observations=obs,
-        audio=audio,
-        media=MediaInfo(path="x", duration=5.0, width=1280, height=720, fps=24.0, has_audio=True),
-        shots_summary="1 个镜头",
-    )
-    assert "she sings" in text
-    assert "la la la" in text
-    assert "ALL 1 observed shots" in text
-    assert "warm tone" in text
-
-
-def test_pass2_user_includes_extra_instruction():
-    obs = [ChunkObservation(chunk_index=0, start=0.0, end=5.0, shots=[ShotObservation(shot="1")])]
-    text = build_pass2_user(
-        observations=obs,
-        audio=AudioReport(),
-        media=None,
-        shots_summary="1 个镜头",
-        extra_instruction="重点描述运镜",
-    )
-    assert "重点描述运镜" in text
-
-
 # ---------------------------------------------------------------------------
 # 两种模式：H3 / Seedance
 # ---------------------------------------------------------------------------
@@ -360,21 +104,21 @@ def test_no_unsubstituted_placeholders_in_any_system_prompt():
     """占位符漏给模型会让它照着字面理解，必须每个格式都替换干净。"""
     for fmt in FORMAT_LABELS:
         for lang in ("en", "zh"):
-            system = build_pass2_system(fmt, lang)
+            system = build_system(fmt, lang)
             assert "{language_instruction}" not in system
             assert "{common}" not in system
 
 
 def test_h3_t2va_forbids_reference_labels():
     """T2VA 没有参考素材，出现 <Subject N> 会被当成字面文本写进画面。"""
-    system = build_pass2_system("h3", "en")
+    system = build_system("h3", "en")
     assert "no reference assets" in system.lower()
     assert "Never write" in system
     assert "<Subject 1>" in system  # 出现在禁令里
 
 
 def test_h3_ref_uses_subject_registry_as_source_of_labels():
-    system = build_pass2_system("h3-ref", "en")
+    system = build_system("h3-ref", "en")
     assert "SUBJECT REGISTRY" in system
     assert "do not invent" in system
 
@@ -386,7 +130,7 @@ def test_h3_ref_does_not_reference_the_source_video():
     出现 <Video 1> / <Audio 1> 是错的：那会把生成结果绑死在原片上，
     而用户要的是「用我自己的参考图生成」。
     """
-    system = build_pass2_system("h3-ref", "en")
+    system = build_system("h3-ref", "en")
     assert "FORMAT, not the source video" in system
     assert "Do NOT define or mention `<Video 1>`" in system
     assert "Do not add a `<Video 1>` or `<Audio 1>` line" in system
@@ -396,7 +140,7 @@ def test_h3_ref_does_not_reference_the_source_video():
 
 
 def test_h3_ref_retention_analysis_excludes_video_and_audio_lines():
-    system = build_pass2_system("h3-ref", "en")
+    system = build_system("h3-ref", "en")
     assert "one line per `<Subject N>` label ONLY" in system
     assert "no video or audio line" in system
 
@@ -408,11 +152,11 @@ def test_word_limit_is_per_section_not_just_a_global_number():
     实测模型写出 779 词正文、整篇 1795 词 / 11314 字符 —— 视频模型吃不下。
     模型不会自己把全局上限分配到各段，得逐段给数字。
     """
-    system = build_pass2_system("h3", "en")
+    system = build_system("h3", "en")
     assert "420 words or fewer" in system
     assert "LENGTH BUDGET" in system
 
-    ref = build_pass2_system("h3-ref", "en")
+    ref = build_system("h3-ref", "en")
     assert "under 700 words" in ref, "整篇上限要写清楚"
     assert "420 words" in ref
     assert "at most 6 entries" in ref, "subject_definitions 要限条数"
@@ -426,20 +170,20 @@ def test_word_limit_is_per_section_not_just_a_global_number():
 
 def test_h3_ref_tells_which_subjects_to_drop_when_too_many():
     """登记表超过 6 条时要给出取舍优先级，否则模型会平均用力写得又臭又长。"""
-    system = build_pass2_system("h3-ref", "en")
+    system = build_system("h3-ref", "en")
     assert "people > wardrobe/props > environment > style/grade" in system
     assert "Drop the least important ones entirely" in system
 
 
 def test_h3_ref_says_where_to_cut_when_over_budget():
     """超预算时先砍定义和分析，绝不砍正文 —— 正文才是生成要用的。"""
-    system = build_pass2_system("h3-ref", "en")
+    system = build_system("h3-ref", "en")
     assert "never from `detailed_description`" in system
 
 
 def test_seedance_mode_has_no_h3_markup():
     """Seedance 是连贯中文段落，混进字段名或 <Subject N> 就是错的。"""
-    system = build_pass2_system("seedance", "en")
+    system = build_system("seedance", "en")
     assert "Seedance" in system
     assert "Do NOT use field labels" in system
     assert "Chinese only" in system
@@ -451,105 +195,8 @@ def test_seedance_mode_has_no_h3_markup():
 
 def test_seedance_beat_map_must_cover_every_shot():
     """Seedance 是中文提示词，断言用中文短语 —— 别在中文提示词里断言英文大写词。"""
-    system = build_pass2_system("seedance", "en")
+    system = build_system("seedance", "en")
     assert "每一个镜头" in system
-
-
-def test_pass2_user_renders_subject_registry():
-    obs = [ChunkObservation(chunk_index=0, start=0.0, end=5.0,
-                            shots=[ShotObservation(shot="1")])]
-    subjects = [
-        SubjectEntry(label="performer", kind="person",
-                     description="dark jacket", shots=["1", "3"],
-                     notes="hair stays tied back"),
-        SubjectEntry(label="rooftop", kind="environment",
-                     description="industrial roof at dusk", shots=["1"]),
-    ]
-    text = build_pass2_user(
-        observations=obs,
-        audio=AudioReport(),
-        media=None,
-        shots_summary="3 个镜头",
-        subjects=subjects,
-        fmt="h3-ref",
-    )
-    assert "=== SUBJECT REGISTRY" in text
-    assert "1. performer (person) - [Shot 1], [Shot 3]" in text
-    assert "2. rooftop (environment) - [Shot 1]" in text
-    assert "hair stays tied back" in text
-    assert "H3 模式" in text, "应该标明目标模式"
-
-
-def test_pass2_user_omits_registry_when_empty():
-    obs = [ChunkObservation(chunk_index=0, start=0.0, end=5.0,
-                            shots=[ShotObservation(shot="1")])]
-    text = build_pass2_user(
-        observations=obs, audio=AudioReport(), media=None,
-        shots_summary="1 个镜头", subjects=[],
-    )
-    assert "SUBJECT REGISTRY" not in text
-
-
-def test_common_rules_forbid_wording_drift():
-    """同一个主体在不同镜头换措辞，模型会当成两个人。"""
-    system = build_pass2_system("h3", "en")
-    assert "IDENTICAL across shots" in system
-
-
-def test_pass1_also_forbids_exclusive_motion_claims():
-    """Pass1 的 global_notes 会原样进 Pass2，禁忌措辞不能只堵一处。
-
-    真实模型在 Pass1 写下过 "The only motion is the shifting rainbow gradient bar"，
-    而那句会经 build_pass2_user 的 `segment notes` 直接注入 Pass2 的输入。
-    """
-    from app.services.templates import PASS1_SYSTEM
-
-    assert "ONLY motion" in PASS1_SYSTEM
-    assert "global_notes" in PASS1_SYSTEM and "verbatim" in PASS1_SYSTEM
-
-
-def test_pass1_forbids_static_verbs_too():
-    from app.services.templates import PASS1_SYSTEM
-
-    for word in ("holds", "remains still", "hands rest"):
-        assert word in PASS1_SYSTEM, f"Pass1 里缺少对 {word} 的禁令"
-
-
-def test_pass1_asks_for_subject_registry():
-    from app.services.templates import PASS1_SYSTEM
-
-    assert '"subjects"' in PASS1_SYSTEM
-    assert "SUBJECT REGISTRY" in PASS1_SYSTEM
-    assert "must be ONE entry" in PASS1_SYSTEM
-
-
-def test_pass1_puts_subjects_before_shots_in_the_shape():
-    """JSON 形状里 subjects 要排在 shots 前面。
-
-    模型是按顺序填的，放最后容易在输出预算用尽时被省掉 ——
-    实测 DeepSeek-V4.1-Flash 就是这样漏掉了整个 subjects 数组。
-    """
-    from app.services.templates import PASS1_SYSTEM
-
-    assert PASS1_SYSTEM.index('"subjects": [') < PASS1_SYSTEM.index('"shots": [')
-    assert "INCOMPLETE" in PASS1_SYSTEM, "要明确说缺了会被拒"
-    assert "BEFORE" in PASS1_SYSTEM and "run out of output budget" in PASS1_SYSTEM
-
-
-def test_pass1_excludes_watermarks_from_subject_registry():
-    """水印/台标/UI 不该进登记表。
-
-    实测 DeepSeek 把 bilibili-watermark 登记成了主体。虽然 Pass2 自己
-    过滤掉了没写进提示词，但登记表本身不该收 —— 万一模型照抄，
-    生成的视频里就会出现别人的水印。
-    """
-    from app.services.templates import PASS1_SYSTEM
-
-    assert "Do NOT register watermarks" in PASS1_SYSTEM
-    assert "platform logos" in PASS1_SYSTEM
-    assert "never in `subjects`" in PASS1_SYSTEM
-
-
 # ---------------------------------------------------------------------------
 # 音频未知时禁止编造
 # ---------------------------------------------------------------------------
@@ -590,22 +237,6 @@ def test_audio_report_no_track_says_na():
     text = format_transcript_for_prompt(AudioReport(has_audio=False))
     assert "没有音轨" in text
     assert "N/A" in text
-
-
-def test_pass2_rules_forbid_fabricated_sound():
-    system = build_pass2_system("h3", "en")
-    assert "the audio content is unknown" in system
-    assert "Fabricated sound is worse than an empty field" in system
-    assert "not even hedged" in system, "要堵住「似乎/仿佛」这种模糊编造"
-
-
-def test_pass2_rules_forbid_inferring_sound_from_visuals():
-    """看到人走路就写 footsteps，本质还是编声音——真实模型这么写过。"""
-    system = build_pass2_system("h3", "en")
-    assert "Do NOT convert visual events into sound events" in system
-    assert "footsteps" in system and "cloth rustle" in system
-
-
 def test_pipeline_audio_slice_warns_when_no_transcript():
     from app.services.pipeline import _audio_slice
 
@@ -684,16 +315,6 @@ def test_spectrum_numbers_stay_out_of_the_prompt():
     for term in ("content unanalysed", "energy distribution", "voice band", "spectral"):
         assert term not in text.lower(), f"音频段落里漏出了工具术语：{term}"
     assert "【音乐与声音" in text
-
-
-def test_pass2_rule_forbids_analysis_vocabulary():
-    """规则要明确禁止把音频分析用语写进提示词 —— 实测漏出过 voice band。"""
-    system = build_pass2_system("h3", "en")
-    assert "audio-ANALYSIS vocabulary" in system
-    assert "frequency-band names" in system
-    assert "decibel or hertz" in system
-
-
 # ---------------------------------------------------------------------------
 # 超长压缩
 # ---------------------------------------------------------------------------
@@ -900,7 +521,7 @@ def test_integrity_ignores_subject_and_shot_checks_for_t2va():
 # ---------------------------------------------------------------------------
 
 def _pass1(hint: str = "") -> str:
-    return build_pass1_user(
+    return build_user(
         chunk_start=0.0, chunk_end=10.0,
         frame_marks=[(0.5, "head"), (5.0, "mid")],
         audio_text="【音频】无转写。", media=None,
@@ -936,296 +557,53 @@ def test_content_hint_does_not_override_observation():
     text = _pass1("主角是白发少女")
     assert "Do NOT copy it verbatim" in text
     assert "trust the frames" in text, "画面和说明冲突时要相信画面"
+def test_user_message_says_the_timestamps_are_a_sampling_aid():
+    """时间戳来自检测器，不是剪辑事实 —— 必须说清，否则模型会把采样分组当镜头。"""
+    from app.services.templates import build_user
 
-
-def test_content_hint_reaches_pass2():
-    """成文阶段也要拿到说明 —— 观察结果可能漏掉或误判的东西要用得上。"""
-    from app.schemas import AudioReport, MediaInfo
-
-    user = build_pass2_user(
-        observations=[], audio=AudioReport(), media=MediaInfo(path="x", duration=10.0),
-        shots_summary="1 shot", content_hint="一镜到底，赛博朋克冷色调",
-    )
-    assert "CONTEXT FROM THE USER" in user
-    assert "一镜到底，赛博朋克冷色调" in user
-    assert "observation report above is authoritative" in user, "观察结果优先"
-
-
-def test_pass2_omits_hint_when_empty():
-    from app.schemas import AudioReport, MediaInfo
-
-    user = build_pass2_user(
-        observations=[], audio=AudioReport(), media=MediaInfo(path="x", duration=10.0),
-        shots_summary="1 shot", content_hint="",
-    )
-    assert "CONTEXT FROM THE USER" not in user
-
-
-# ---------------------------------------------------------------------------
-# 剪辑结构：让模型自己判断切镜，而不是照搬我们的场景检测
-# ---------------------------------------------------------------------------
-
-EDIT_JSON = """{
-  "subjects": [{"label": "boy", "kind": "person", "description": "a boy", "shots": ["1"]}],
-  "shots": [{"shot": "1", "timecode": "00:00.000", "shot_size": "medium",
-             "camera": "slow dolly-in", "subject": "boy", "action": "walks",
-             "setting": "park", "lighting": "daylight", "color": "warm",
-             "motion_energy": "medium", "on_screen_text": "none",
-             "dialogue": "", "sfx": "", "transition": "continues", "confidence": 0.9}],
-  "edit_structure": "continuous",
-  "cut_points": [],
-  "continuity_notes": "one unbroken camera move throughout",
-  "global_notes": "single take"
-}"""
-
-
-def test_parse_reads_edit_structure():
-    r = parse_pass1_json(EDIT_JSON)
-    assert r.edit_structure == "continuous"
-    assert r.cut_points == []
-    assert "unbroken" in r.continuity_notes
-    assert len(r.shots) == 1
-
-
-def test_parse_normalizes_structure_wording():
-    """模型写法五花八门，要归一到 continuous / multi_shot / unknown。"""
-    for raw, want in (
-        ("continuous", "continuous"),
-        ("CONTINUOUS SHOT", "continuous"),
-        ("one take", "continuous"),
-        ("single-take", "continuous"),
-        ("no cuts", "continuous"),
-        ("multi_shot", "multi_shot"),
-        ("multi-shot", "multi_shot"),
-        ("has cuts", "multi_shot"),
-        ("montage", "multi_shot"),
-        ("", "unknown"),
-        ("hard to tell", "unknown"),
-    ):
-        got = parse_pass1_json(json.dumps({"edit_structure": raw})).edit_structure
-        assert got == want, f"{raw!r} 应归一为 {want}，实际 {got}"
-
-
-def test_parse_cut_points_accepts_list_and_string():
-    a = parse_pass1_json('{"cut_points": ["00:03.400", "00:07.900"]}')
-    assert a.cut_points == ["00:03.400", "00:07.900"]
-    b = parse_pass1_json('{"cut_points": "00:03.400, 00:07.900"}')
-    assert b.cut_points == ["00:03.400", "00:07.900"]
-
-
-def test_parse_cut_points_drops_non_timecode():
-    """模型有时会塞进说明文字，只要时间码。"""
-    r = parse_pass1_json('{"cut_points": ["00:03.400", "at the flash", "", "12:00"]}')
-    assert r.cut_points == ["00:03.400", "12:00"]
-
-
-def test_missing_edit_structure_defaults_to_unknown():
-    r = parse_pass1_json('{"shots": []}')
-    assert r.edit_structure == "unknown"
-    assert r.cut_points == []
-
-
-def test_pass1_system_says_frame_boundaries_are_not_cuts():
-    """必须说清「帧边界不等于剪辑切点」。
-
-    踩过：原来只说「按时间戳分组」，模型就把检测器切的每一段当成一个镜头。
-    用户反馈「很多镜头其实是一镜到底的但是被切镜头了」。
-
-    ⚠️ 这段曾经有 4220 字符（占系统提示词 30%），大半在解释检测器的三种失败
-    模式 —— 而那个错位是我们自己造的：把「采样分组」当「镜头」送给了模型，
-    再花篇幅求它别信。现在只保留结论（帧边界不是切点）与后果（过度切分会
-    让生成视频变碎），不再枚举检测器的缺陷。
-    """
-    s = PASS1_SYSTEM
-    assert "a frame boundary is NOT a cut" in s
-    assert "exactly ONE entry in `shots`" in s
-    assert "tells the video model to cut there" in s, "要说清过度切分的后果"
-
-
-def test_pass1_user_says_timestamps_are_a_sampling_aid():
-    from app.services.templates import build_pass1_user
-
-    text = build_pass1_user(
+    text = build_user(
         chunk_start=0, chunk_end=10, frame_marks=[(0.0, "head"), (0.5, "mid")],
         audio_text="", media=None, chunk_index=0, chunk_total=1,
     )
-    assert "sampling aid, not the edit structure" in text
-    assert "edit_structure" in text
-
-
-def test_pass2_tells_writer_not_to_cut_a_continuous_take():
-    """成文阶段要被告知「这是一镜到底」——否则会写出一堆 [Shot N]。
-
-    一镜到底的片子被写成一堆 [Shot N]，生成的视频就会在原本连续的地方硬切。
-    """
-    from app.schemas import AudioReport, ChunkObservation, MediaInfo, ShotObservation
-
-    obs = [ChunkObservation(
-        chunk_index=0, start=0.0, end=10.0,
-        shots=[ShotObservation(shot="1", timecode="00:00.000", shot_size="medium",
-                               subject="boy", action="walks")],
-        edit_structure="continuous",
-        continuity_notes="one unbroken move",
-    )]
-    user = build_pass2_user(
-        observations=obs, audio=AudioReport(), media=MediaInfo(path="x", duration=10.0),
-        shots_summary="1 shot",
-    )
-    assert "EDIT STRUCTURE" in user
-    assert "CONTINUOUS" in user
-    assert "must NOT contain multiple `[Shot N]` markers" in user
-
-
-def test_pass2_lists_real_cut_points_for_multi_shot():
-    from app.schemas import AudioReport, ChunkObservation, MediaInfo, ShotObservation
-
-    obs = [ChunkObservation(
-        chunk_index=0, start=0.0, end=10.0,
-        shots=[ShotObservation(shot="1", timecode="00:00.000", shot_size="medium")],
-        edit_structure="multi_shot", cut_points=["00:03.400"],
-    )]
-    user = build_pass2_user(
-        observations=obs, audio=AudioReport(), media=MediaInfo(path="x", duration=10.0),
-        shots_summary="2 shots",
-    )
-    assert "MULTI_SHOT" in user
-    assert "00:03.400" in user
-    assert "follow THESE cuts" in user, "要用模型判断的切点，不是采样时间戳"
-
-
-def test_pass2_is_conservative_when_structure_unknown():
-    from app.schemas import AudioReport, ChunkObservation, MediaInfo, ShotObservation
-
-    obs = [ChunkObservation(
-        chunk_index=0, start=0.0, end=10.0,
-        shots=[ShotObservation(shot="1", timecode="00:00.000")],
-        edit_structure="unknown",
-    )]
-    user = build_pass2_user(
-        observations=obs, audio=AudioReport(), media=MediaInfo(path="x", duration=10.0),
-        shots_summary="1 shot",
-    )
-    assert "UNKNOWN" in user
-    assert "conservative" in user
-
-
-def test_collapse_continuous_shots_merges_frame_entries():
-    """一镜到底时把逐帧条目合并成一个。
-
-    ⚠️ 为什么要代码强制：模型**判断对了却写不对**。实测一个连续运镜的 10 秒素材，
-    模型正确报了 edit_structure=continuous、cut_points=[]，
-    但 shots 数组仍然给了 20 个条目（一帧一个）。它自己前后矛盾。
-    提示词里已经明确写了「一镜到底只输出一个条目」也没用 ——
-    所以判断归模型、后果归代码。
-    """
-    from app.services.templates import collapse_continuous_shots
-
-    shots = [
-        ShotObservation(shot=str(i + 1), timecode=f"00:0{i}.000", shot_size="medium",
-                        subject="singer", action=f"action {i}", confidence=0.8)
-        for i in range(20)
-    ]
-    merged = collapse_continuous_shots(shots, "continuous")
-    assert len(merged) == 1, f"应该合并成 1 个，实际 {len(merged)}"
-    assert "action 0" in merged[0].action and "action 19" in merged[0].action, "动作细节要保留"
-    assert merged[0].transition == "continues without a cut"
-    assert merged[0].timecode == shots[0].timecode, "时间码取第一个"
-
-
-def test_collapse_keeps_shots_for_multi_shot():
-    from app.services.templates import collapse_continuous_shots
-
-    shots = [
-        ShotObservation(shot="1", timecode="00:00.000"),
-        ShotObservation(shot="2", timecode="00:03.000"),
-    ]
-    assert len(collapse_continuous_shots(shots, "multi_shot")) == 2
-    assert len(collapse_continuous_shots(shots, "unknown")) == 2
-
-
-def test_collapse_dedups_repeated_actions():
-    from app.services.templates import collapse_continuous_shots
-
-    shots = [
-        ShotObservation(shot="1", action="he sings"),
-        ShotObservation(shot="2", action="he sings"),
-        ShotObservation(shot="3", action="he turns"),
-    ]
-    merged = collapse_continuous_shots(shots, "continuous")
-    assert merged[0].action == "he sings; he turns"
-
-
-def test_collapse_noop_for_single_shot():
-    from app.services.templates import collapse_continuous_shots
-
-    one = [ShotObservation(shot="1", action="a")]
-    assert collapse_continuous_shots(one, "continuous") == one
+    assert "not the edit structure" in text
+    assert "yours to judge" in text
 
 
 def test_dump_prompts_exports_everything(tmp_path):
     """提示词导出工具要能跑通，且覆盖全部格式。
 
     提示词是这个项目的核心资产，改一个字都影响产出。
-    导出成文本对照着读，比在 9000 字的 Python 字符串里翻快得多。
+    导出成文本对照着读，比在 Python 字符串里翻快得多。
     """
     from app import dump_prompts
 
     files = dump_prompts.dump(tmp_path)
     names = {f.name for f in files}
-    assert "pass1_system.txt" in names
-    assert "pass1_user.txt" in names
-    assert "pass2_user.txt" in names
+    assert "user.txt" in names
     assert "payload.json" in names
     for fmt in ("h3", "h3-ref", "seedance", "generic"):
-        assert f"pass2_system_{fmt}.txt" in names, f"缺 {fmt}"
+        assert f"system_{fmt}.txt" in names, f"缺 {fmt}"
 
     for f in files:
         assert f.stat().st_size > 0, f"{f.name} 是空的"
 
-    # 导出的 Pass1 用户消息里要能看到帧时间戳列表和说明注入
-    p1u = (tmp_path / "pass1_user.txt").read_text(encoding="utf-8")
-    assert "Image 1 -> timestamp" in p1u
-    assert "sampling aid, not the edit structure" in p1u
-    assert "CONTEXT FROM THE PERSON WHO SUBMITTED" in p1u
+    # 导出的用户消息里要能看到帧时间戳列表和用户说明注入
+    u = (tmp_path / "user.txt").read_text(encoding="utf-8")
+    assert "Image 1 -> timestamp" in u
+    assert "not the edit structure" in u
+    assert "CONTEXT FROM THE PERSON WHO SUBMITTED" in u
 
     # payload 骨架要能当 JSON 读回来，且图片是占位符
     payload = json.loads((tmp_path / "payload.json").read_text(encoding="utf-8"))
     assert payload["messages"][0]["role"] == "system"
     assert payload["messages"][1]["role"] == "user"
     assert any(p.get("type") == "image_url" for p in payload["messages"][1]["content"])
-
-
-def test_unknown_with_single_shot_resolves_to_continuous():
-    """报 unknown 但只给 1 个条目 = 没找到切点，等同 continuous。
-
-    实测：一段同画面慢推的 10 秒素材（各阈值下 0 切点），模型报了 unknown、
-    只给了 1 个条目。归一到 continuous 后成文阶段才拿到明确的
-    「不许写切点标记」指令，而不是含糊的保守处理。
-    """
-    from app.services.templates import resolve_edit_structure
-
-    one = [ShotObservation(shot="1", timecode="00:00.000")]
-    assert resolve_edit_structure("unknown", one) == "continuous"
-    assert resolve_edit_structure("unknown", []) == "continuous"
-
-
-def test_resolve_keeps_explicit_labels():
-    from app.services.templates import resolve_edit_structure
-
-    many = [ShotObservation(shot=str(i)) for i in range(5)]
-    one = [ShotObservation(shot="1")]
-    assert resolve_edit_structure("multi_shot", many) == "multi_shot"
-    assert resolve_edit_structure("continuous", one) == "continuous"
-    # unknown + 多个条目 = 真的拿不准，保持保守
-    assert resolve_edit_structure("unknown", many) == "unknown"
-
-
 # ---------------------------------------------------------------------------
 # 帧间隔里的镜头边界信号
 # ---------------------------------------------------------------------------
 
 def _pass1_text(marks):
-    return build_pass1_user(
+    return build_user(
         chunk_start=0.0,
         chunk_end=marks[-1][0] + 0.5,
         frame_marks=marks,
@@ -1260,7 +638,7 @@ def test_shot_boundary_is_marked_in_frame_list():
     assert "0.10s after the previous frame" in marked[0]
     # 只说「检测器在这里看到了变化」，不能说成已确认的切点 ——
     # 我们的检测可能把一镜到底切碎，说死了反而误导。
-    assert "do not treat the marker as a confirmed cut" in txt
+    assert "Do not treat the marker as a confirmed cut" in txt
 
 
 def test_uniform_gaps_are_not_marked():

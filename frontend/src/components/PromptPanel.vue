@@ -6,7 +6,7 @@ import { useAnalyzeStore } from '@/stores/analyze'
 
 const store = useAnalyzeStore()
 
-const tab = ref<'prompt' | 'shots' | 'subjects' | 'audio'>('prompt')
+const tab = ref<'prompt' | 'audio'>('prompt')
 const copied = ref(false)
 const saving = ref(false)
 const saveMsg = ref('')
@@ -25,29 +25,6 @@ const charCount = computed(() => prompt.value.length)
 
 /** 超过服务端设的词数上限时提醒 —— 视频模型会截断或忽略超长提示词。 */
 const overLimit = computed(() => store.stats.prompt_over_limit === true)
-
-/** 客观运动分析的覆盖情况。用来一眼看出「运镜是不是还全是 static」。 */
-const motion = computed(
-  () =>
-    (store.stats.motion ?? {}) as {
-      measured?: number
-      with_camera_movement?: number
-      /** 主体在动的镜头数 —— 单帧看不出来，只有对比帧才知道 */
-      with_subject_movement?: number
-    },
-)
-
-/** 代码兜底合并掉多少条镜头条目（一镜到底合并 + 复读内容合并）。 */
-const mergedShots = computed(() => {
-  const m = (store.stats.shot_merges ?? {}) as { collapsed?: number; merged?: number }
-  return (m.collapsed ?? 0) + (m.merged ?? 0)
-})
-
-/** 合并明细。stats 是 Record<string, unknown>，类型要在脚本里收窄。 */
-const mergeDetail = computed(() => {
-  const m = (store.stats.shot_merges ?? {}) as { collapsed?: number; merged?: number }
-  return { collapsed: m.collapsed ?? 0, merged: m.merged ?? 0 }
-})
 
 /** 提示词里被自动清理掉的音频分析术语。 */
 const jargonRemoved = computed(() => (store.stats.audio_jargon_removed ?? []) as string[])
@@ -153,18 +130,6 @@ function fmtTime(sec: number): string {
           <button :class="['tab', { active: tab === 'prompt' }]" @click="tab = 'prompt'">
             提示词
           </button>
-          <button
-            :class="['tab', { active: tab === 'shots' }]"
-            @click="tab = 'shots'"
-          >
-            镜头观察 {{ store.observations.length }}
-          </button>
-          <button
-            :class="['tab', { active: tab === 'subjects' }]"
-            @click="tab = 'subjects'"
-          >
-            主体 {{ store.subjects.length || '' }}
-          </button>
           <button :class="['tab', { active: tab === 'audio' }]" @click="tab = 'audio'">
             音频
           </button>
@@ -217,32 +182,6 @@ function fmtTime(sec: number): string {
             <span v-if="store.stats.shots" class="faint">
               {{ store.stats.shots }} 镜头
             </span>
-            <span v-if="store.stats.subjects" class="faint">
-              {{ store.stats.subjects }} 主体
-            </span>
-            <!-- 运镜覆盖率。全是 static 时标黄，提醒去看运动分析有没有生效。 -->
-            <span
-              v-if="motion.measured"
-              class="badge"
-              :class="motion.with_camera_movement || motion.with_subject_movement ? 'ok' : 'warn'"
-              :title="'客观运动分析：' + motion.measured + ' 个镜头里，' +
-                motion.with_camera_movement + ' 个有相机运动，' +
-                (motion.with_subject_movement ?? 0) + ' 个检出主体在动（帧间显著变化）。' +
-                '提示词里人物「原地踏步」时先看这两个数对不对。'"
-            >
-              运镜 {{ motion.with_camera_movement }}/{{ motion.measured }}
-              <template v-if="motion.with_subject_movement !== undefined">
-                · 主体 {{ motion.with_subject_movement }}/{{ motion.measured }}
-              </template>
-            </span>
-            <span
-              v-if="mergedShots"
-              class="badge info"
-              :title="'同一个机位被模型拆成多条时由代码合并：一镜到底 ' +
-                mergeDetail.collapsed + ' 条，复读内容 ' + mergeDetail.merged + ' 条'"
-            >
-              合并 {{ mergedShots }} 条
-            </span>
             <span v-if="store.stats.music_bpm" class="faint" title="音轨节奏">
               {{ Math.round(Number(store.stats.music_bpm)) }} BPM
             </span>
@@ -260,103 +199,6 @@ function fmtTime(sec: number): string {
             <span v-if="store.stats.elapsed_sec" class="faint">
               耗时 {{ store.stats.elapsed_sec }}s
             </span>
-          </div>
-        </template>
-
-        <!-- 镜头观察 -->
-        <template v-else-if="tab === 'shots'">
-          <div class="shot-list">
-            <div v-for="(o, i) in store.observations" :key="i" class="shot-card">
-              <div class="shot-head">
-                <span class="shot-no">镜头 {{ o.shot || i + 1 }}</span>
-                <span v-if="o.timecode" class="mono faint">{{ o.timecode }}</span>
-                <!-- 时间区间由后端补全并对齐（末镜一定落在总时长上），
-                     所以这里直接展示即可，不用前端再算 -->
-                <span v-if="o.end_ms" class="mono faint" title="该镜头在源视频里的时间区间">
-                  {{ (o.start_ms / 1000).toFixed(1) }}–{{ (o.end_ms / 1000).toFixed(1) }}s
-                </span>
-                <span v-if="o.shot_size" class="badge">{{ o.shot_size }}</span>
-                <span
-                  v-if="o.is_continuous"
-                  class="badge info"
-                  title="这一条由代码把相邻的同一机位条目合并而来"
-                >
-                  连续
-                </span>
-                <span v-if="o.confidence" class="badge" :class="o.confidence < 0.6 ? 'warn' : ''">
-                  置信 {{ (o.confidence * 100).toFixed(0) }}%
-                </span>
-              </div>
-              <dl class="shot-fields">
-                <template v-for="[label, value] in [
-                  ['运镜', o.camera],
-                  ['主体', o.subject],
-                  ['动作', o.action],
-                  ['环境', o.setting],
-                  ['光线', o.lighting],
-                  ['色调', o.color],
-                  ['节奏', o.motion_energy],
-                  ['台词', o.dialogue],
-                  ['音效', o.sfx],
-                  ['转场', o.transition],
-                  ['画面文字', o.on_screen_text],
-                ]" :key="label">
-                  <template v-if="value && value !== 'none'">
-                    <dt>{{ label }}</dt>
-                    <dd>{{ value }}</dd>
-                  </template>
-                </template>
-              </dl>
-            </div>
-          </div>
-        </template>
-
-        <!-- 主体登记表 -->
-        <template v-else-if="tab === 'subjects'">
-          <template v-if="store.subjects.length">
-            <div class="field-hint" style="margin-bottom: 12px">
-              这些是 Pass1 跨镜头登记的主体。Ref2VA 模式下它们会依次变成
-              &lt;Subject 1..N&gt;，并逐个写进 retention_analysis。
-            </div>
-            <div class="shot-list">
-              <div v-for="(s, i) in store.subjects" :key="i" class="shot-card">
-                <div class="shot-head">
-                  <span class="shot-no">&lt;Subject {{ i + 1 }}&gt;</span>
-                  <span class="mono faint">{{ s.label }}</span>
-                  <span v-if="s.kind" class="badge">{{ s.kind }}</span>
-                  <span v-if="s.shots.length" class="badge">
-                    {{ s.shots.map((x) => `[Shot ${x}]`).join(' ') }}
-                  </span>
-                </div>
-                <dl class="shot-fields">
-                  <template v-for="[label, value] in [
-                    ['外观', s.description],
-                    ['需保持一致', s.notes],
-                  ]" :key="label">
-                    <template v-if="value">
-                      <dt>{{ label }}</dt>
-                      <dd>{{ value }}</dd>
-                    </template>
-                  </template>
-                </dl>
-              </div>
-            </div>
-          </template>
-
-          <!-- 模型漏了 subjects 数组。不致命，但要说清楚，
-               否则用户看到提示词里有 <Subject N> 却在这页找不到，会以为坏了。 -->
-          <div v-else class="empty" style="text-align: left; line-height: 1.8">
-            <div style="font-weight: 500; margin-bottom: 6px">本次没有登记到主体</div>
-            <div class="faint">
-              观察阶段（Pass 1）没有返回主体登记表。这不算失败 ——
-              Ref2VA 的参考标签会由成文阶段从镜头观察里自行推导，
-              本次结果里<strong>仍然有</strong> <code>&lt;Subject N&gt;</code>，
-              只是镜号归属的准确度和跨镜一致性会比有登记表时差一些。
-            </div>
-            <div class="faint" style="margin-top: 8px">
-              想减少这种情况：换一个更听话的模型，或减少抽帧数
-              （输入越长，模型越容易在写到最后时省掉这一节）。
-            </div>
           </div>
         </template>
 

@@ -15,7 +15,6 @@ from .core.config import get_settings, resolve_ffmpeg, resolve_ffprobe
 from .services import asr as asr_mod
 from .services import audio_features, selection
 from .services import ffmpeg as ff
-from .services import motion as motion_mod
 
 
 def main(argv: list[str]) -> int:
@@ -59,21 +58,6 @@ def main(argv: list[str]) -> int:
     print(f"    镜头数 : {len(shots)}")
     for i, (a, b) in enumerate(shots[:10]):
         print(f"      #{i + 1}: {a:7.2f}s - {b:7.2f}s  ({b - a:.2f}s)")
-
-    # 运动分析必须和管线走同一条路径 —— 自检报「全部静止」而管线报「有运镜」
-    # 的话，用户会照着错的数字去调参数。
-    t0 = time.time()
-    motions = motion_mod.analyze_shots_motion(str(video), shots) if s.motion_analysis else []
-    print(f"\n[2.5] 镜头运动分析  ({time.time() - t0:.2f}s)")
-    if not motions:
-        print("    (已关闭：MOTION_ANALYSIS=false)")
-    else:
-        moved = sum(1 for m in motions if not m.camera_static)
-        print(f"    检出相机运动 : {moved}/{len(motions)} 个镜头")
-        for i, m in enumerate(motions[:10]):
-            print(f"      #{i + 1}: {motion_mod.suggest_camera(m):<12} "
-                  f"位移 {m.px_per_sec:6.1f}px/s  累计 {m.total_shift:6.1f}px  "
-                  f"纹理 {m.texture:4.1f}" + (f"  ⚠ {m.error}" if m.error else ""))
 
     t0 = time.time()
     plan = selection.plan_frames(

@@ -1,153 +1,30 @@
-"""提示词引擎：两阶段反推的 Prompt 模板。
+"""提示词引擎：自由发挥模式的 Prompt 模板。
 
-为什么分两阶段：
-    一次性把 40 多张帧丢给模型让它「直接写一段提示词」，模型会把注意力花在
-    措辞上，导致细节大面积丢失（尤其是次要镜头、背景细节、运镜方向）。
-    拆成 Pass1「只看不写」的结构化观察 + Pass2「只写不看」的成文，
-    观察质量立刻上一个档，而且同一份观察结果能出多种目标格式。
+一次调用：帧 + 时间戳 + 用户说明 → 目标格式提示词。
 
-    Pass1: 帧 + 音频转写 → 逐镜头结构化 JSON（信息保全）
-    Pass2: 观察 JSON + 音频 + 全局统计 → 目标格式提示词（措辞与结构）
+⚠️ 这里**只有两类内容**：
+  1. `build_system()` —— 身份 + 任务 + 目标格式块。**刻意不写「怎么观察」的规则。**
+  2. `build_user()` —— 帧时间戳清单 + 音频报告 + 用户说明。
+
+曾经有过 Pass1（结构化观察）+ Pass2（成文）两阶段，Pass1 的系统提示词长到
+14000 字符、大半在教模型「怎么观察」和「别信我们的场景检测」。实测每收紧一次
+这类规则、输出就退化一次：防编造规则压掉合理推断（动作描述只剩 19%，读起来像
+照片说明）、把「相机静止」当结论喂进去会被外推成「人物也静止」、写死「20 秒 MV
+大约 5-20 个镜头」会把快切压到 20 以内。
+
+**约束输出格式 ≠ 约束思考。** 现在只留目标格式（输出契约）和两条关于**产物**的
+硬约束（静止动词会让视频冻住；音频未知时编造比留空更糟）。
 """
 
 from __future__ import annotations
 
-import json
 import re
 import statistics
-from collections import Counter
-from dataclasses import dataclass, field
 
-from ..schemas import AudioReport, ChunkObservation, MediaInfo, ShotObservation, SubjectEntry
-
-# ---------------------------------------------------------------------------
-# Pass 1 —— 结构化镜头观察
-# ---------------------------------------------------------------------------
-
-PASS1_SYSTEM = """You are a senior film analyst and prompt engineer. You receive a sequence of still frames \
-sampled from ONE continuous video segment, each labelled with its exact timestamp, plus the \
-audio transcript with timestamps.
-
-Your job is faithful observation — not copywriting, not summarising. Never invent anything you \
-cannot see or hear.
-
-Hard rules:
-1. Report only what the frames actually show. If something is ambiguous or occluded, say so and \
-lower `confidence`. Never fill a gap with a plausible-sounding guess.
-2. **A shot is a span of TIME, not a picture.** Write what UNFOLDS across it. The frames are \
-evidence for the motion, not things to caption.
-   * **Inferring the motion BETWEEN the sampled frames is required, and it is NOT fabrication.** \
-Fabrication means inventing what is absent from the footage — a person who never appears, a place \
-never shown. If a hand is raised in one frame and lowered in the next, the arm moved through the \
-space between; that is a fact about the footage, not a guess.
-   * Give motion its physical consequence: weight shift, hair swing, fabric ripple, accessory \
-sway, contact with the ground. Motion with no physical description renders as frozen.
-   * Never invent movement to fill space. If a shot genuinely has none, say so — "very little \
-moves in this shot" is a valid observation.
-   * Appearance, setting, lighting and colour are supporting detail; they must not crowd out \
-what happens.
-3. Use motion verbs, never static ones. Never write "stays", "holds", "remains still", "hands rest" — \
-those words freeze the generated video. Never declare that one motion is the ONLY motion in \
-frame: everything you do not mention as moving stops moving, including the mouth. (`global_notes` \
-is passed verbatim into the next stage, so bad phrasing here contaminates the final prompt.)
-4. Judge camera movement by COMPARING the frames of a shot against each other, never from one \
-frame. `static` is allowed only when the framing genuinely does not change between them; \
-otherwise name the move (pan / tilt / truck / dolly / crane / handheld / orbit / whip) and its \
-speed.
-   * **A static camera does NOT mean a static subject.** If the subject's position changes across \
-the frames — further left, nearer the lens, higher in frame, larger or smaller — the subject is \
-MOVING; write the movement and its direction (walking across, stepping forward, approaching, \
-receding). Writing "she stands" for a shot where she walks is a wrong observation, and the \
-generated video will show a person rooted to the spot.
-5. Transcribe on-screen text, captions, subtitles and logos VERBATIM into `on_screen_text`. Write \
-"none" if there is none.
-6. Put speech and lyrics that fall inside a shot into that shot's `dialogue`, in the ORIGINAL \
-language. Put non-verbal sound into `sfx`.
-7. `timecode` = the timestamp of that shot's first frame, as MM:SS.mmm. Also fill `start_ms` and \
-`end_ms` — the shot's span in milliseconds, as plain integers. Shots must tile the segment with \
-no gaps: the first starts at 0, and **the last shot's `end_ms` equals the segment duration**.
-8. Build a SUBJECT REGISTRY: everything that must look the same if it reappears — a person, an \
-environment, a prop, a wardrobe piece, the overall grade. Each subject **must be ONE entry covering ALL the \
-shots it appears in** — never one entry per shot — with a short lowercase label and the traits that \
-are easy to get wrong (eye colour, hair length and parting, garment cut, tattoo placement). Emit \
-`subjects` BEFORE `shots` — you may run out of output budget otherwise. A missing or empty `subjects` array is INCOMPLETE. Do NOT register \
-watermarks, platform logos, subtitles or UI overlays — they are artefacts of the source file, not content \
-to reproduce; mention them only in `on_screen_text`, never in `subjects`.
-9. **Describe only what is visible inside THIS shot.** The registry defines everyone's appearance \
-once, so do not re-list attributes that fall outside the framing or are hidden: no socks, shoes \
-or hems in a face close-up; nothing a subject holds if their hands are out of frame; no \
-background detail if it is blurred beyond recognition. Refer to people by their registry label. \
-Naming an off-screen attribute is a factual error about the shot — it makes the final prompt \
-describe a shot that does not exist.
-
-HOW TO DECIDE THE SHOT STRUCTURE
-
-The frames were sampled automatically at fixed intervals, so a frame boundary is NOT a cut. \
-Decide the shot structure yourself from what you see.
-
-* One `shots` entry = one camera setup, covering a RANGE of consecutive frames from where that \
-setup begins to where it ends.
-* Consecutive frames showing the same setup continuing (same subject, same framing, same \
-location, the motion simply progressed) are the SAME shot — merge them. Start a new entry only \
-where the image actually jumps: a different setup, a hard jump in subject position, an abrupt \
-change of location or lighting.
-* A new entry must differ in SETUP. If two consecutive entries would carry nearly the same text \
-("three performers dance" / "three performers continue"), you have split one shot — merge them. \
-An entry whose action is only "continues" carries no information.
-* `continuous` = one uninterrupted take: the camera and subject may move and the framing may \
-change, but there is no instant where the image jumps to a different setup. → exactly ONE entry \
-in `shots`, and `cut_points` empty. (A `[Shot N]` marker tells the video model to cut there, so over-splitting a continuous take produces a choppy result.)
-  `multi_shot` = real cuts: an instant where the frame content changes discontinuously. → one \
-entry per interval between real cuts, and `cut_points` lists them (MM:SS.mmm).
-* Decide `edit_structure` from the footage BEFORE writing entries, and do not revisit it. Do NOT \
-pick the label that happens to match your entry count — if the two disagree, re-examine the \
-footage and merge.
-
-Output STRICT JSON only — no markdown fence, no commentary — in exactly this shape (`subjects` \
-first, then `shots`):
-
-{
-  "subjects": [
-    {
-      "label": "short lowercase label",
-      "kind": "person | environment | prop | wardrobe | style",
-      "description": "appearance, material, colour, identifying features",
-      "shots": ["1", "2"],
-      "notes": "what must stay consistent; which traits drift easily"
-    }
-  ],
-  "shots": [
-    {
-      "shot": "1",
-      "timecode": "00:00.000",
-      "start_ms": 0,
-      "end_ms": 3400,
-      "shot_size": "extreme close-up | close-up | medium close-up | medium | medium wide | wide | extreme wide",
-      "camera": "move type + speed, e.g. 'static' / 'slow dolly-in, small amplitude'",
-      "subject": "who or what is in frame — only what this shot shows; keep it brief",
-      "action": "what UNFOLDS from the shot's first frame to its last — **the most important field, give it the most space**",
-      "setting": "environment — one short phrase",
-      "lighting": "source, direction, quality — one short phrase",
-      "color": "palette and grade — a few words",
-      "motion_energy": "low | medium | high, plus the rhythm it follows",
-      "on_screen_text": "verbatim, or 'none'",
-      "dialogue": "speech or lyrics in this shot, original language, or ''",
-      "sfx": "non-verbal sound in this shot",
-      "transition": "how the shot hands off to the next",
-      "confidence": 0.0
-    }
-  ],
-  "edit_structure": "continuous | multi_shot",
-  "cut_points": ["00:03.400"],
-  "continuity_notes": "why you judged the structure this way",
-  "global_notes": "cross-shot observations the per-shot fields cannot capture"
-}
-"""
+from ..schemas import MediaInfo
 
 
-
-
-def build_pass1_user(
+def build_user(
     chunk_start: float,
     chunk_end: float,
     frame_marks: list[tuple[float, str]],
@@ -156,17 +33,14 @@ def build_pass1_user(
     chunk_index: int,
     chunk_total: int,
     content_hint: str = "",
-    motion_text: str = "",
+    closing: str = "",
 ) -> str:
-    """组织 Pass1 的用户消息文本（图片由调用方按顺序附在后面）。
+    """组织用户消息文本（图片由调用方按顺序附在后面）。
 
     `content_hint` 是用户自己写的画面说明。**这东西很有用**：静态帧看不出
     「这段是一镜到底还是多镜头切换」「这是什么作品/角色」「动作的前因后果」，
     而这些直接影响产出质量。让用户补一句话，比让模型瞎猜强得多。
 
-    `motion_text` 是 ffmpeg + 光流算出来的**客观**运动数据。为什么要给：
-    单帧推不出运动，模型拿不准时会一律写 static —— 实测一支有运镜的 MV
-    38 个镜头全是 static。给了实测数据它才有依据下判断。
     """
     lines: list[str] = []
     lines.append(
@@ -210,43 +84,14 @@ def build_pass1_user(
     lines.append(
         "**Read the gaps, not just the timestamps.** Consecutive frames are normally about "
         f"{normal_gap:.2f}s apart; the places marked `sampling boundary` above are much closer "
-        "together. Those are where the automated detector saw a change — it may be a real cut, "
-        "or it may have split one continuous take. Compare the images on both sides and decide "
-        "yourself; do not treat the marker as a confirmed cut."
-    )
-    lines.append("")
-    lines.append(
-        "These timestamps come from an automated scene-change detector. **They are a "
-        "sampling aid, not the edit structure** — the detector splits on pixel "
-        "difference, so it routinely breaks one continuous take into several groups "
-        "and can miss real cuts. Decide the actual shot structure yourself from what "
-        "you see, and report it in `edit_structure` / `cut_points`."
+        "together — that is where the automated detector saw a change. These timestamps are a "
+        "**sampling aid, not the edit structure**: the detector splits on pixel difference, so "
+        "it both misses real cuts and breaks single takes into pieces. Do not treat the marker "
+        "as a confirmed cut. **How many shots there are, and where the cuts fall, is yours to "
+        "judge from the images.**"
     )
     lines.append("")
 
-    # 客观运动数据。放在帧清单之后、音频之前 —— 紧挨着「判断运镜」这条规则。
-    if motion_text.strip():
-        lines.append("=== MEASURED CAMERA MOVEMENT (computed from the footage, not guessed) ===")
-        lines.append(motion_text.strip())
-        lines.append("")
-        lines.append(
-            "How to use this: it is objective measurement, so trust it over your own "
-            "impression. `content moves ... per frame` tells you the direction and speed; "
-            "`total movement across the whole shot` tells you whether the camera moved at "
-            "all. **Write `static` only for shots where the total movement is effectively "
-            "zero.** Where the numbers say the content moves, name the camera move and its "
-            "speed. If a measurement is flagged unreliable (low texture), fall back to "
-            "comparing the frames yourself."
-        )
-        lines.append(
-            "⚠️ These measurements are given per SAMPLING shot (the detector's grouping). "
-            "The number of shots you finally report may differ — match them by timestamp, "
-            "and if a shot of yours has no measurement line, judge it from the frames alone. "
-            "Also note the two cases are different: movement of the SUBJECT with a locked-off "
-            "camera is still a static camera, and you should say so explicitly rather than "
-            "listing a camera move that did not happen."
-        )
-        lines.append("")
 
     lines.append(audio_text)
 
@@ -269,558 +114,8 @@ def build_pass1_user(
                      "trust the frames and note the discrepancy.")
 
     lines.append("")
-    lines.append(
-        "Now output the strict JSON described in your instructions. "
-        "Be exhaustive about physical detail and camera movement. Output JSON only."
-    )
+    lines.append(closing or build_closing())
     return "\n".join(lines)
-
-
-@dataclass
-class Pass1Parse:
-    """Pass1 的解析结果。
-
-    做成 dataclass 而不是越来越长的元组 —— 加「剪辑结构」这类字段时
-    不用把所有调用点都改一遍解包顺序。
-    """
-
-    shots: list[ShotObservation] = field(default_factory=list)
-    subjects: list[SubjectEntry] = field(default_factory=list)
-    global_notes: str = ""
-    # 模型自己判断的剪辑结构（不是我们切出来的）：
-    #   continuous = 一镜到底；multi_shot = 有硬切；unknown = 判断不了
-    edit_structure: str = "unknown"
-    cut_points: list[str] = field(default_factory=list)
-    continuity_notes: str = ""
-
-
-def resolve_edit_structure(edit_structure: str, shots: list[ShotObservation]) -> str:
-    """把模型报的结构和它实际给的条目数对齐一下。
-
-    模型经常报 `unknown`（拿不准），但同时只给了 1 个条目 —— 那实际上就是
-    「没找到任何切点」，等同于 `continuous`。归一到 `continuous` 之后，
-    成文阶段才能拿到明确的「不许写切点标记」指令，而不是含糊的保守处理。
-
-    实测：一段同画面慢推的 10 秒素材（各阈值下 0 切点），模型报了 `unknown`，
-    只给了 1 个条目。归一到 continuous 后成文阶段才真的不会切。
-    """
-    if edit_structure == "unknown" and len(shots) <= 1:
-        return "continuous"
-    return edit_structure
-
-
-def collapse_continuous_shots(
-    shots: list[ShotObservation], edit_structure: str
-) -> list[ShotObservation]:
-    """一镜到底时，把逐帧的条目合并成一个。
-
-    ⚠️ 为什么要用代码强制：模型**判断对了却写不对**。实测一个连续运镜的 10 秒
-    素材，模型正确报了 `edit_structure: continuous`、`cut_points: []`，
-    但 `shots` 数组仍然给了 20 个条目（一帧一个）。它自己前后矛盾。
-
-    这种情况靠提示词治不好（已经在提示词里明确说「一镜到底只输出一个条目」，
-    也加了自检提示，模型照样按帧输出）。所以判断归模型、后果归代码。
-
-    合并保留动作细节：把各条目的 action 去重后拼起来，成文阶段仍然能看到
-    这 10 秒里发生了什么，只是不再被当成 20 个镜头。
-    """
-    if edit_structure != "continuous" or len(shots) <= 1:
-        return shots
-
-    actions: list[str] = []
-    for s in shots:
-        a = (s.action or "").strip()
-        if a and a not in actions:
-            actions.append(a)
-
-    merged = shots[0].model_copy(deep=True)
-    if actions:
-        merged.action = "; ".join(actions)[:900]
-    merged.transition = "continues without a cut"
-    merged.confidence = max((s.confidence or 0.0) for s in shots)
-    return [merged]
-
-
-# ---------------------------------------------------------------------------
-# 相邻镜头合并（代码兜底）
-# ---------------------------------------------------------------------------
-#
-# ⚠️ 为什么必须用代码做：提示词里已经把话说尽了 ——「条目数 = 机位数量，不是
-# 帧数」、给了自检（「如果你输出的条数和帧数差不多，你搞错了」）、还专门写了
-# 「相邻条目内容重复就是没合并」。实测照样出现：一段 3 人 MV 输出 23 个交替的
-# 「Three performers dance.」/「Three performers continue.」。
-# **判断归模型，后果归代码。**
-
-# 景别归类。分得比「特写/中景/全景」细一档：极特写和特写是明显不同的构图，
-# 混成一类会把它们误合并。
-_SIZE_RULES: tuple[tuple[tuple[str, ...], str], ...] = (
-    (("extreme close", "大特写", "极特写"), "ecu"),
-    (("medium close", "近景", "中近景"), "mcu"),
-    (("close", "特写"), "cu"),
-    (("medium", "中景", "mid shot"), "ms"),
-    (("wide", "long shot", "full shot", "全景", "远景", "wide shot"), "ws"),
-)
-
-_CAMERA_KEYS = (
-    "static", "fixed", "locked", "pan", "tilt", "dolly", "zoom", "truck",
-    "crane", "handheld", "orbit", "whip", "push", "pull", "steadicam",
-)
-
-
-def _size_class(size: str) -> str:
-    s = (size or "").lower().strip()
-    if not s:
-        return ""
-    for keys, label in _SIZE_RULES:
-        if any(k in s for k in keys):
-            return label
-    return s[:12]
-
-
-def _camera_class(camera: str) -> str:
-    s = (camera or "").lower().strip()
-    if not s:
-        return ""
-    for key in _CAMERA_KEYS:
-        if key in s:
-            return "static" if key in ("fixed", "locked") else key
-    return s[:12]
-
-
-_STOP_WORDS = frozenset(
-    [
-        "the", "a", "an", "and", "or", "of", "in", "on", "at", "to", "with",
-        "is", "are", "be", "as", "it", "its", "their", "his", "her",
-        "this", "that", "these", "those", "same", "again", "continues", "continue",
-    ]
-)
-
-
-def _action_tokens(action: str) -> frozenset[str]:
-    words = re.findall(r"[a-z\u4e00-\u9fff]+", (action or "").lower())
-    return frozenset(w for w in words if w not in _STOP_WORDS and len(w) > 1)
-
-
-def _action_key(action: str) -> str:
-    """把 action 归一成一个可比较的键（词序无关，去标点与停用词）。"""
-    return " ".join(sorted(_action_tokens(action)))
-
-
-def merge_adjacent_shots(
-    shots: list[ShotObservation],
-    repeat_threshold: int = 3,
-) -> list[ShotObservation]:
-    """把「同一个机位被拆成好几条」的相邻条目合并。
-
-    判据（必须同时满足）：
-      1. 景别同类（`_size_class`）且运镜同类（`_camera_class`）；
-      2. 动作要么高度相似，要么是**复读内容**。
-
-    为什么用「复读」而不是「相似度」当主判据：实测的坏输出长这样 ——
-    23 条交替的 "Three performers dance." 和 "Three performers continue."。
-    这两句互相的相似度并不高（dance vs continue），但各自在整段里重复了
-    十几次。**一条描述在几分钟的素材里以完全相同的话出现三次以上，它就不
-    可能是对独立镜头的描述**，只能是同一机位的重复采样。
-
-    反过来，真实的不同镜头各有各的描述，不会出现这种复读，所以不会误合并。
-    """
-    if len(shots) <= 1:
-        return shots
-
-    keys = [_action_key(s.action) for s in shots]
-    counts = Counter(k for k in keys if k)
-    repeated = {k for k, n in counts.items() if n >= repeat_threshold}
-
-    out: list[ShotObservation] = []
-    for shot, key in zip(shots, keys, strict=True):
-        if not out:
-            out.append(shot.model_copy(deep=True))
-            continue
-
-        prev = out[-1]
-        if _mergeable(prev, shot, key, keys[len(out) - 1], repeated):
-            _absorb(prev, shot)
-            continue
-        out.append(shot.model_copy(deep=True))
-
-    for i, s in enumerate(out, start=1):
-        s.shot = str(i)
-    return out
-
-
-def _mergeable(
-    prev: ShotObservation,
-    cur: ShotObservation,
-    cur_key: str,
-    prev_key: str,
-    repeated: set[str],
-) -> bool:
-    # 缺景别信息时保守处理：不合并。宁可多留一条，也不要合并掉真实切镜。
-    if not prev.shot_size or not cur.shot_size:
-        return False
-    if _size_class(prev.shot_size) != _size_class(cur.shot_size):
-        return False
-
-    pc, cc = _camera_class(prev.camera), _camera_class(cur.camera)
-    if pc and cc and pc != cc:
-        return False
-
-    if cur_key and cur_key == prev_key:
-        return True
-    if cur_key in repeated or prev_key in repeated:
-        return True
-
-    # 兜底：动作描述高度相似（同一件事的两种说法）
-    a, b = _action_tokens(prev.action), _action_tokens(cur.action)
-    if a and b:
-        inter = len(a & b)
-        union = len(a | b)
-        if union and inter / union >= 0.6:
-            return True
-    return False
-
-
-def _absorb(prev: ShotObservation, cur: ShotObservation) -> None:
-    """把 cur 并进 prev，保留两边的信息。"""
-    acts: list[str] = []
-    for text in (prev.action, cur.action):
-        t = (text or "").strip()
-        if t and t not in acts:
-            acts.append(t)
-    if acts:
-        prev.action = "; ".join(acts)[:900]
-
-    if cur.end_ms > prev.end_ms:
-        prev.end_ms = cur.end_ms
-    if cur.transition:
-        prev.transition = cur.transition
-    prev.confidence = max(prev.confidence or 0.0, cur.confidence or 0.0)
-    prev.is_continuous = True
-    # 景别/运镜取更具体的那个（原来空的用新的补上）
-    if not prev.shot_size:
-        prev.shot_size = cur.shot_size
-    if not prev.camera:
-        prev.camera = cur.camera
-    if not prev.setting:
-        prev.setting = cur.setting
-
-
-# ---------------------------------------------------------------------------
-# 特写镜头的画面外属性自检
-# ---------------------------------------------------------------------------
-#
-# 实测：`[Shot 1] Extreme close-up` 的描述里出现了 `white socks, black ankle boots`。
-# 特写根本看不到袜子。根因是每一帧都在重新识别角色，然后把整套外观标签
-# 一次性倒出来，而不是描述这一帧能看到什么。
-#
-# 提示词里已经加了硬约束（「只描述本帧可见内容」），但这类泄漏和「条目数」一样
-# 属于「模型知道规则也照样违反」的范畴，所以代码侧再兜一道。
-
-_LOWER_BODY_TERMS = (
-    "sock", "socks", "shoe", "shoes", "boot", "boots", "sneaker", "sneakers",
-    "heel", "heels", "sandal", "sandals", "trouser", "trousers", "pant", "pants",
-    "jean", "jeans", "skirt", "thigh", "knee", "knees", "ankle", "ankles",
-    "calf", "calves", "foot", "feet", "toe", "toes", "hem", "hems",
-    "waist", "hip", "hips", "belt", "legging", "leggings",
-    "袜子", "鞋", "靴", "裤", "裙", "大腿", "膝", "脚", "踝", "腰带",
-)
-
-# 只有这些景别才「看不到下肢」。中景（medium）可能拍到腰以下，不算。
-_CLOSE_SIZE_KEYS = ("close", "特写", "近景", "medium close")
-
-# 出现这些词，说明画面主体是上半身/面部 —— 那么下肢属性就是画面外的。
-# ⚠️ 必须**同时**有上半身证据才清理。踩过：一个「低机位拍腿和裙子」的特写
-# （shot_size 也是 close-up），主体本来就是下肢，把 skirt/legs 删掉等于把
-# 整个镜头描述删空。判据要落在「主体在哪」而不是「景别叫什么」。
-_UPPER_BODY_TERMS = (
-    "face", "head", "hair", "eye", "lip", "mouth", "chin", "cheek",
-    "shoulder", "chest", "neck", "collar", "jacket", "shirt", "blouse",
-    "halter", "arm", "hand", "finger", "bust",
-    "脸", "头", "发", "眼", "嘴", "唇", "肩", "胸", "颈", "手", "臂",
-)
-
-
-def _is_close_shot(size: str) -> bool:
-    s = (size or "").lower()
-    return any(k in s for k in _CLOSE_SIZE_KEYS)
-
-
-def _has_lower_body(text: str) -> bool:
-    low = (text or "").lower()
-    return any(t in low for t in _LOWER_BODY_TERMS)
-
-
-def _has_upper_body(text: str) -> bool:
-    low = (text or "").lower()
-    return any(t in low for t in _UPPER_BODY_TERMS)
-
-
-def strip_offscreen_attributes(
-    shots: list[ShotObservation],
-) -> tuple[list[ShotObservation], list[str]]:
-    """删掉特写镜头描述里越界的下肢属性。返回 (清理后的镜头, 命中记录)。
-
-    只在**两个条件同时成立**时才动手：景别是特写/近景，**且**描述里有上半身
-    证据（脸、头发、肩、胸、手……）。第二个条件是为了不误伤「低机位拍腿」那类
-    镜头 —— 它同样叫 close-up，但主体就是下肢。
-
-    按**短语**删而不是整句：一句里通常还混着脸、发型、上半身服装这些正确内容，
-    整句删掉损失太大。切分走两级 —— 先按逗号/分号，再按 `and` / `、`，
-    这样 "a black jacket and white socks" 只丢后半截。
-    """
-    hits: list[str] = []
-    out: list[ShotObservation] = []
-
-    for shot in shots:
-        if not _is_close_shot(shot.shot_size):
-            out.append(shot)
-            continue
-
-        combined = f"{shot.subject or ''} {shot.action or ''}"
-        if not _has_lower_body(combined) or not _has_upper_body(combined):
-            out.append(shot)
-            continue
-
-        cleaned = shot.model_copy(deep=True)
-        for attr in ("subject", "action"):
-            text = getattr(cleaned, attr) or ""
-            if not text or not _has_lower_body(text):
-                continue
-            kept = _drop_lower_body_clauses(text)
-            # 全被删光说明这句本来只写了画面外的东西 —— 那也不能留，
-            # 留一条错误的描述比留空更糟。退化成一句中性说明。
-            if not kept.strip():
-                kept = "see the subject registry for appearance"
-                hits.append(f"shot {shot.shot or '?'} {attr}: 整句都是画面外属性，已替换")
-            else:
-                hits.append(f"shot {shot.shot or '?'} {attr}: 删掉画面外属性")
-            setattr(cleaned, attr, kept.strip())
-        out.append(cleaned)
-
-    return out, hits
-
-
-def _drop_lower_body_clauses(text: str) -> str:
-    """按两级分隔符切短语，丢掉含下肢词的，再拼回去。"""
-    pieces: list[str] = []
-    for chunk in re.split(r"[,;，；]", text):
-        sub = [p for p in re.split(r"\s+and\s+|\s*、\s*", chunk) if p.strip()]
-        keep = [p for p in sub if not _has_lower_body(p)]
-        if keep:
-            pieces.append(" and ".join(p.strip() for p in keep))
-    return ", ".join(pieces)
-
-
-def parse_pass1_json(raw: str) -> Pass1Parse:
-    """宽容解析 Pass1 的 JSON 输出（模型偶尔会包 markdown 围栏或加前后缀）。
-
-    返回 `(逐镜头观察, 主体登记表, 跨镜头备注)`。解析不出来时返回空列表，
-    由调用方决定是报错还是降级——不要在这里抛异常，一块失败不该拖垮整条管线。
-    """
-    text = (raw or "").strip()
-
-    if text.startswith("```"):
-        text = text.split("```", 2)[1] if text.count("```") >= 2 else text.strip("`")
-        if text.lstrip().lower().startswith("json"):
-            text = text.lstrip()[4:]
-        text = text.strip()
-
-    start = text.find("{")
-    end = text.rfind("}")
-    if start == -1 or end == -1 or end <= start:
-        return Pass1Parse()
-
-    try:
-        data = json.loads(text[start:end + 1])
-    except json.JSONDecodeError:
-        # 尝试修掉尾随逗号
-        import re
-        cleaned = re.sub(r",\s*([}\]])", r"\1", text[start:end + 1])
-        try:
-            data = json.loads(cleaned)
-        except json.JSONDecodeError:
-            return Pass1Parse()
-
-    return Pass1Parse(
-        shots=_parse_shots(data.get("shots")),
-        subjects=_parse_subjects(data.get("subjects")),
-        global_notes=str(data.get("global_notes") or ""),
-        edit_structure=_normalize_structure(data.get("edit_structure")),
-        cut_points=_parse_cut_points(data.get("cut_points")),
-        continuity_notes=str(data.get("continuity_notes") or ""),
-    )
-
-
-def _normalize_structure(value: object) -> str:
-    """把模型写的各种说法归一到 continuous / multi_shot / unknown。"""
-    s = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
-    if not s:
-        return "unknown"
-    if any(k in s for k in ("continuous", "one_take", "single_take", "oners", "oner", "no_cut")):
-        return "continuous"
-    if any(k in s for k in ("multi", "cut", "edited", "montage")):
-        return "multi_shot"
-    return "unknown"
-
-
-def _parse_cut_points(raw: object) -> list[str]:
-    """切点列表。模型可能给字符串数组，也可能给逗号分隔的字符串。"""
-    if isinstance(raw, str):
-        parts = re.split(r"[,;\n]", raw)
-    elif isinstance(raw, list):
-        parts = [str(x) for x in raw]
-    else:
-        return []
-    out: list[str] = []
-    for p in parts:
-        p = p.strip()
-        # 只要看起来像时间码的（MM:SS.mmm / HH:MM:SS.mmm）
-        if p and re.match(r"^\d{1,2}:\d{2}(\.\d{1,3})?$", p):
-            out.append(p)
-    return out
-
-
-def _parse_shots(shots_raw: object) -> list[ShotObservation]:
-    if not isinstance(shots_raw, list):
-        return []
-    shots: list[ShotObservation] = []
-    for item in shots_raw:
-        if not isinstance(item, dict):
-            continue
-        data: dict = {}
-        for k, v in item.items():
-            if k not in ShotObservation.model_fields:
-                continue
-            if k in ("start_ms", "end_ms"):
-                data[k] = _coerce_int(v)
-            elif k == "confidence":
-                data[k] = _coerce_float(v)
-            elif k == "is_continuous":
-                data[k] = bool(v)
-            else:
-                # 模型偶尔把数字填进字符串字段，直接 str() 兜住，
-                # 否则 pydantic 校验失败会让整条 shot 被丢掉。
-                data[k] = "" if v is None else (v if isinstance(v, str) else str(v))
-        try:
-            shots.append(ShotObservation(**data))
-        except Exception:  # noqa: BLE001
-            continue
-    return shots
-
-
-def _coerce_int(value: object) -> int:
-    """毫秒字段的宽松解析。模型会写成 3400 / "3400" / "3.4s" / 3400.0。"""
-    if isinstance(value, bool):
-        return 0
-    if isinstance(value, (int, float)):
-        return int(value)
-    if isinstance(value, str):
-        m = re.search(r"-?\d+(?:\.\d+)?", value)
-        if m:
-            return int(float(m.group(0)))
-    return 0
-
-
-def _coerce_float(value: object) -> float:
-    if isinstance(value, bool):
-        return 0.0
-    if isinstance(value, (int, float)):
-        return float(value)
-    if isinstance(value, str):
-        m = re.search(r"-?\d+(?:\.\d+)?", value)
-        if m:
-            return float(m.group(0))
-    return 0.0
-
-
-def _parse_subjects(subjects_raw: object) -> list[SubjectEntry]:
-    """解析主体登记表。`shots` 可能是列表也可能是逗号串，两种都收。"""
-    if not isinstance(subjects_raw, list):
-        return []
-    subjects: list[SubjectEntry] = []
-    for item in subjects_raw:
-        if not isinstance(item, dict):
-            continue
-        shots_field = item.get("shots")
-        if isinstance(shots_field, str):
-            shot_list = [s.strip() for s in shots_field.replace("，", ",").split(",") if s.strip()]
-        elif isinstance(shots_field, list):
-            shot_list = [str(s).strip() for s in shots_field if str(s).strip()]
-        else:
-            shot_list = []
-
-        label = str(item.get("label") or "").strip()
-        description = str(item.get("description") or "").strip()
-        if not label and not description:
-            continue  # 整条都是空的，丢掉比留着干净
-
-        subjects.append(SubjectEntry(
-            label=label,
-            kind=str(item.get("kind") or "").strip(),
-            description=description,
-            shots=shot_list,
-            notes=str(item.get("notes") or "").strip(),
-        ))
-    return subjects
-
-
-# ---------------------------------------------------------------------------
-# Pass 2 —— 成文
-# ---------------------------------------------------------------------------
-
-_COMMON_RULES = """You are a prompt engineer writing the FINAL generation prompt for a video model, from a \
-shot-by-shot observation report of an existing video.
-
-Absolute rules — these override everything else:
-1. Use ONLY what the observation report and the audio report contain. Never invent subjects, \
-locations, props or events.
-2. **Lead with the action.** A shot is a span of TIME, not a picture: it must read as something \
-unfolding, not as a caption for a still. Framing, appearance, environment and lighting come after \
-the action and stay short — a shot that opens with an outfit and ends with one verb is written \
-backwards. Give every motion its physical consequence (weight shift, hair swing, fabric ripple, \
-accessory sway, contact with the ground); a subject with no motion description renders as a \
-frozen mannequin.
-   The report's frames are samples of one continuous event — reconstruct the motion that happened \
-between them. That is a fact about the footage, not an invention. Do not invent movement to fill \
-space either: if a shot genuinely has none, say so in one line ("very little moves in this shot").
-3. NEVER use static or terminal verbs: stop, freeze, hold, pause, rest, stay, remain, settle, \
-end, ending, final frame, final pose. Never declare that any motion is the only motion in frame \
-— if you write "the only movement is X", everything else freezes, including the mouth.
-4. Mouth movement is a VISUAL fact, never audio content.
-   * If the lyrics or dialogue ARE in the audio report, state which words or syllables the lips \
-move through, and that the movement is continuous through the line.
-   * If the audio is unknown, describe only the visible articulation ("her lips move \
-continuously, opening and closing in a steady rhythm") and do NOT call it speaking, singing, a \
-line, a lyric or dialogue — that names audio content you were told you do not have.
-5. Keep dialogue and lyrics verbatim in their ORIGINAL language. Mark unintelligible spans \
-[unclear]. Never paraphrase.
-6. Do not mention watermarks, logos, platform UI, or that this is a reverse-engineered prompt. If \
-the report notes on-screen text, transcribe it as diegetic text or omit it.
-7. Audio — use the audio report, and ONLY it.
-   * If it describes the music (tempo, instruments, vocals, audience), write that in plain \
-musical language. Rephrase freely, but do not add instruments or a genre it does not mention.
-   * If it carries lyrics or dialogue with timestamps, quote them in their original language, in \
-the shots they fall in.
-   * If it says the audio content is unknown, then you do not know it. Never write dialogue, lyrics, \
-instrumentation, tempo or specific sound-effect types — not even hedged ("as if", "appears to \
-be"). Leave the field empty or write N/A — an empty field is correct here. Fabricated sound is worse than an empty field: the generated video will not match the source.
-   * Do NOT convert visual events into sound events: seeing someone walk does not license \
-"footsteps"; seeing fabric move does not license "cloth rustle".
-   * No audio-ANALYSIS vocabulary: no frequency-band names, no energy or spectral wording, no \
-decibel or hertz figures, no "not analysed / not identified" status notes — those are internal \
-working notes a video model can do nothing with.
-8. Keep each subject's appearance wording IDENTICAL across shots — inconsistent wording is read \
-as a different person and the identity drifts.
-9. Each shot describes ONLY what that shot shows; the report records every shot's framing. Do not \
-put socks, shoes or anything below the framing into a face close-up — naming an off-screen \
-attribute makes the generator draw a shot the source never had.
-10. Every shot needs a time range. Use `start_ms` / `end_ms` from the report for the \
-`[Shot N] At MM:SS.mmm` markers and any beat map. The final shot must end at the source's total \
-duration — never leave the last beat short.
-11. Write in {language_instruction}.
-"""
-
-
 _PASS2_H3 = """{common}
 
 TARGET MODE — MiniMax H3, text-to-video with audio (T2VA). There are NO reference assets, so the \
@@ -1148,270 +443,64 @@ def format_display(fmt: str) -> str:
     return label if variant == label else f"{label} · {variant}"
 
 
-def build_pass2_system(fmt: str, language: str) -> str:
+def _language_instruction(fmt: str, language: str) -> str:
     if fmt == "seedance":
-        lang_instr = "Chinese (简体中文)"
-    elif language == "zh":
-        lang_instr = "Chinese (简体中文), except that dialogue and lyrics stay in their original language"
-    else:
-        lang_instr = "English, except that dialogue and lyrics stay in their original language"
+        return "Chinese (简体中文)"
+    if language == "zh":
+        return "Chinese (简体中文), except that dialogue and lyrics stay in their original language"
+    return "English, except that dialogue and lyrics stay in their original language"
 
+
+def build_format_block(fmt: str, language: str) -> str:
+    """目标格式规则（H3 三字段 / Ref2VA 六段 / Seedance 六要素 / generic），不含公共规则。
+
+    自由发挥模式只带这一段 —— 格式是**输出契约**，必须精确；其余都是建议。
+    """
+    lang_instr = _language_instruction(fmt, language)
     template = _PASS2_BY_FORMAT.get(fmt) or _PASS2_GENERIC
-    # 注意：_COMMON_RULES 自己带 {language_instruction} 占位符，而 str.format 不会
-    # 递归替换被代入的值——必须先单独 format 一次，否则这段会原样漏给模型。
-    common = _COMMON_RULES.format(language_instruction=lang_instr)
-    return template.format(common=common, language_instruction=lang_instr)
+    return template.format(common="", language_instruction=lang_instr).strip()
+# ---------------------------------------------------------------------------
+# 自由发挥模式（默认）
+# ---------------------------------------------------------------------------
+#
+# 帧 + 时间戳 + 用户说明 → 一次调用直接出提示词。
+#
+# ⚠️ 刻意**不写**「怎么观察」的规则。那些规则曾经占 Pass1 的 14000 字符，
+# 而实测每收紧一次、输出就退化一次：
+#   * 「只报告帧里真实存在的」压掉了合理推断 → 动作描述占比只剩 19%，读起来像照片说明
+#   * 把「相机静止」当结论喂进去 → 模型外推成「人物也静止」，写出一堆 stands
+#   * 加「动作占大头」的配比 → 又得再写一段「不许编动作」去中和它
+#   * 告诉它「20 秒 MV 大约 5-20 个镜头」→ 快切素材被压到 20 以内
+#
+# **约束输出格式 ≠ 约束思考。** 这里只留两样：目标格式（输出契约），以及两条关于
+# **产物**的硬约束 —— 静止动词会让生成的视频冻住（包括嘴），音频未知时编造比留空更糟。
+
+_FREEFORM_OPENING = """You are a prompt engineer. You receive still frames sampled from ONE \
+continuous video segment, each labelled with its exact timestamp, plus an audio report and any \
+notes from the person who submitted the video.
+
+Write the generation prompt for the target video model below, so that generating from your \
+prompt reproduces this footage — what it looks like, what happens in it, and how the edit moves. \
+The frames are samples of one continuous event, not a storyboard: they are evidence for what \
+happened, not things to caption. **How many shots the segment has, and where the cuts fall, is \
+yours to judge from the footage.**
+
+Two constraints on the wording — they are about the artifact, not about how you reason:
+* Never use static or terminal verbs (stays, holds, remains, freezes, pauses, ends, final pose) \
+— they make the generated video freeze, including the mouth.
+* If the audio report says the content is unknown, do not write dialogue, lyrics or specific \
+sound effects. Leave the field empty or write N/A; a plausible-sounding guess is not."""
 
 
-def build_pass2_user(
-    observations: list[ChunkObservation],
-    audio: AudioReport,
-    media: MediaInfo | None,
-    shots_summary: str,
-    extra_instruction: str = "",
-    target_duration: float | None = None,
-    subjects: list[SubjectEntry] | None = None,
-    fmt: str = "",
-    content_hint: str = "",
-) -> str:
-    """把 Pass1 的观察结果整理成 Pass2 的输入。"""
-    lines: list[str] = []
+def build_system(fmt: str, language: str) -> str:
+    """自由发挥模式：身份 + 要干嘛 + 目标格式规则。"""
+    return _FREEFORM_OPENING + "\n\n" + build_format_block(fmt, language)
 
-    lines.append("=== SOURCE VIDEO ===")
-    if media:
-        lines.append(
-            f"duration {media.duration:.2f}s | resolution {media.width}x{media.height} | "
-            f"{media.fps:.2f} fps | video codec {media.video_codec or 'unknown'} | "
-            f"audio {'present' if media.has_audio else 'absent'}"
-        )
-    lines.append(f"shot structure: {shots_summary}")
-    if media and media.duration > 0:
-        lines.append(
-            f"The source runs {media.duration:.2f}s. Your last shot must reach that end time — "
-            "do not leave the final beat short."
-        )
-    if target_duration:
-        lines.append(f"target duration for the generated video: {target_duration:.2f}s")
-    lines.append(f"target mode: {MODE_LABELS.get(mode_of(fmt), fmt or 'unknown')}")
-    lines.append("")
 
-    # 用户的画面说明也要传给成文阶段。观察结果可能漏掉或误判的东西
-    # （尤其「一镜到底 vs 多镜头」这种静态帧判断不了的），成文时要用得上。
-    if content_hint.strip():
-        lines.append("=== CONTEXT FROM THE USER (reliable background) ===")
-        lines.append(content_hint.strip())
-        lines.append("")
-        lines.append("Use it to inform the rewrite, but the observation report above is "
-                     "authoritative about what is visible. If they conflict, follow the "
-                     "observation report and do not invent.")
-        lines.append("")
-
-    registry = subjects or []
-    if registry:
-        lines.append("=== SUBJECT REGISTRY (authoritative labels) ===")
-        for i, sub in enumerate(registry, start=1):
-            shots_txt = ", ".join(f"[Shot {s}]" for s in sub.shots) or "unspecified shots"
-            head = f"{i}. {sub.label or 'unnamed'} ({sub.kind or 'unspecified'}) - {shots_txt}"
-            lines.append(head)
-            if sub.description:
-                lines.append(f"     appearance: {sub.description}")
-            if sub.notes:
-                lines.append(f"     must stay consistent: {sub.notes}")
-        lines.append("")
-        lines.append(
-            "These entries are the only subjects you may reference. In reference-based formats "
-            "they become <Subject 1..N> in registry order. In non-reference formats use the same "
-            "wording for each one in every shot it appears in."
-        )
-        lines.append("")
-
-    lines.append("=== SHOT OBSERVATION REPORT ===")
-    total = 0
-    for chunk in observations:
-        if len(observations) > 1:
-            lines.append(f"--- segment {chunk.chunk_index + 1} "
-                         f"({chunk.start:.2f}s - {chunk.end:.2f}s) ---")
-        for shot in chunk.shots:
-            total += 1
-            lines.append(_format_shot(shot))
-        if chunk.global_notes:
-            lines.append(f"  segment notes: {chunk.global_notes}")
-        lines.append("")
-
-    # 剪辑结构要单独、显眼地说一遍 —— 它决定成文时要不要输出切点标记。
-    # 一镜到底的片子如果被写成一堆 [Shot N]，生成的视频就会在原本连续的地方
-    # 硬切，和源片完全不是一回事（用户反馈过「镜头连贯性不对」）。
-    lines.append("=== EDIT STRUCTURE (decided by the observer, authoritative) ===")
-    structures = [c.edit_structure for c in observations if c.edit_structure]
-    if "continuous" in structures and "multi_shot" not in structures:
-        lines.append("CONTINUOUS — the footage is ONE uninterrupted take. There are no cuts.")
-        lines.append("Therefore the description must NOT contain multiple `[Shot N]` markers "
-                     "implying cuts. Describe the whole thing as a single continuous shot: "
-                     "use one `[Shot 1]` (or none at all) and carry the camera movement, "
-                     "subject motion and framing changes through as continuous evolution.")
-    elif "multi_shot" in structures:
-        lines.append("MULTI_SHOT — there are real cuts.")
-        for c in observations:
-            if c.cut_points:
-                lines.append(f"  segment {c.chunk_index + 1} cut points: {', '.join(c.cut_points)}")
-        lines.append("Use `[Shot N]` markers that follow THESE cuts — not the sampling "
-                     "timestamps, and not the detector's grouping.")
-    else:
-        lines.append("UNKNOWN — the observer could not tell. Keep the shot markers "
-                     "conservative: only mark a cut where the report describes an "
-                     "abrupt change of setup.")
-    for c in observations:
-        if c.continuity_notes:
-            lines.append(f"  segment {c.chunk_index + 1} reasoning: {c.continuity_notes}")
-    lines.append("")
-
-    lines.append("=== AUDIO REPORT ===")
-    from .asr import format_transcript_for_prompt
-    lines.append(format_transcript_for_prompt(audio))
-    lines.append("")
-
-    if extra_instruction:
-        lines.append("=== USER'S EXTRA INSTRUCTION ===")
-        lines.append(extra_instruction)
-        lines.append("")
-
-    lines.append(
-        f"Now write the final prompt covering ALL {total} observed shots, in the target format "
-        "defined in your instructions. Follow every absolute rule. "
-        "Do not add any commentary, preamble, or explanation — output only the prompt itself."
+def build_closing() -> str:
+    """收尾指令：明确只要提示词本身，不要前后缀。"""
+    return (
+        "Now write the final prompt described in your instructions, in the target format. "
+        "Cover every shot you judge the segment to have, in order. Output only the prompt "
+        "itself — no commentary, no preamble, no markdown fence."
     )
-    return "\n".join(lines)
-
-
-def _format_shot(s: ShotObservation) -> str:
-    head = f"[Shot {s.shot or '?'}] @ {s.timecode or '?'}"
-    if s.start_ms or s.end_ms:
-        head += f" (source span {s.start_ms}-{s.end_ms} ms)"
-    if s.is_continuous:
-        head += " [merged with the previous entry: same camera setup]"
-    parts = [head]
-    for label, value in (
-        ("size", s.shot_size),
-        ("camera", s.camera),
-        ("subject", s.subject),
-        ("action", s.action),
-        ("setting", s.setting),
-        ("light", s.lighting),
-        ("color", s.color),
-        ("energy", s.motion_energy),
-        ("on-screen text", s.on_screen_text),
-        ("dialogue", s.dialogue),
-        ("sfx", s.sfx),
-        ("transition", s.transition),
-    ):
-        if value and str(value).strip():
-            parts.append(f"    {label}: {str(value).strip()}")
-    if s.confidence:
-        parts.append(f"    confidence: {s.confidence}")
-    return "\n".join(parts)
-
-
-def merge_observations(chunks: list[ChunkObservation]) -> list[ShotObservation]:
-    """把多个分块的观察结果合并，并重排镜号（分块会产生重复镜号）。"""
-    merged: list[ShotObservation] = []
-    for chunk in sorted(chunks, key=lambda c: c.start):
-        for shot in chunk.shots:
-            item = shot.model_copy()
-            item.shot = str(len(merged) + 1)
-            merged.append(item)
-    return merged
-
-
-def merge_subjects(
-    chunks: list[ChunkObservation],
-    merged_shots: list[ShotObservation],
-) -> list[SubjectEntry]:
-    """跨分块合并主体登记表。
-
-    分块会让同一个主体在多个块里各登记一次（例如主角在第 1 块和第 3 块都出现），
-    直接拼起来会出现重复标签，Ref2VA 的 retention_analysis 就会写出两条
-    `<Subject 1>`。所以这里按标签归一化后合并，并把镜号映射到重排后的全局镜号。
-
-    归一化用 `_subject_key`：小写、去空格与非字母数字，这样 "The Performer" 与
-    "performer" 会归成同一条。
-    """
-    # 块内镜号 → 全局镜号：merge_observations 是按块顺序、块内顺序重排的
-    local_to_global: dict[tuple[int, str], str] = {}
-    cursor = 0
-    for chunk in sorted(chunks, key=lambda c: c.start):
-        for shot in chunk.shots:
-            cursor += 1
-            local_to_global[(chunk.chunk_index, str(shot.shot).strip())] = str(cursor)
-
-    # 全局镜号 → 该镜在重排结果里的下标，用于兜底按主体描述反查
-    order = {str(i + 1): s for i, s in enumerate(merged_shots)}
-
-    merged: dict[str, SubjectEntry] = {}
-    for chunk in sorted(chunks, key=lambda c: c.start):
-        for sub in chunk.subjects:
-            key = _subject_key(sub.label) or _subject_key(sub.description[:40])
-            if not key:
-                continue
-
-            shots: list[str] = []
-            for raw in sub.shots:
-                gid = local_to_global.get((chunk.chunk_index, raw.strip()))
-                if gid is None:
-                    gid = raw.strip() if raw.strip().isdigit() else ""
-                if gid and gid not in shots:
-                    shots.append(gid)
-
-            if key not in merged:
-                merged[key] = SubjectEntry(
-                    label=sub.label,
-                    kind=sub.kind,
-                    description=sub.description,
-                    shots=shots,
-                    notes=sub.notes,
-                )
-                continue
-
-            existing = merged[key]
-            if len(sub.description) > len(existing.description):
-                existing.description = sub.description
-            if sub.notes and sub.notes not in existing.notes:
-                existing.notes = (existing.notes + " " + sub.notes).strip()
-            for gid in shots:
-                if gid not in existing.shots:
-                    existing.shots.append(gid)
-            if not existing.kind:
-                existing.kind = sub.kind
-            if not existing.label:
-                existing.label = sub.label
-
-    result = list(merged.values())
-
-    # 兜底：模型忘了写 shots 时，用主体描述里的关键词回查镜号，
-    # 否则 retention_analysis 会写不出「appears in [Shot N]」。
-    for sub in result:
-        if sub.shots or not sub.description:
-            continue
-        needle = _subject_key(sub.description[:24])
-        if not needle:
-            continue
-        hits = [sid for sid, shot in order.items()
-                if needle and needle in _subject_key(shot.subject)]
-        if hits:
-            sub.shots = sorted(hits, key=lambda x: int(x))
-
-    for sub in result:
-        sub.shots = sorted(set(sub.shots), key=lambda x: int(x) if x.isdigit() else 9999)
-    return result
-
-
-def _subject_key(text: str) -> str:
-    """归一化主体标签，用于跨块判重。
-
-    先去掉前导冠词再压掉非字母数字：模型会在不同块里把同一个主体写成
-    "performer" / "The Performer" / "a performer"，这三种要归成一条，
-    否则 retention_analysis 会写出三条 <Subject N>。
-    冠词只在后面紧跟空格时才剥，"anime style" 不能被吃成 "imestyle"。
-    """
-    import re
-    raw = re.sub(r"^(the|a|an)\s+", "", (text or "").strip().lower())
-    return re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "", raw)

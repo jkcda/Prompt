@@ -24,61 +24,56 @@
 
 ## 它是怎么工作的
 
-反推分两阶段。这不是为了好看，是因为一次性让模型「看图直接写提示词」会大面积丢细节——
-模型的注意力会花在措辞上，次要镜头、背景细节、运镜方向基本丢失。
+**一次模型调用**：帧 + 时间戳 + 用户说明 → 目标格式提示词。
 
 ```
 上传 / 抓取
      │
      ├─ ffprobe（缺失时用 ffmpeg -i 解析）──→ 时长 / 分辨率 / 帧率 / 有无音轨
      │
-     ├─ ffmpeg select='gt(scene,T)' ──────→ 镜头切换点 → 镜头列表
+     ├─ ffmpeg select='gt(scene,T)' ──────→ 场景变化点 → 决定在哪些位置抽帧
      │
      ├─ ffmpeg volumedetect + silencedetect → 音量曲线 / 静音段 / 疑似卡点
      │
      ├─ ASR（可选）─────────────────────→ 带时间戳的台词 / 歌词
      │
      ▼
-  帧预算分配（按镜头时长加权，每镜取 首/中/尾）
+  抽帧（按场景变化点对齐，镜头内按 0.5s 间隔）
      │
      ▼
-  长视频在**镜头边界**分块（不物理切割）
-     │
-     ├─→ Pass 1「只看不写」：每块并行送模型
-     │        ├→ 逐镜头结构化 JSON：景别 / 运镜 / 主体 / 动作 / 光线 / 色调 /
-     │        │   台词 / 音效 / 转场 / 置信度
-     │        └→ 跨镜头主体登记表：每个主体在哪些镜头出现、哪些特征不能漂
-     │
-     ▼
-  Pass 2「只写不看」：全部观察 JSON + 主体登记表 + 音频报告 + 全局统计
+  一次调用：帧图 + 时间戳清单 + 音频报告 + 用户说明
      │        └→ 目标提示词（H3 模式 / Seedance 模式）
      ▼
   落库（SQLite）→ 前端左视频右提示词对照展示
 ```
 
-**同一份观察结果可以出多种格式**，这是两阶段的额外收益：Pass 1 花钱花时间，
-Pass 2 很便宜，想换格式不用重新看一遍视频。
+### 为什么不拆成两阶段
 
-### 主体登记表是为什么加的
+曾经是 Pass1「结构化观察」+ Pass2「成文」两阶段，理由是「一次性看图直接写会丢细节」。
+但那是**每镜只有 1~3 帧**的旧配置下的结论。抽帧密度提到 2fps（每镜多帧）之后，
+两阶段的主要作用变成了「教模型怎么观察」—— 而实测**每收紧一次这类规则、输出就退化一次**：
 
-`ShotObservation` 是逐镜头视角——同一个角色在第 1 镜和第 5 镜会被描述成两段互不相关的
-文字，模型判断不出「这是同一个人」。而 Ref2VA 的 `subject_definitions` 和
-`retention_analysis` 恰恰需要跨镜头的主体身份：哪个主体、在第几镜出现、要保留到什么程度。
+| 加过的规则 | 实际后果 |
+|---|---|
+| 「只报告帧里真实存在的」 | 压掉了合理推断，动作描述只剩 19%，读起来像照片说明 |
+| 把「相机静止」当结论喂进去 | 被外推成「人物也静止」，写出一堆 `stands` |
+| 「动作要占大头」 | 又得再写一段「不许编动作」去中和它 |
+| 「20 秒 MV 大约 5-20 个镜头」 | 快切素材被压到 20 以内 |
 
-没有登记表，Pass 2 只能自己编标签，`retention_analysis` 的 `appears in [Shot N]` 就靠猜，
-参考标签会漂。所以 Pass 1 除了逐镜头观察，还额外交一份登记表：
+**约束输出格式 ≠ 约束思考。** 现在只给三样：身份、任务、目标格式规则，
+外加两条关于**产物**的硬约束（静止动词会让生成的视频冻住；音频未知时编造比留空更糟）。
 
-```json
-"subjects": [
-  { "label": "performer", "kind": "person",
-    "description": "a performer in a dark quilted jacket, dark hair tied back",
-    "shots": ["1", "2", "3", "5"],
-    "notes": "the jacket hardware and the tied-back hair must not change" }
-]
-```
+同一段素材的实测对比：
 
-分块会让同一主体在多块里各登记一次，`merge_subjects()` 按标签归一化合并
-（`performer` / `The Performer` / `a performer` 归成一条），并把块内镜号映射成全局镜号。
+| | 两阶段 | 现在（一次调用） |
+|---|---|---|
+| 系统提示词 | 13450 字符 | **2928 字符** |
+| 端到端耗时 | 112~136s | **26s** |
+| 运镜 | 全 `static` | `camera slowly pushing in` / `tracks low and sideways, then tilts up` / `glides forward and down` |
+
+**H3 与 Seedance 的格式规则完全保留** —— 那是输出契约，错了下游解析不了。
+删掉的是「教模型怎么观察」的部分。
+
 
 ---
 
@@ -132,28 +127,33 @@ Pass 2 很便宜，想换格式不用重新看一遍视频。
 │   │   │   └── media.py            /media（含 HTTP Range）
 │   │   ├── schemas/                Pydantic 模型
 │   │   │   ├── media.py            媒体 / 镜头 / 帧 / 音频报告
-│   │   │   ├── observation.py      Pass1 结构化观察 + 主体登记表
+│   │   │   ├── observation.py      镜头 / 主体数据结构（历史任务兼容）
 │   │   │   ├── job.py              任务 / 进度 / 结果 / 选项
 │   │   │   └── api.py              HTTP 请求响应体
 │   │   ├── models/job.py           SQLModel 表定义
 │   │   └── services/               业务实现
-│   │       ├── ffmpeg.py           探测 / 切块 / 抽帧 / 镜头检测
+│   │       ├── ffmpeg.py           探测 / 抽帧 / 场景检测 / 片段截取
 │   │       ├── selection.py        自适应选帧（token 预算 + 镜头加权）
-│   │       ├── asr.py              语音转写 + 音量分析
+│   │       ├── asr.py              语音转写 + 音量分析 + 音乐画像
+│   │       ├── audio_features.py   纯 Python 音频特征（BPM / 音头 / 频段平衡）
 │   │       ├── vlm.py              多模态客户端（并发 / 重试 / 减帧降级）
-│   │       ├── templates.py        Pass1 观察 + Pass2 成文模板
-│   │       ├── pipeline.py         两阶段编排
+│   │       ├── templates.py        系统提示词（身份 + 任务 + 目标格式）
+│   │       ├── pipeline.py         管线编排
 │   │       ├── downloader.py       B站 / 抖音抓取
 │   │       ├── storage.py          SQLite 读写
 │   │       ├── jobs.py             任务状态 + 事件总线
 │   │       └── runner.py           任务启动器
-│   ├── tests/                      80 个测试
+│   ├── tests/                      272 个测试
 │   │   ├── mock_vlm.py             OpenAI 兼容 mock 模型（E2E 用）
-│   │   ├── test_selection.py       选帧策略（13）
-│   │   ├── test_ffmpeg.py          ffmpeg 层（22，跑真实视频）
-│   │   ├── test_templates.py       模板与 JSON 解析（14）
-│   │   ├── test_api.py             接口集成（23）
-│   │   └── test_pipeline_e2e.py    端到端管线（8）
+│   │   ├── test_templates.py       模板与格式规则（52）
+│   │   ├── test_api.py             接口集成（41）
+│   │   ├── test_ffmpeg.py          ffmpeg 层（38，跑真实视频）
+│   │   ├── test_vlm.py             模型客户端（37）
+│   │   ├── test_selection.py       选帧策略（33）
+│   │   ├── test_downloader.py      抓取（24）
+│   │   ├── test_pipeline_e2e.py    端到端管线（18）
+│   │   ├── test_asr.py             音频分析（13）
+│   │   └── test_safe_delete.py     删除保护（9）
 │   ├── pyproject.toml              依赖 + [tool.fastapi] + ruff + pytest
 │   └── .env.example
 ├── frontend/                       Vue 3 + Vite + TS + Pinia
@@ -309,7 +309,7 @@ python -m app.selfcheck path/to/video.mp4
 | `VLM_API_KEY` | — | **必填** |
 | `VLM_BASE_URL` | `https://api-inference.modelscope.cn/v1` | 任意 OpenAI 兼容地址 |
 | `VLM_MODEL` | `Qwen/Qwen3.5-27B` | **必须支持视觉输入** |
-| `VLM_CONCURRENCY` | `3` | Pass1 分块并行数 |
+| `VLM_CONCURRENCY` | `3` | 并发请求数（长视频分块时用） |
 | `VLM_MAX_TOKENS` | `16384` | 单次回复上限，**推理模型必须给大** |
 | `VLM_DISABLE_THINKING` | `true` | 关掉推理模型的思考过程（能快近 10 倍） |
 | `VLM_TIMEOUT` | `180` | 单次请求超时（秒） |
@@ -356,15 +356,10 @@ python -m app.selfcheck path/to/video.mp4
 
 不配也能跑，但音频维度会缺一整个 —— 有台词/唱歌的视频，歌词字段只能写 `N/A`。
 
-### 反推质量管线
-
-四项针对实测缺陷的修补，默认全开，**可以单独关掉定位问题**：
+### 音频
 
 | 变量 | 说明 |
 |---|---|
-| `MOTION_ANALYSIS` | 客观运动分析（ffmpeg 光流算相机位移）。**默认关** —— 默认 2fps 抽帧下模型自己能判断运镜，开着只会让端到端慢 2.7 倍 |
-| `MERGE_ADJACENT_SHOTS` | 合并被拆碎的同一机位条目 |
-| `STRICT_FRAME_VISIBILITY` | 清理特写镜头里越界的画面外属性 |
 | `VOCAL_ISOLATION` | 转写前做人声频段分离，提高歌词准确率 |
 
 ### 其他
@@ -423,7 +418,7 @@ python -m app.selfcheck path/to/video.mp4
 }
 ```
 
-**关于 `content_hint`**：用户自己写的画面说明，**同时喂给观察阶段和成文阶段**。
+**关于 `content_hint`**：用户自己写的画面说明，随帧一起送给模型。
 
 静态帧判断不出三件事，而它们直接影响产出质量：
 
@@ -431,8 +426,8 @@ python -m app.selfcheck path/to/video.mp4
 - **主体是谁**（角色 / 作品 / 产品 / 地点）—— 模型不认识冷门 IP
 - **动作的前因后果** —— 只看到中间一段会误判
 
-补一句话比让模型瞎猜强得多。措辞上做了两层约束防止模型拿它当观察结果照抄：
-Pass1 声明「画面与说明冲突时**相信画面**」，Pass2 声明「观察结果才是权威」。
+补一句话比让模型瞎猜强得多 —— 这是**外部知识**，模型再怎么推理也推不出来。
+提示词里同时声明「画面与说明冲突时**相信画面**」，防止它把说明当观察结果照抄。
 
 **关于 `trim_*`**：给了就只分析这段区间，返回的时间戳也是**相对这个片段**的
 （从 0 开始），而不是原片的绝对时间 —— 因为你要拿它去生成一段新视频。
@@ -555,25 +550,23 @@ YTDLP_FORMAT=bv*[height<=720][ext=mp4]+ba[ext=m4a]/bv*[height<=720]+ba/b[height<
 
 ## 查看实际用的提示词
 
-提示词是这个项目的核心资产 —— 改一个字都影响产出质量。但 Pass1 的系统提示词
-有 9000 字符，在 Python 字符串里翻没法读。所以有个导出命令：
+提示词是这个项目的核心资产 —— 改一个字都影响产出质量。所以有个导出命令，
+不用在 Python 字符串里翻：
 
 ```bash
 cd backend
 python -m app.dump_prompts prompts-dump
 ```
 
-导出 8 个文件：
+导出 6 个文件：
 
 | 文件 | 内容 |
 |---|---|
-| `pass1_system.txt` | 观察阶段的系统提示词（含镜头结构判断规则） |
-| `pass1_user.txt` | 用户消息样例 —— 能看到帧时间戳列表长什么样 |
-| `pass2_system_h3.txt` | T2VA 成文提示词 |
-| `pass2_system_h3-ref.txt` | Ref2VA 成文提示词 |
-| `pass2_system_seedance.txt` | Seedance 成文提示词 |
-| `pass2_system_generic.txt` | 通用格式 |
-| `pass2_user.txt` | 观察结果是怎么整理给成文阶段的 |
+| `system_h3.txt` | H3 T2VA 的系统提示词（身份 + 任务 + 三字段格式） |
+| `system_h3-ref.txt` | H3 Ref2VA 六段式 |
+| `system_seedance.txt` | Seedance 六要素中文段 |
+| `system_generic.txt` | 通用格式 |
+| `user.txt` | 用户消息样例 —— 能看到帧时间戳清单长什么样 |
 | `payload.json` | 实际发出去的 HTTP body 骨架 |
 
 导出目录默认 `prompts-dump/`，可以传参数改。已在 `.gitignore` 里 ——
@@ -581,13 +574,11 @@ python -m app.dump_prompts prompts-dump
 
 ### 一次请求实际提交了什么
 
-**Pass1（带图）**
-
 ```jsonc
 {
   "model": "...",
   "messages": [
-    { "role": "system", "content": "<9007 字符的系统提示词>" },
+    { "role": "system", "content": "<约 2900 字符的系统提示词>" },
     { "role": "user", "content": [
         { "type": "text", "text": "<帧时间戳列表 + 音频 + 用户画面说明>" },
         { "type": "image_url", "image_url": { "url": "data:image/jpeg;base64,..." } },
@@ -599,8 +590,7 @@ python -m app.dump_prompts prompts-dump
 }
 ```
 
-**Pass2（无图）** —— 只提交系统提示词和观察结果文本，**不重新看图**。
-这样成文阶段不会因为再看到画面而改写观察结论。
+**一次调用**出稿 —— 没有第二个「成文」阶段，模型看图的同时就在写提示词。
 
 一次请求的体量：2 帧约 194 KB，**其中 100% 是 base64 图片**
 （每帧约 75KB → base64 后约 100KB → 约 284 tokens）。
@@ -619,23 +609,24 @@ ruff check app tests                  # 静态检查
 
 | 文件 | 数量 | 覆盖内容 |
 |---|---|---|
-| `test_selection.py` | 29 | 预算不超、每镜保底、**按镜头时长定帧数**、**每镜全覆盖**、`max_per_shot` 大于 3 生效、帧间隔调密度 |
-| `test_ffmpeg.py` | 45 | 真实视频跑探测 / 场景检测 / 抽帧 / 缩放 / 音频 / 切分 / 频段能量 / 音频片段抽取 / 自适应镜头检测 / 拼图与布局说明 / **片段截取（帧精确）** |
-| `test_templates.py` | 65 | Pass1 JSON 宽容解析、多块镜号重排、主体登记表合并、两种模式的模板硬约束、占位符替换、音频编造禁令、频谱措辞边界、**逐段长度预算**、**压缩指令与结构校验** |
+| `test_selection.py` | 33 | 预算不超、每镜保底、**按镜头时长定帧数**、**每镜全覆盖**、`max_per_shot` 大于 3 生效、帧间隔调密度 |
+| `test_ffmpeg.py` | 38 | 真实视频跑探测 / 场景检测 / 抽帧 / 缩放 / 音频 / 切分 / 频段能量 / 音频片段抽取 / 自适应镜头检测 / **片段截取（帧精确）** |
+| `test_templates.py` | 52 | **四种格式的输出契约**（H3 三字段 / Ref2VA 六段 / Seedance 六要素）、自由发挥提示词只带身份任务格式、帧时间戳清单、镜头边界标注、**逐段长度预算**、**压缩指令与结构校验** |
 | `test_downloader.py` | 24 | 中文分享文案取链接、平台识别、aweme_id、yt-dlp 选项（**含 `ffmpeg_location` 回归**）、清晰度封顶、失败原因上传 |
 | `test_ffmpeg_vendor.py` | 7 | ffmpeg 打包位置、跨平台查找优先级、**不硬编码开发机路径** |
-| `test_vlm.py` | 36 | 请求体构造（data URI / Anthropic 块 / **`input_audio` 音频块**）、响应解析（含 `choices: null`）、**空响应原因诊断**、音频格式白名单与体积上限、**关思考与按次覆盖**、base_url 带不带 `/v1` 都能用 |
-| `test_api.py` | 36 | 接口契约、模式分组、上传校验、Range 流、SQLite 往返、缺列自愈、提示词库、**模型热切换**、**测试不污染真实 .env** |
-| `test_pipeline_e2e.py` | 19 | **完整管线**：帧数对齐、预算生效、四种格式、主体登记表贯通到 Pass2、模式不串味、进度事件、分块、无 key 报错、**片段截取只推选中区间** |
+| `test_vlm.py` | 37 | 请求体构造（data URI / Anthropic 块 / **`input_audio` 音频块**）、响应解析（含 `choices: null`）、**空响应原因诊断**、音频格式白名单与体积上限、**关思考与按次覆盖**、base_url 带不带 `/v1` 都能用 |
+| `test_api.py` | 41 | 接口契约、模式分组、上传校验、Range 流、SQLite 往返、缺列自愈、提示词库、**模型热切换**、**测试不污染真实 .env** |
+| `test_pipeline_e2e.py` | 18 | **完整管线**：帧数对齐、预算生效、四种格式、默认只调一次模型、进度事件、无 key 报错、**片段截取只推选中区间**、预览地址指向片段 |
 
 ### 关于 mock 模型
 
 `tests/mock_vlm.py` 是一个 OpenAI 兼容的最小 mock 服务。端到端测试用它跑完整链路——
 真实模型调用有成本、有延迟、依赖外部可用性，但管线里最容易出错的恰恰是**调用之外**的部分：
-抽帧、时间戳对齐、Pass1 JSON 解析、多块合并、Pass2 组装。
+抽帧、时间戳对齐、帧清单构造、格式规则、提示词压缩与结构校验。
 
 它按请求里实际出现的时间戳生成对应的镜头列表，所以测试能验证「帧与时间戳是否一一对应」，
-而不只是「有没有返回东西」。
+而不只是「有没有返回东西」。它也会按系统提示词判断这次带图调用是要结构化 JSON
+还是直接要提示词。
 
 也可以单独起它来手动联调，不花一分钱：
 

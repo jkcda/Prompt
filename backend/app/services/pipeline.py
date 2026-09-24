@@ -30,17 +30,14 @@ from ..core.config import get_settings
 from ..schemas import (
     AnalyzeOptions,
     AudioReport,
-    ChunkObservation,
     FrameRef,
     Job,
     JobResult,
     Shot,
-    ShotObservation,
 )
 from . import asr as asr_mod
 from . import audio_features, selection, templates
 from . import ffmpeg as ff
-from . import motion as motion_mod
 from .jobs import store
 from .vlm import VLMClient, VLMError
 
@@ -53,8 +50,7 @@ STAGE_LABELS = {
     "scenes": "镜头切分",
     "plan": "分配帧预算",
     "frames": "抽取关键帧",
-    "observe": "逐块视觉分析",
-    "compose": "合成提示词",
+    "compose": "生成提示词",
     "done": "完成",
 }
 
@@ -143,38 +139,12 @@ async def run_pipeline(job: Job, video_path: Path) -> JobResult:
 
     shots = [Shot(index=i, start=a, end=b) for i, (a, b) in enumerate(raw_shots)]
 
-    # ---------------- 3.5 客观运动分析 ----------------
-    #
-    # 必须放在镜头切分之后：测的是「每个镜头内部画面移动了多少」。
-    # 为什么需要它 —— 单帧图像里没有运动信息，模型拿不准就一律写 static。
-    # 实测一支有运镜的 MV 38 个镜头全是 static。给它实测数据它才有依据下判断。
-    motions: list[motion_mod.ShotMotion] = []
-    if s.motion_analysis and raw_shots:
-        await step("scenes", 24, f"测量 {len(raw_shots)} 个镜头的运动")
-        try:
-            motions = await asyncio.to_thread(
-                motion_mod.analyze_shots_motion, str(video_path), raw_shots
-            )
-            moved = sum(1 for m in motions if not m.camera_static)
-            log.info("运动分析：%d/%d 个镜头检出相机运动", moved, len(motions))
-        except Exception as exc:  # noqa: BLE001
-            # 运动分析是增强项，失败就退回「模型自己看帧判断」，不中断管线
-            log.warning("运动分析失败，退回模型自行判断: %s", exc)
-            motions = []
     store.raise_if_cancelled(job_id)
 
     # ---------------- 4. 帧预算分配 ----------------
     budget = opts.max_total_frames or s.max_total_frames
     # 按次覆盖：前端高级选项里可以单独指定，留空用服务端默认
-    # 拼图模式下默认抽密一点（每秒 frame_sample_fps 帧）——
-    # 单帧模式受 token 成本约束只能 1fps，拼图后一格里塞多帧几乎不加钱，
-    # 所以可以拿时间密度换。显式指定过 frame_interval_seconds 则以指定值为准。
-    if opts.frame_interval_seconds:
-        interval = opts.frame_interval_seconds
-    elif s.frame_sheet_cells >= 2 and s.frame_sample_fps > 0:
-        interval = 1.0 / s.frame_sample_fps
-    else:
-        interval = s.frame_interval_seconds
+    interval = opts.frame_interval_seconds or s.frame_interval_seconds
     word_limit = opts.prompt_word_limit or s.prompt_word_limit
     await step("plan", 26, f"{len(shots)} 个镜头，预算 {budget} 帧")
 
@@ -192,15 +162,12 @@ async def run_pipeline(job: Job, video_path: Path) -> JobResult:
     frame_root = ff.frame_dir_for(job_id)
 
     chunk_frames: list[list[tuple[float, str, Path]]] = []
-    # 每块里拼出来的网格图（含各自覆盖的时间点），用来给模型说明布局
-    chunk_sheets: list[list[tuple[list[float], Path]]] = []
     # **实际**用到的帧规划，累计起来用于最后的说明。
     # 不要在末尾拿总预算重算一遍 —— 那样算出来的是「如果重新分配会怎样」，
     # 而不是「实际抽了多少」。实测过：界面显示 27 张，实际只有 21 张。
     actual_plan: list[selection.PlannedFrame] = []
     actual_shots: list[tuple[float, float]] = []
     for ci, chunk in enumerate(chunks):
-        chunk_sheets.append([])
         actual_shots.extend((sh.start, sh.end) for sh in chunk)
         store.raise_if_cancelled(job_id)
         local_shots = [(sh.start, sh.end) for sh in chunk]
@@ -227,23 +194,6 @@ async def run_pipeline(job: Job, video_path: Path) -> JobResult:
             role = role_of.get(round(t, 3), "mid")
             items.append((t, role, path))
 
-        # 拼图模式：把这一块的帧合成网格图，一张图装 cells 帧。
-        # 实测模型对图片 token 有上限，一格里放 6 帧还是 20 帧成本几乎一样，
-        # 所以同预算下能换到几倍的时间覆盖度。代价是小字会糊（见 config 注释）。
-        if s.frame_sheet_cells >= 2 and len(pairs) >= 2:
-            sheets = await asyncio.to_thread(
-                ff.build_contact_sheets, pairs, s.frame_sheet_cells, out_dir / "sheets"
-            )
-            items = []
-            for times, path in sheets:
-                if len(times) > 1:
-                    items.append((times[0], "sheet", path))
-                    chunk_sheets[-1].append((times, path))
-                else:
-                    items.append((times[0], role_of.get(round(times[0], 3), "mid"), path))
-            log.info("拼图：%d 帧 -> %d 张网格（每张最多 %d 格）",
-                     len(pairs), len(items), s.frame_sheet_cells)
-
         chunk_frames.append(items)
 
         pct = 32 + int(18 * (ci + 1) / max(1, total_chunks))
@@ -254,180 +204,51 @@ async def run_pipeline(job: Job, video_path: Path) -> JobResult:
         raise RuntimeError("抽帧失败，无法进行视觉分析（请检查 ffmpeg 是否可解码该文件）")
     log.info("共抽帧 %d 张", total_frames)
 
-    # ---------------- 6. Pass1：逐块视觉观察 ----------------
-    await step("observe", 55, f"视觉分析 {total_chunks} 块（{total_frames} 帧）")
+    # ---------------- 6. 生成提示词 ----------------
+    #
+    # 帧 + 时间戳 + 用户说明 → 一次调用出稿。
+    #
+    # ⚠️ 这里**只给身份、任务和目标格式**，刻意不写「怎么观察」的规则。
+    # 那些规则曾经占掉 14000 字符的系统提示词，而实测每收紧一次、输出就退化一次：
+    # 防编造规则压掉合理推断（动作描述只剩 19%）、把「相机静止」当结论喂进去会被
+    # 外推成「人物也静止」、写死「20 秒 MV 大约 5-20 个镜头」会把快切压到 20 以内。
+    # **约束输出格式 ≠ 约束思考。**
 
     client = VLMClient()
     client.require_configured()
 
-    # 是否给模型附上音频片段。只在「开了开关」且「ASR 没给出转写」时才附——
-    # 已经有逐句转写文本时再送音频纯属浪费 token，而且模型未必比转写更准。
-    attach_audio = bool(s.vlm_audio_input) and audio.has_audio and not audio.segments
-    if attach_audio:
-        log.info("VLM_AUDIO_INPUT 已开启且无 ASR 转写，将为每块附上音频片段")
-
-    tasks: list[tuple[str, str, list[Path]]] = []
-    audio_per_task: list[list[Path]] = []
-    for ci, items in enumerate(chunk_frames):
-        cstart = chunks[ci][0].start
-        cend = chunks[ci][-1].end
-        marks = [(t, role) for t, role, _ in items]
-        imgs = [p for _, _, p in items]
-        prev_notes = ""
-        if ci > 0:
-            prev_notes = "\n\nContext from the previous segment (already analysed, do not repeat it):\n"
-
-        audio_text = _audio_slice(audio, cstart, cend)
-        audios: list[Path] = []
-        if attach_audio:
-            seg = await asyncio.to_thread(
-                ff.extract_audio_segment, video_path, cstart, cend
-            )
-            if seg:
-                audios = [seg]
-                audio_text += (
-                    f"\n【本段音频已随请求附上（{cend - cstart:.1f}s）】"
-                    "你可以直接听。听出来的内容以你的听觉为准，"
-                    "但只描述确实听到的，不确定就说不确定。"
-                )
-
-        # 该块内每个镜头的运动数据。analyze_shots_motion 用的是全局镜头序号，
-        # 而 Pass1 只看到本块的镜头，所以按块内偏移切片。
-        motion_text = ""
-        if motions:
-            base = sum(len(chunks[k]) for k in range(ci))
-            motion_text = motion_mod.summarize_for_prompt(
-                motions[base:base + len(chunks[ci])]
-            )
-
-        user = templates.build_pass1_user(
-            chunk_start=cstart,
-            chunk_end=cend,
-            frame_marks=marks,
-            audio_text=audio_text,
-            media=media,
-            chunk_index=ci,
-            chunk_total=total_chunks,
-            content_hint=opts.content_hint,
-            motion_text=motion_text,
-        )
-        # 拼图模式要告诉模型「这是网格，不是单帧」，否则它会把整张图当成一帧。
-        # 同时列出每张网格覆盖的时间点，模型才能把格子映射回时间轴。
-        if chunk_sheets[ci]:
-            user += "\n\n" + ff.describe_sheet_layout(
-                chunk_sheets[ci], s.frame_sheet_cells
-            )
-        tasks.append((templates.PASS1_SYSTEM, prev_notes + user, imgs))
-        audio_per_task.append(audios)
-
-    raw_outputs = await client.complete_many(
-        tasks, max_tokens=s.vlm_max_tokens, audio_per_task=audio_per_task
-    )
-    store.raise_if_cancelled(job_id)
-
-    observations: list[ChunkObservation] = []
-    merge_stats = {"collapsed": 0, "merged": 0, "offscreen": 0}
-    for ci, raw in enumerate(raw_outputs):
-        parsed = templates.parse_pass1_json(raw)
-        # 模型报 unknown 但只给了 1 个条目 = 没找到切点，等同 continuous。
-        # 归一之后成文阶段才能拿到明确的「不许写切点标记」指令。
-        structure = templates.resolve_edit_structure(parsed.edit_structure, parsed.shots)
-        chunk = chunks[ci]
-
-        # 两道代码兜底，都是「模型知道规则也照样违反」的情况：
-        #   1) 一镜到底被按帧拆成 N 条 → 合并成一条
-        #   2) 同一机位被拆成 N 条复读内容（实测 23 条交替的「三人跳舞」/「三人继续」）
-        raw_count = len(parsed.shots)
-        shot_list = templates.collapse_continuous_shots(parsed.shots, structure)
-        collapsed = raw_count - len(shot_list)
-        merge_stats["collapsed"] += collapsed
-
-        merged = 0
-        if s.merge_adjacent_shots:
-            before = len(shot_list)
-            shot_list = templates.merge_adjacent_shots(shot_list)
-            merged = before - len(shot_list)
-            merge_stats["merged"] += merged
-
-        #   3) 特写镜头描述里的画面外属性（实测 `Extreme close-up` 里写了袜子）
-        if s.strict_frame_visibility:
-            shot_list, hits = templates.strip_offscreen_attributes(shot_list)
-            for h in hits:
-                log.info("画面外属性清理：%s", h)
-            merge_stats["offscreen"] += len(hits)
-
-        if len(shot_list) != raw_count:
-            log.info(
-                "分块 %d 镜头条目 %d → %d（一镜到底合并 %d、复读合并 %d）",
-                ci + 1, raw_count, len(shot_list), collapsed, merged,
-            )
-
-        observations.append(ChunkObservation(
-            chunk_index=ci,
-            start=chunk[0].start,
-            end=chunk[-1].end,
-            shots=shot_list,
-            subjects=parsed.subjects,
-            global_notes=parsed.global_notes,
-            # 模型自己判断的剪辑结构 —— 我们的场景检测只是抽帧采样单位，
-            # 不是剪辑事实，一镜到底经常被它切碎（用户反馈过）。
-            edit_structure=structure,
-            cut_points=parsed.cut_points,
-            continuity_notes=parsed.continuity_notes,
-            raw=raw,
-        ))
-        await store.emit(job_id, {
-            "type": "chunk",
-            "index": ci,
-            "shots": len(shot_list),
-            "subjects": len(parsed.subjects),
-            "edit_structure": parsed.edit_structure,
-            "total": total_chunks,
-        })
-
-    merged = templates.merge_observations(observations)
-    if not merged:
-        raise RuntimeError(_explain_empty_observations(raw_outputs, client.last_errors))
-
-    # 补全并校正每个镜头的时间区间。模型经常漏填 end_ms，或者把末镜算短一截，
-    # 而分镜表、`[Shot N] At MM:SS.mmm`、Seedance 的节拍图都要用这些数字 ——
-    # 错一截整条提示词的时间轴就歪了。
-    _align_shot_spans(merged, eff_duration)
-
-    subjects = templates.merge_subjects(observations, merged)
-    log.info("观察完成：%d 个镜头，%d 个主体", len(merged), len(subjects))
-    if not subjects:
-        # 模型漏了 subjects 数组。不致命（Pass2 能从观察结果自己推参考标签，
-        # 实测推得还行），但要显式记下来 —— 否则前端「主体」页空着，
-        # 而提示词里却有 <Subject N>，看起来像 bug 却查不到原因。
-        log.warning(
-            "Pass1 未返回主体登记表（subjects 为空）。Ref2VA 的参考标签将由 Pass2 "
-            "从镜头观察里自行推导，稳定性和镜号准确度会下降。"
-        )
-
-    # ---------------- 7. Pass2：合成目标格式 ----------------
-    await step("compose", 82, f"合成 {templates.format_display(opts.format)} 提示词")
-
-    shots_summary = _describe_shots(shots)
-    pass2_system = templates.build_pass2_system(opts.format, opts.language)
-    pass2_user = templates.build_pass2_user(
-        observations=observations,
-        audio=audio,
+    await step("compose", 55, f"一次成稿（{total_frames} 帧）")
+    flat = [(ft, role, fp) for items in chunk_frames for ft, role, fp in items]
+    freeform_user = templates.build_user(
+        chunk_start=0.0,
+        chunk_end=eff_duration,
+        frame_marks=[(ft, role) for ft, role, _ in flat],
+        audio_text=_audio_slice(audio, 0.0, eff_duration),
         media=media,
-        shots_summary=shots_summary,
-        extra_instruction=opts.extra_instruction,
-        target_duration=opts.target_duration,
-        subjects=subjects,
-        fmt=opts.format,
+        chunk_index=0,
+        chunk_total=1,
         content_hint=opts.content_hint,
+        closing=templates.build_closing(),
     )
-
+    if opts.extra_instruction.strip():
+        freeform_user += (
+            "\n\n--- EXTRA INSTRUCTION FROM THE USER ---\n"
+            + opts.extra_instruction.strip()
+        )
+    if opts.target_duration:
+        freeform_user += (
+            f"\n\nThe generated video should be {opts.target_duration:.2f}s long."
+        )
     try:
         prompt = await client.complete(
-            pass2_system, pass2_user, images=[], max_tokens=s.vlm_max_tokens
+            templates.build_system(opts.format, opts.language),
+            freeform_user,
+            images=[fp for _, _, fp in flat],
+            max_tokens=s.vlm_max_tokens,
         )
     except VLMError as exc:
-        raise RuntimeError(f"提示词合成失败：{exc}") from exc
+        raise RuntimeError(f"提示词生成失败：{exc}") from exc
+    total_chunks = 1
 
     # 长度检查与压缩。视频生成模型的提示词窗口有限，超长会被截断或忽略 ——
     # 实测不限长时六段式能写到 1795 词 / 11314 字符。
@@ -495,8 +316,6 @@ async def run_pipeline(job: Job, video_path: Path) -> JobResult:
     elapsed = time.time() - t0
     result = JobResult(
         prompt=prompt,
-        observations=merged,
-        subjects=subjects,
         media=media,
         audio=audio,
         shots=shots,
@@ -518,18 +337,6 @@ async def run_pipeline(job: Job, video_path: Path) -> JobResult:
             "scene_cuts": cut_count,
             "scene_threshold": used_threshold,
             "scene_adaptive": adaptive_note or "",
-            "subjects": len(subjects),
-            # 模型自己判断的剪辑结构 —— 和「我们切了几个镜头」是两回事，
-            # 分开记，方便排查「一镜到底被切碎」这类问题
-            "edit_structure": (
-                observations[0].edit_structure if len(observations) == 1
-                else [o.edit_structure for o in observations]
-            ),
-            "cut_points": (
-                observations[0].cut_points if len(observations) == 1
-                else [o.cut_points for o in observations]
-            ),
-            "observed_shots": len(merged),
             "est_tokens": selection.estimate_tokens(total_frames, long_edge=s.frame_long_edge),
             "prompt_words": word_count,
             "prompt_chars": len(prompt),
@@ -551,38 +358,11 @@ async def run_pipeline(job: Job, video_path: Path) -> JobResult:
                 actual_plan,
                 actual_shots,
                 s.frame_long_edge,
-                sheet_count=sum(len(v) for v in chunk_sheets),
-                sheet_cells=s.frame_sheet_cells,
                 actual_frames=total_frames,
             ),
-            # ---- 质量管线（v2）的执行情况 ----
-            # 这些数字是排查用的：镜头数没降下来、运镜还是全 static 时，
-            # 一眼就能看出是哪一步没生效。
-            "motion": {
-                "enabled": bool(s.motion_analysis),
-                "measured": len(motions),
-                "with_camera_movement": sum(1 for m in motions if not m.camera_static),
-                # 主体是否在动（与相机无关）。单帧看不出来，只有对比帧才知道 ——
-                # 出「人物原地踏步」这类问题时，先看这里的数字对不对：
-                # 明显走动应该在 0.1 以上，纯静止画面在 0.01 以下。
-                "with_subject_movement": sum(1 for m in motions if m.subject_moving),
-                "subject_change": [round(m.subject_change, 4) for m in motions],
-                "suggestions": [motion_mod.suggest_camera(m) for m in motions],
-            },
-            "shot_merges": merge_stats,
             "audio_jargon_removed": jargon_hits,
             "vocal_isolation": audio.vocal_isolation,
             "music_bpm": audio.bpm,
-            # 每个镜头的时间区间（验收要求：都有 start_ms/end_ms，末镜 end 到总时长）
-            "shot_spans": [
-                {
-                    "shot": sh.shot,
-                    "start_ms": sh.start_ms,
-                    "end_ms": sh.end_ms,
-                    "is_continuous": sh.is_continuous,
-                }
-                for sh in merged
-            ],
         },
     )
     return result
@@ -593,126 +373,6 @@ async def run_pipeline(job: Job, video_path: Path) -> JobResult:
 # ---------------------------------------------------------------------------
 
 _TC_RE = re.compile(r"^(\d{1,2}):(\d{2})(?:\.(\d{1,3}))?$")
-
-
-def _parse_timecode_ms(tc: str) -> int:
-    """把 `MM:SS.mmm` 解析成毫秒。解析不出来返回 0。"""
-    m = _TC_RE.match((tc or "").strip())
-    if not m:
-        return 0
-    mm, ss = int(m.group(1)), int(m.group(2))
-    frac = (m.group(3) or "0").ljust(3, "0")[:3]
-    return (mm * 60 + ss) * 1000 + int(frac)
-
-
-def _align_shot_spans(shots: list[ShotObservation], duration: float) -> None:
-    """补全并校正每个镜头的起止毫秒，就地修改。
-
-    为什么必须用代码兜底：模型给的时间区间经常有三类问题 ——
-    漏填（整段都是 0）、末镜算短（实测比实际总时长短了 0.4s）、
-    以及**把非末镜的 end 填成总时长**，导致后面的镜头全被挤成零长度。
-    而分镜表、`[Shot N] At MM:SS.mmm`、Seedance 的节拍图全部依赖这些数字。
-
-    规则：
-      * `timecode`（该镜首帧的真实时间戳）是**最可靠的锚点**，优先用它；
-      * 时间轴相对**片段**（用户截取后的片段），所以第一个镜头从 0 开始；
-      * 交叠时收**上一条**的 end，而不是推后本条的 start ——
-        推后 start 会让本条和后面所有镜头一起被挤扁（踩过：末镜变成 0 长度）；
-      * **末镜的 end 强制等于片段总时长** —— 这是验收要求，也是唯一一个
-        我们知道正确答案的锚点。
-    """
-    if not shots:
-        return
-    total_ms = max(0, int(round(duration * 1000)))
-
-    # --- 先定 start ---
-    for i, s in enumerate(shots):
-        from_tc = _parse_timecode_ms(s.timecode)
-        if from_tc > 0:
-            s.start_ms = from_tc
-        elif i > 0:
-            s.start_ms = shots[i - 1].end_ms
-        else:
-            s.start_ms = 0
-
-    # --- 再补 end ---
-    for i, s in enumerate(shots):
-        if s.end_ms > s.start_ms:
-            continue
-        nxt = _parse_timecode_ms(shots[i + 1].timecode) if i + 1 < len(shots) else 0
-        s.end_ms = nxt if nxt > s.start_ms else s.start_ms + 1000
-
-    # --- 消交叠：收上一条的 end，不动本条的 start ---
-    for i in range(1, len(shots)):
-        if shots[i].start_ms < shots[i - 1].end_ms:
-            shots[i - 1].end_ms = max(shots[i - 1].start_ms + 1, shots[i].start_ms)
-
-    # --- 起点重复：模型把好几个镜头标在了同一时刻 ---
-    #
-    # 实测：4 个镜头都写成 `00:12.551`，上面那句收口把它们压成了
-    # `12551-12552`（1 毫秒）—— 分镜表和节拍图全废。
-    # 做法：把「共享同一 start」的一组镜头，用组后面第一个不同的 start
-    # （或总时长）当这一组的结束，在组内均分。
-    i = 1
-    while i < len(shots):
-        if shots[i].start_ms > shots[i - 1].start_ms:
-            i += 1
-            continue
-        j = i
-        while j < len(shots) and shots[j].start_ms <= shots[i - 1].start_ms:
-            j += 1
-        group_start = shots[i - 1].start_ms
-        group_end = shots[j].start_ms if j < len(shots) else (total_ms or group_start + 1000)
-        if group_end <= group_start:
-            group_end = group_start + 1000
-        count = j - (i - 1)
-        step = (group_end - group_start) / count
-        for k in range(i - 1, j):
-            shots[k].start_ms = int(group_start + step * (k - (i - 1)))
-            shots[k].end_ms = int(group_start + step * (k - (i - 1) + 1))
-        i = j
-
-    # --- 锚点：首镜从 0 开始，末镜落在总时长上 ---
-    shots[0].start_ms = 0
-    if total_ms > 0:
-        shots[-1].end_ms = total_ms
-        # 末镜的 start 不能因为上面的收口被顶到总时长之后
-        if shots[-1].start_ms >= total_ms:
-            shots[-1].start_ms = max(0, shots[-1].end_ms - 1000)
-
-
-def _explain_empty_observations(raw_outputs: list[str], errors: list[str]) -> str:
-    """Pass1 全军覆没时，拼一条能直接定位问题的报错。
-
-    原来的文案是「请检查模型是否支持图片输入，或换用更强的视觉模型」——
-    但真实原因常常不是这个。踩过：DeepSeek-V4.1-Flash 是推理模型，
-    思考过程 5 万多字符把 token 预算吃光，正文一个字没写出来，
-    结果报成「不支持图片」，方向完全带偏。
-    """
-    lines = ["视觉模型未能返回可解析的镜头观察结果。"]
-
-    real = [e for e in errors if e]
-    if real:
-        lines.append("")
-        lines.append("各分块的失败原因：")
-        for i, e in enumerate(real[:3]):
-            lines.append(f"  分块 {i + 1}: {' '.join(e.split())[:300]}")
-    else:
-        lines.append("")
-        lines.append("模型有返回内容，但不是要求的 JSON 结构。各分块原始返回开头：")
-        for i, raw in enumerate(raw_outputs[:3]):
-            head = " ".join((raw or "").split())[:200] or "（空响应）"
-            lines.append(f"  分块 {i + 1}: {head}")
-
-    lines.append("")
-    lines.append(
-        "排查顺序：① 看上面有没有 finish_reason=length —— 那是 token 预算不够，"
-        "调大 VLM_MAX_TOKENS；② 确认模型支持图片输入（GET /api/health/vlm 会发一张图实测）；"
-        "③ 确认模型能按 JSON 输出，推理模型有时会把答案写成散文。"
-    )
-    return "\n".join(lines)
-
-
 def _safe_detect_shots(
     path: Path, duration: float, threshold: float, min_shot_seconds: float
 ) -> tuple[list[tuple[float, float]], int, float, str]:
@@ -871,19 +531,6 @@ def _audio_slice(audio: AudioReport, start: float, end: float) -> str:
             lines.append(f"  （节奏约 {audio.bpm:.0f} BPM）")
 
     return "\n".join(lines)
-
-
-def _describe_shots(shots: list[Shot]) -> str:
-    if not shots:
-        return "无"
-    total = shots[-1].end - shots[0].start
-    avg = total / len(shots)
-    return (
-        f"{len(shots)} 个镜头，总时长 {total:.2f}s，平均镜头长度 {avg:.2f}s"
-        f"（{'快剪' if avg < 2 else '常规' if avg < 5 else '长镜头为主'}）"
-    )
-
-
 def build_frame_refs(job_id: str, frames: list[tuple[float, str, Path]], shot_index: int) -> list[FrameRef]:
     return [
         FrameRef(shot_index=shot_index, time=t, path=str(p), role=role)  # type: ignore[arg-type]

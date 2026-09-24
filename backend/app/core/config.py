@@ -134,23 +134,6 @@ class Settings(BaseSettings):
     frame_interval_seconds: float = 0.5
     # 单个镜头超过多少秒时额外补帧（保留给长镜头加权用）
     long_shot_seconds: float = 5.0
-    # 把帧拼成网格图（contact sheet）再送给模型，0 = 关闭（每帧单独一张图）。
-    #
-    # **为什么拼图**：实测模型的图片 token 成本有上限 —— 网格从 2.7 Mpx 做到
-    # 9.2 Mpx（3.4 倍），token 只从 1156 涨到 1176。也就是说一张图里放 6 帧还是
-    # 20 帧，成本几乎一样。所以同样预算下可以给模型几倍的时间覆盖度，速度还更快。
-    #
-    # 实测（13.3s 视频，Pass1 全流程）：
-    #     1fps / 12 张单帧 -> 46s，画面要素 7/7
-    #     2fps / 3 张 3x3  -> 26s，画面要素 7/7，镜头数更接近真实
-    #
-    # ⚠️ **代价是小字**：6 格时文字可靠，9 格以上开始编
-    # （实测 9/12/16/20 格都把 `FUTURE HERO` 读成 `ULTRA HERO`，偶尔又能读对 ——
-    # 在临界点上随机翻）。画面描述不受影响。
-    # 所以：只关心画面 -> 用 9~12；需要读小字 -> 压到 4~6，或保持 0 用单帧。
-    frame_sheet_cells: int = 0
-    # 拼图模式下每秒抽几帧。2.0 = 一秒两帧，配合 9 格约每 4.5 秒一张图。
-    frame_sample_fps: float = 2.0
     frame_long_edge: int = 896
     frame_jpeg_quality: int = 82
 
@@ -158,32 +141,9 @@ class Settings(BaseSettings):
     scene_threshold: float = 0.30
     min_shot_seconds: float = 0.8
 
-    # ---- 反推质量管线（v2）----
-    #
-    # 这四项是针对实测出来的四个质量缺陷做的修补，**每一项都能单独关掉**，
-    # 方便定位问题（如果改完质量反而变差，至少知道是哪一步的锅）。
-    # 关掉任何一项都会退回 v1 的行为。
-
-    # 1) 客观运动分析。ffmpeg 抽灰度小图 + 纯 Python 光流，算出每个镜头的
-    #    位移方向和速度，作为**数据**喂给模型。
-    #
-    # ⚠️ **默认关。** 实测（2026-09-24，同一段素材对照）：
-    #    开 → 7 镜头 / camera 全 static / 端到端 136s
-    #    关 → 5 镜头 / camera 全 static / 端到端  51s
-    #   **结论一样，但慢了 2.7 倍。** 因为默认抽帧密度是 2fps（每镜多帧），
-    #   模型自己就能从帧图判断运镜 —— 这一层是给「帧数被压得很低」的场景
-    #   兜底的（早期每镜只有 1~3 帧时，38 个镜头全部被标成 static）。
-    #   真要开就在 .env 里写 MOTION_ANALYSIS=true。
-    motion_analysis: bool = False
-    # 2) 相邻镜头合并。把「同一个机位被拆成好几条」的复读条目合并成一个。
-    #    实测出现过 23 条交替的「三人跳舞」/「三人继续」，全是同一个机位。
-    #    提示词里已经写明了规则但模型照样违反，所以代码侧兜底。
-    merge_adjacent_shots: bool = True
-    # 3) 特写镜头的画面外属性清理。实测 `Extreme close-up` 的描述里出现了
-    #    `white socks, black ankle boots` —— 特写根本看不到袜子。
-    strict_frame_visibility: bool = True
-    # 4) 转写前做人声频段分离。MV / 现场录音里鼓和贝斯能量很强，whisper 会被
-    #    伴奏带偏；带通滤掉 180Hz 以下和 4kHz 以上之后歌词准确率明显更高。
+    # ---- 音频 ----
+    # 转写前做人声频段分离。MV / 现场录音里鼓和贝斯能量很强，whisper 会被
+    # 伴奏带偏；带通滤掉 180Hz 以下和 4kHz 以上之后歌词准确率明显更高。
     vocal_isolation: bool = True
 
     # ---- 长视频分块 ----

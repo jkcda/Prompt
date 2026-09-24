@@ -70,55 +70,6 @@ def mock_vlm_env(mock_server, monkeypatch):
     mock_vlm.reset()
     yield mock_server
     cfg.refresh_settings()
-
-
-# ---------------------------------------------------------------------------
-# 测试
-# ---------------------------------------------------------------------------
-
-def test_full_pipeline_h3(mock_vlm_env, sample_video: Path, tmp_path: Path):
-    """完整跑一遍：探测 → 镜头切分 → 抽帧 → Pass1 → Pass2。"""
-    job = Job(
-        id="e2e-h3",
-        source="upload",
-        title="e2e",
-        options=AnalyzeOptions(format="h3", language="en", enable_asr=False),
-    )
-    result = pipeline.run_pipeline_sync(job, sample_video)
-
-    # 提示词非空，且含 H3 的三个字段
-    assert result.prompt.strip()
-    assert "integrated_multimodal_description:" in result.prompt
-    assert "overall_soundscape:" in result.prompt
-    assert "non_diegetic_music:" in result.prompt
-
-    # 结构化观察被解析出来了
-    assert len(result.observations) >= 3
-    assert all(o.shot for o in result.observations)
-
-    # 抽帧真的发生了，且文件都在
-    assert result.frames_used > 0
-    assert len(result.frame_urls) == result.frames_used
-
-    # 媒体信息与音频报告都在
-    assert result.media is not None
-    assert result.media.duration == pytest.approx(10.0, abs=0.5)
-    assert result.audio is not None
-    assert result.audio.has_audio is True
-
-    # 统计字段
-    assert result.stats["format"] == "h3"
-    assert result.stats["frames"] == result.frames_used
-    assert result.stats["shots"] >= 3
-
-    # 模型被调用了两次：Pass1（带图）+ Pass2（不带图）
-    passes = [c["pass"] for c in mock_vlm.CALLS]
-    assert 1 in passes, "Pass1 未被调用"
-    assert 2 in passes, "Pass2 未被调用"
-    pass2_calls = [c for c in mock_vlm.CALLS if c["pass"] == 2]
-    assert len(pass2_calls) == 1, "Pass2 应该只调用一次"
-
-
 def test_pass1_receives_images_matching_frame_count(mock_vlm_env, sample_video: Path):
     """Pass1 请求里的图片数必须等于我们抽出来的帧数——时间戳与图片必须一一对应。"""
     job = Job(
@@ -143,87 +94,6 @@ def test_pipeline_respects_frame_budget(mock_vlm_env, sample_video: Path):
     result = pipeline.run_pipeline_sync(job, sample_video)
     assert result.frames_used <= 6
     assert sum(c["images"] for c in mock_vlm.CALLS if c["pass"] == 1) <= 6
-
-
-def test_pipeline_supports_all_formats(mock_vlm_env, sample_video: Path):
-    """四种格式都要能出结果，且各自带上自己的标志性结构。"""
-    markers = {
-        "h3": "integrated_multimodal_description:",
-        "h3-ref": "subject_definitions:",
-        "seedance": "全片",
-        "generic": "【整体风格】",
-    }
-    for fmt, marker in markers.items():
-        mock_vlm.reset()
-        job = Job(
-            id=f"e2e-{fmt}",
-            source="upload",
-            options=AnalyzeOptions(format=fmt, enable_asr=False),  # type: ignore[arg-type]
-        )
-        result = pipeline.run_pipeline_sync(job, sample_video)
-        assert result.prompt.strip(), f"{fmt} 未产出提示词"
-        assert marker in result.prompt, f"{fmt} 输出缺少标志结构 {marker}"
-        assert result.stats["format"] == fmt
-
-
-def test_pipeline_collects_subject_registry(mock_vlm_env, sample_video: Path):
-    """Pass1 登记的主体要一路带到结果里，镜号是重排后的全局镜号。"""
-    mock_vlm.reset()
-    job = Job(
-        id="e2e-subjects",
-        source="upload",
-        options=AnalyzeOptions(format="h3-ref", enable_asr=False),
-    )
-    result = pipeline.run_pipeline_sync(job, sample_video)
-
-    assert result.subjects, "主体登记表是空的"
-    labels = {s.label for s in result.subjects}
-    assert labels == {"performer", "rooftop"}
-    assert result.stats["subjects"] == len(result.subjects)
-
-    shot_count = len(result.observations)
-    for sub in result.subjects:
-        assert sub.shots, f"{sub.label} 没有登记镜号"
-        assert all(1 <= int(x) <= shot_count for x in sub.shots), \
-            f"{sub.label} 的镜号超出范围：{sub.shots}"
-
-
-def test_subject_registry_reaches_pass2(mock_vlm_env, sample_video: Path):
-    """Ref2VA 的参考标签必须来自登记表，而不是 Pass2 自己编。
-
-    mock 会照登记表生成 <Subject N>，所以只要标签数量对得上，
-    就说明登记表确实送到了 Pass2。
-    """
-    mock_vlm.reset()
-    job = Job(
-        id="e2e-registry-pass2",
-        source="upload",
-        options=AnalyzeOptions(format="h3-ref", enable_asr=False),
-    )
-    result = pipeline.run_pipeline_sync(job, sample_video)
-
-    n = len(result.subjects)
-    assert f"<Subject {n}>" in result.prompt
-    assert f"<Subject {n + 1}>" not in result.prompt
-    assert result.prompt.count("): fully_preserved") == n
-
-
-def test_seedance_mode_does_not_leak_h3_structure(mock_vlm_env, sample_video: Path):
-    """两种模式不能串味：Seedance 输出里不该有 H3 的字段名。"""
-    mock_vlm.reset()
-    job = Job(
-        id="e2e-seedance-clean",
-        source="upload",
-        options=AnalyzeOptions(format="seedance", enable_asr=False),
-    )
-    result = pipeline.run_pipeline_sync(job, sample_video)
-
-    assert "subject_definitions" not in result.prompt
-    assert "integrated_multimodal_description" not in result.prompt
-    assert "retention_analysis" not in result.prompt
-    assert result.stats["mode"] == "seedance"
-
-
 def test_h3_modes_report_their_mode(mock_vlm_env, sample_video: Path):
     """T2VA 与 Ref2VA 都归到 h3 模式，但 format 各自不同。"""
     for fmt in ("h3", "h3-ref"):
@@ -252,7 +122,7 @@ def test_pipeline_reports_progress_stages(mock_vlm_env, sample_video: Path):
     pipeline.run_pipeline_sync(job, sample_video)
 
     stages = {e["stage"] for e in store.events(job.id) if e.get("type") == "progress"}
-    for expected in ("probe", "scenes", "audio", "plan", "frames", "observe", "compose"):
+    for expected in ("probe", "scenes", "audio", "plan", "frames", "compose"):
         assert expected in stages, f"缺少阶段事件：{expected}"
 
 
@@ -275,26 +145,6 @@ def test_short_video_uses_single_chunk(mock_vlm_env, sample_video: Path):
     job = Job(id="e2e-chunk", source="upload", options=AnalyzeOptions(enable_asr=False))
     result = pipeline.run_pipeline_sync(job, sample_video)
     assert result.chunks == 1
-
-
-def test_long_video_is_chunked(mock_vlm_env, sample_video: Path, monkeypatch):
-    """把分块阈值压到 4 秒，10 秒视频就该被切成多块。"""
-    monkeypatch.setenv("CHUNK_THRESHOLD_SECONDS", "4")
-    monkeypatch.setenv("CHUNK_SECONDS", "4")
-    cfg.refresh_settings()
-    try:
-        job = Job(id="e2e-long", source="upload", options=AnalyzeOptions(enable_asr=False))
-        result = pipeline.run_pipeline_sync(job, sample_video)
-        assert result.chunks >= 2, f"应被分块，实际 {result.chunks} 块"
-        assert result.stats["chunks"] == result.chunks
-        # 分块后 Pass1 也应被调用多次
-        assert len([c for c in mock_vlm.CALLS if c["pass"] == 1]) == result.chunks
-    finally:
-        monkeypatch.setenv("CHUNK_THRESHOLD_SECONDS", "90")
-        monkeypatch.setenv("CHUNK_SECONDS", "60")
-        cfg.refresh_settings()
-
-
 # ---------------------------------------------------------------------------
 # 请求级覆盖（前端高级选项）
 # ---------------------------------------------------------------------------
@@ -356,39 +206,6 @@ def test_prompt_word_limit_override_recorded(mock_vlm_env, sample_video: Path):
     assert result.stats["prompt_word_limit"] == 1234
     assert "prompt_words" in result.stats
     assert "prompt_over_limit" in result.stats
-
-
-# ---------------------------------------------------------------------------
-# 片段截取（trim）
-# ---------------------------------------------------------------------------
-
-def test_trim_analyses_only_the_selected_range(mock_vlm_env, sample_video: Path):
-    """框选片段后，反推的应该**只有**那一段。
-
-    实现是「先切出片段再跑管线」，所以下游（探测/镜头检测/抽帧/音频/时间戳）
-    全部天然是相对片段的，不用在七八个地方各自记得减偏移。
-    """
-    import asyncio
-
-    from app.services.jobs import store
-
-    full = ff.probe(sample_video)
-    mock_vlm.reset()
-    job = asyncio.run(store.create(Job(
-        id="e2e-trim", source="upload",
-        options=AnalyzeOptions(enable_asr=False, trim_start=1.0, trim_end=3.0),
-    )))
-    result = pipeline.run_pipeline_sync(job, sample_video)
-
-    assert abs(result.media.duration - 2.0) < 0.4, f"应该只分析 2s，实际 {result.media.duration}"
-    assert result.media.duration < full.duration - 1.0
-    trim = result.stats["trim"]
-    assert trim is not None
-    assert abs(trim["start"] - 1.0) < 0.01 and abs(trim["end"] - 3.0) < 0.01
-    # 时间戳要相对片段，不能是原片的绝对时间
-    assert result.observations, "应该有镜头观察结果"
-
-
 def test_no_trim_means_whole_video(mock_vlm_env, sample_video: Path):
     import asyncio
 
@@ -495,3 +312,73 @@ def test_untrimmed_job_has_no_segment_url(mock_vlm_env, sample_video: Path):
     result = pipeline.run_pipeline_sync(job, sample_video)
 
     assert result.analyzed_video_url == ""
+
+
+# ---------------------------------------------------------------------------
+# 自由发挥模式（默认路径）
+# ---------------------------------------------------------------------------
+#
+# 帧 + 时间戳 + 用户说明 → 一次调用直接出提示词。两阶段整体退居备选分支。
+
+def test_freeform_is_the_default_path(mock_vlm_env, sample_video: Path):
+    """默认只调一次模型，带图，直接出提示词 —— 不走 Pass1 的结构化观察。"""
+    mock_vlm.reset()
+    job = Job(id="e2e-freeform", source="upload", options=AnalyzeOptions(enable_asr=False))
+    result = pipeline.run_pipeline_sync(job, sample_video)
+
+    kinds = [c["kind"] for c in mock_vlm.CALLS]
+    assert kinds == ["freeform"], f"自由发挥应该只调一次模型，实际 {kinds}"
+    assert mock_vlm.CALLS[0]["images"] == result.frames_used, "帧要全部送到"
+
+    # 出的是提示词，不是 Pass1 的 JSON
+    assert "integrated_multimodal_description:" in result.prompt
+    assert not result.prompt.lstrip().startswith("{")
+
+    # 代价：没有结构化观察（前端「镜头观察」页签会空）。
+    # 时间轴不受影响 —— 它用的是场景检测的 shots，不是 observations。
+    assert result.observations == []
+    assert result.subjects == []
+    assert result.shots
+
+
+def test_freeform_system_carries_only_identity_task_and_format():
+    """自由发挥的系统提示词只有「身份 + 任务 + 目标格式」。
+
+    ⚠️ 这是刻意删掉「教模型怎么观察」的结果 —— 实测每收紧一次这类规则、输出就
+    退化一次（防编造规则压掉合理推断、把「相机静止」当结论喂进去会被外推成
+    「人物也静止」、写死镜头数上限会把快切压到 20 以内）。
+
+    **约束输出格式 ≠ 约束思考。** 只留目标格式，以及两条关于**产物**的硬约束。
+    """
+    from app.services import templates
+
+    system = templates.build_system("h3", "en")
+
+    # 目标格式必须在（用户明确要求：H3 和 Seedance 的格式不能丢）
+    for marker in ("integrated_multimodal_description:", "overall_soundscape:",
+                   "non_diegetic_music:"):
+        assert marker in system
+
+    # 「怎么观察」的规则不该再有
+    for gone in ("Hard rules", "Report only what the frames actually show",
+                 "HOW MANY ENTRIES", "SUBJECT REGISTRY", "confidence"):
+        assert gone not in system, f"自由发挥模式不该再有观察规则：{gone}"
+
+    # 但两条关于产物的硬约束要留
+    assert "static or terminal verbs" in system, "静止动词会让生成的视频冻住"
+    assert "the content is unknown" in system, "音频未知时编造比留空更糟"
+
+
+def test_freeform_keeps_every_target_format():
+    """四种格式的标志结构一个都不能丢。"""
+    from app.services import templates
+
+    markers = {
+        "h3": "integrated_multimodal_description:",
+        "h3-ref": "subject_definitions:",
+        "seedance": "主体",
+        "generic": "【整体风格】",
+    }
+    for fmt, marker in markers.items():
+        system = templates.build_system(fmt, "en")  # type: ignore[arg-type]
+        assert marker in system, f"{fmt} 缺少标志结构 {marker}"

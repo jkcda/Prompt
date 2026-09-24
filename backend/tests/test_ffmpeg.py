@@ -358,67 +358,6 @@ def test_selfcheck_uses_the_same_shot_detection_as_the_pipeline():
     assert "detect_scene_cuts" not in src, "自检还在直接用固定阈值"
     # 选帧也要传 frame_interval，否则帧数和管线对不上
     assert "frame_interval=s.frame_interval_seconds" in src
-
-
-# ---------------------------------------------------------------------------
-# 拼图（contact sheet）
-# ---------------------------------------------------------------------------
-
-def test_build_contact_sheets_groups_frames(sample_video: Path, tmp_path: Path):
-    """9 帧按 6 格拼，应该得到 1 张 6 格 + 1 张 3 格（或 3 格那张退回单帧）。"""
-    pairs = ff.extract_frames_at(
-        sample_video, [round(i * 0.4, 2) for i in range(9)], tmp_path / "f"
-    )
-    assert len(pairs) >= 6
-
-    sheets = ff.build_contact_sheets(pairs, cells_per_sheet=6, out_dir=tmp_path / "s")
-    assert sheets
-    multi = [s for s in sheets if len(s[0]) > 1]
-    assert len(multi) >= 1, "应该至少拼出一张网格"
-    assert sum(len(t) for t, _ in sheets) == len(pairs), "帧不能丢"
-    for times, path in multi:
-        assert path.exists() and path.stat().st_size > 0
-        assert len(times) <= 6
-        assert times == sorted(times), "格内时间必须升序"
-
-
-def test_contact_sheet_is_bigger_than_one_frame(sample_video: Path, tmp_path: Path):
-    """拼出来的图必须真的比单帧大 —— 否则说明拼图没生效。"""
-    pairs = ff.extract_frames_at(
-        sample_video, [round(i * 0.4, 2) for i in range(6)], tmp_path / "f"
-    )
-    sheets = ff.build_contact_sheets(pairs, cells_per_sheet=6, out_dir=tmp_path / "s")
-    multi = [s for s in sheets if len(s[0]) > 1]
-    assert multi, "6 帧应该拼成一张"
-    _, sheet_path = multi[0]
-    one = pairs[0][1]
-    assert sheet_path.stat().st_size > one.stat().st_size
-
-
-def test_contact_sheets_off_when_cells_too_small(sample_video: Path, tmp_path: Path):
-    """cells_per_sheet < 2 时不该拼图（调用方会退回单帧）。"""
-    pairs = ff.extract_frames_at(sample_video, [0.5, 1.0], tmp_path / "f")
-    assert ff.build_contact_sheets(pairs, cells_per_sheet=1, out_dir=tmp_path / "s") == []
-    assert ff.build_contact_sheets([], cells_per_sheet=6, out_dir=tmp_path / "s") == []
-
-
-def test_describe_sheet_layout_explains_grid_and_times(sample_video: Path, tmp_path: Path):
-    """布局说明必须包含：这是网格不是单帧、行列数、每格对应的时间点。
-
-    不说明的话模型会把整张图当成一帧，或者无法把格子映射回时间轴。
-    """
-    pairs = ff.extract_frames_at(
-        sample_video, [round(i * 0.4, 2) for i in range(6)], tmp_path / "f"
-    )
-    sheets = ff.build_contact_sheets(pairs, cells_per_sheet=6, out_dir=tmp_path / "s")
-    text = ff.describe_sheet_layout(sheets, 6)
-    assert "CONTACT SHEET" in text
-    assert "3x2" in text, "要写明行列布局"
-    assert "reading order" in text
-    assert "padding" in text, "黑块补齐要说明，否则模型会当成画面内容"
-    assert "0.00s" in text, "要列出每张图覆盖的时间点"
-
-
 # ---------------------------------------------------------------------------
 # 片段截取
 # ---------------------------------------------------------------------------

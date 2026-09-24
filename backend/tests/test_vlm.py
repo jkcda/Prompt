@@ -464,45 +464,6 @@ def test_require_configured_raises_actionable_error():
         client.require_configured()
     assert "VLM_API_KEY" in str(exc.value)
     assert "backend/.env" in str(exc.value)
-
-
-# ---------------------------------------------------------------------------
-# Pass1 全军覆没时的报错
-# ---------------------------------------------------------------------------
-
-def test_explain_empty_observations_surfaces_real_errors():
-    """有失败原因时优先展示原因，而不是含糊的「不支持图片」。"""
-    from app.services.pipeline import _explain_empty_observations
-
-    msg = _explain_empty_observations(
-        ["", ""],
-        ["模型 m 是推理模型，思考过程占满了 token 预算", ""],
-    )
-    assert "推理模型" in msg
-    assert "分块 1" in msg
-    assert "VLM_MAX_TOKENS" in msg
-
-
-def test_explain_empty_observations_shows_raw_head_when_no_error():
-    """模型有返回但结构不对时，要给出原文开头，否则无从下手。"""
-    from app.services.pipeline import _explain_empty_observations
-
-    msg = _explain_empty_observations(
-        ["Sure! Here is my analysis of the video: the scene shows...", ""],
-        ["", ""],
-    )
-    assert "Sure! Here is my analysis" in msg
-    assert "空响应" in msg, "空的那块也要标出来"
-
-
-def test_explain_empty_observations_marks_empty_chunks():
-    from app.services.pipeline import _explain_empty_observations
-
-    msg = _explain_empty_observations(["", ""], ["", ""])
-    assert msg.count("（空响应）") == 2
-    assert "排查顺序" in msg
-
-
 # ---------------------------------------------------------------------------
 # 关闭思考过程
 # ---------------------------------------------------------------------------

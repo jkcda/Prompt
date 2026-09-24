@@ -233,16 +233,32 @@ async def chat_completions(request: Request) -> dict:
                 )
 
     n_images = _count_images(payload)
-    is_pass1 = n_images > 0
+    system_text = ""
+    for msg in payload.get("messages") or []:
+        if msg.get("role") == "system":
+            system_text = msg.get("content") or ""
+            break
+
+    # 自由发挥模式也带图，但它直接出提示词，不出 Pass1 的 JSON。
+    # 靠系统提示词里那句「镜头数由你自己判断」识别 —— 那是该模式独有的。
+    is_freeform = "yours to judge from the footage" in system_text
+    is_pass1 = n_images > 0 and not is_freeform
 
     CALLS.append({
         "images": n_images,
-        "pass": 1 if is_pass1 else 2,
+        # pass 的语义保持不变（1 = 带图调用，2 = 不带图调用），老断言继续有效；
+        # 用 kind 区分「这次带图到底是要 JSON 还是要提示词」。
+        "pass": 1 if n_images else 2,
+        "kind": "freeform" if is_freeform else ("pass1" if is_pass1 else "pass2"),
         "model": payload.get("model"),
         "chars": len(user_text),
     })
 
-    text = _make_pass1_response(payload, user_text) if is_pass1 else _make_pass2_response(payload, user_text)
+    text = (
+        _make_pass1_response(payload, user_text)
+        if is_pass1
+        else _make_pass2_response(payload, user_text)
+    )
 
     return {
         "id": "mock-1",

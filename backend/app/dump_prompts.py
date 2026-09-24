@@ -4,14 +4,12 @@
     python -m app.dump_prompts [输出目录]
 
 导出内容：
-    pass1_system.txt   观察阶段的系统提示词
-    pass1_user.txt     观察阶段的用户消息（含帧时间戳列表的样例）
-    pass2_system_*.txt 各格式成文阶段的系统提示词
-    pass2_user.txt     成文阶段的用户消息（观察结果是怎么整理给它的）
+    system_<格式>.txt  各目标格式的系统提示词（身份 + 任务 + 格式规则）
+    user.txt           用户消息样例（帧时间戳清单 + 音频 + 用户说明）
     payload.json       实际发出去的 HTTP body 骨架（图片用占位符替换）
 
 为什么要做成命令：提示词是这个项目的核心资产，改一个字都会影响产出质量。
-把它导出来对照着读，比在 9000 字的 Python 字符串里翻要快得多。
+把它导出来对照着读，比在 Python 字符串里翻要快得多。
 """
 
 from __future__ import annotations
@@ -21,20 +19,14 @@ import sys
 from pathlib import Path
 
 from .core.config import get_settings, refresh_settings
-from .schemas import (
-    AudioReport,
-    ChunkObservation,
-    MediaInfo,
-    ShotObservation,
-    SubjectEntry,
-)
+from .schemas import MediaInfo
 from .services import templates
 from .services.vlm import VLMClient
 
 
-def _pass1_user_sample() -> str:
-    """用真实参数造一条 Pass1 用户消息 —— 帧列表 + 运动数据 + 用户画面说明。"""
-    return templates.build_pass1_user(
+def _user_sample() -> str:
+    """用真实参数造一条用户消息 —— 帧列表 + 音频 + 用户画面说明。"""
+    return templates.build_user(
         chunk_start=0.0,
         chunk_end=12.0,
         frame_marks=[
@@ -47,61 +39,7 @@ def _pass1_user_sample() -> str:
         chunk_index=0,
         chunk_total=1,
         content_hint="一镜到底的跟拍运镜，全程没有切镜；主角是白发少女，穿黑色风衣。",
-        # 客观运动数据的示例。实际运行时由 motion.analyze_shots_motion 算出来。
-        motion_text=(
-            "shot 1: dolly-in; content moves +0.42 px horizontally and -0.08 px vertically "
-            "per frame (positive = right / down), i.e. 2.5 px per second; total movement "
-            "across the whole shot: 30.2 px (the camera really moves); horizontal scale "
-            "change +0.71 (positive = content spreading outward = camera moving closer); "
-            "frame-to-frame brightness change 3.10%"
-        ),
-    )
-
-
-def _pass2_user_sample() -> str:
-    """用假的观察结果造一条 Pass2 用户消息 —— 看观察结果怎么整理给成文阶段。"""
-    observations = [
-        ChunkObservation(
-            chunk_index=0,
-            start=0.0,
-            end=12.0,
-            shots=[
-                ShotObservation(
-                    shot="1", timecode="00:00.000", start_ms=0, end_ms=3400,
-                    shot_size="medium close-up",
-                    camera="slow dolly-in, small amplitude",
-                    subject="a young woman, white hair, black trench coat",
-                    action="she turns toward the lens and speaks, jaw moving with each syllable",
-                    setting="a rooftop at dusk, city skyline behind",
-                    lighting="cool blue key from the left, warm rim from behind",
-                    color="teal and orange, low contrast",
-                    motion_energy="medium, follows a slow 4/4 pulse",
-                    on_screen_text="none", dialogue="<d>[Chinese] 你来了</d>",
-                    sfx="wind, distant traffic", transition="continues without a cut",
-                    confidence=0.9,
-                ),
-            ],
-            subjects=[
-                SubjectEntry(label="performer", kind="person",
-                             description="young woman, white hair, black trench coat",
-                             shots=["1"], notes="hair parting drifts easily"),
-            ],
-            global_notes="single continuous take, no cuts",
-            edit_structure="continuous",
-            cut_points=[],
-            continuity_notes="camera and subject motion are continuous throughout",
-        ),
-    ]
-    return templates.build_pass2_user(
-        observations=observations,
-        audio=AudioReport(note="未配置 ASR"),
-        media=MediaInfo(path="demo.mp4", duration=12.0, width=1920, height=1080, fps=30.0),
-        shots_summary="1 shot (continuous)",
-        extra_instruction="",
-        target_duration=None,
-        subjects=observations[0].subjects,
-        fmt="h3-ref",
-        content_hint="一镜到底的跟拍运镜，全程没有切镜。",
+        closing=templates.build_closing(),
     )
 
 
@@ -110,8 +48,8 @@ def _payload_skeleton() -> dict:
     refresh_settings()
     client = VLMClient()
     payload = client._openai_payload(
-        "<PASS1_SYSTEM 见 pass1_system.txt>",
-        "<PASS1_USER 见 pass1_user.txt>",
+        "<系统提示词见 system_h3.txt>",
+        "<用户消息见 user.txt>",
         images=[],  # 不塞真图，只保留结构
         max_tokens=get_settings().vlm_max_tokens,
     )
@@ -134,13 +72,10 @@ def dump(out_dir: Path) -> list[Path]:
         p.write_text(text, encoding="utf-8")
         written.append(p)
 
-    write("pass1_system.txt", templates.PASS1_SYSTEM)
-    write("pass1_user.txt", _pass1_user_sample())
-
     for fmt in ("h3", "h3-ref", "seedance", "generic"):
-        write(f"pass2_system_{fmt}.txt", templates.build_pass2_system(fmt, "en"))
+        write(f"system_{fmt}.txt", templates.build_system(fmt, "en"))
 
-    write("pass2_user.txt", _pass2_user_sample())
+    write("user.txt", _user_sample())
     write("payload.json", json.dumps(_payload_skeleton(), ensure_ascii=False, indent=2))
     return written
 
