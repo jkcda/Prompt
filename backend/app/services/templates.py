@@ -124,6 +124,9 @@ because no frame was sampled inside it.
    * **Spend the bulk of each shot on the action.** Appearance, setting, lighting and colour are \
 supporting detail — a few words each, not a paragraph. If your `subject` + `setting` + `lighting` \
 + `color` wording ends up longer than your `action` wording, you have written it backwards.
+   * ⚠️ **But do not invent movement to fill the space.** If a shot genuinely has none (a locked-off \
+empty landscape, a static title card), write that in one line — "very little moves in this shot" \
+is a valid observation. Fabricating motion is as wrong as omitting it.
 3. Use MOTION VERBS, never static verbs. Write "she rises and turns", "the camera tracks left", \
 "his shoulders roll with the step". Never write "she stays", "the pose holds", "remains still", \
 "hands rest" — those words make generated video freeze.
@@ -879,6 +882,10 @@ A shot that opens with the subject's outfit and ends with one verb is written ba
 environment + lighting combined). Everything else goes to what happens. Measured on a real \
 sample: descriptions that ran four sentences of appearance and one of action read as photo \
 captions — the generator then produces a still image, not a shot.
+   ⚠️ **But do not invent movement to fill the space.** If a shot genuinely has none (a locked-off \
+empty landscape, a static title card), say that in one line and describe what the frame holds. \
+"Very little moves in this shot" is a valid, useful observation. Fabricating motion is as wrong \
+as omitting it.
    **Reconstruct the motion between the sampled frames.** The observation report's frames are \
 samples of one continuous event; the movement that happened between them is a fact about the \
 footage, not an invention. Write it out.
