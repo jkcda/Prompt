@@ -145,27 +145,31 @@ def test_h3_ref_retention_analysis_excludes_video_and_audio_lines():
     assert "no video or audio line" in system
 
 
-def test_word_limit_is_per_section_not_just_a_global_number():
-    """长度必须**逐段**给预算，不能只给一个全局上限。
+def test_format_blocks_carry_no_word_budget():
+    """格式块里**不能有词数上限** —— 它会让模型合并镜头。
 
-    踩过：原来只写「keep the description under 700 words」，
-    实测模型写出 779 词正文、整篇 1795 词 / 11314 字符 —— 视频模型吃不下。
-    模型不会自己把全局上限分配到各段，得逐段给数字。
+    实测（同一段每 0.3 秒一刀的 PV，30 帧）：
+
+    | 正文上限 | 镜头数 | 词数 |
+    |---|---|---|
+    | 420 词（原来的写法） | 6 | 378 |
+    | 900 词 | 15 | 528 |
+    | 完全去掉 | **21** | 1237 |
+
+    21 个镜头需要约 1200 词，420 词的预算下模型只能把多个镜头并成一个 ——
+    用户直接反馈「效果变差了」。**长度只能兜底（`PROMPT_WORD_LIMIT`），
+    不能写进生成时的指令。**
     """
-    system = build_system("h3", "en")
-    assert "420 words or fewer" in system
-    assert "LENGTH BUDGET" in system
+    for fmt in ("h3", "h3-ref", "seedance", "generic"):
+        system = build_system(fmt, "en")
+        for banned in ("LENGTH BUDGET", "words or fewer", "under 700 words"):
+            assert banned not in system, f"{fmt} 里还有词数上限：{banned}"
 
+    # 但**结构性**约束要留：Ref2VA 最多 6 个主体，是生成端的硬限制
     ref = build_system("h3-ref", "en")
-    assert "under 700 words" in ref, "整篇上限要写清楚"
-    assert "420 words" in ref
-    assert "at most 6 entries" in ref, "subject_definitions 要限条数"
-    assert "15 words each" in ref
-    assert "40 words" in ref
-    assert "25 words" in ref
-    # 旧的全局写法不该再出现
-    for sysp in (system, ref):
-        assert "350-500 words" not in sysp
+    assert "at most 6 entries" in ref, "subject_definitions 的条数上限是结构约束，要留"
+    # 也要明确说「不许为了省篇幅合并镜头」
+    assert "never drop or merge shots" in ref.lower() or "Do not drop or merge shots" in ref
 
 
 def test_h3_ref_tells_which_subjects_to_drop_when_too_many():
@@ -175,10 +179,6 @@ def test_h3_ref_tells_which_subjects_to_drop_when_too_many():
     assert "Drop the least important ones entirely" in system
 
 
-def test_h3_ref_says_where_to_cut_when_over_budget():
-    """超预算时先砍定义和分析，绝不砍正文 —— 正文才是生成要用的。"""
-    system = build_system("h3-ref", "en")
-    assert "never from `detailed_description`" in system
 
 
 def test_seedance_mode_has_no_h3_markup():
@@ -349,7 +349,7 @@ def test_compress_instruction_is_short_and_direct():
     换成一句「Shorten the prompt the user sends to under N words」+ 两条 keep/cut 就管用。
     """
     system = build_compress_system(700)
-    assert "under" in system and "words" in system
+    assert "words" in system and "700" in system, "要写清词数"
     assert "<Subject N>" in system
     assert "[Shot N]" in system
     assert "verbatim" in system, "台词必须逐字保留"
@@ -363,13 +363,13 @@ def test_compress_targets_below_the_limit_to_leave_headroom():
     让它瞄 0.85 倍，落点才在上限之内。
     """
     system = build_compress_system(700)
-    assert "under 595 words" in system, "700 × 0.85 = 595"
-    assert "below 700" in system, "真实上限也要写清楚"
+    assert "about 595 words" in system, "700 × 0.85 = 595"
+    assert "never more than 700" in system, "真实上限也要写清楚"
 
     user = build_compress_user("a " * 2000, 700)
     assert "2000 words" in user
-    assert "Cut at least 1405 words" in user, "2000 - 595 = 1405"
-    assert "595 words or fewer" in user
+    assert "about 595 words" in user, "目标词数要写进用户消息"
+    assert "hard ceiling 700" in user, "上限也要写清楚"
     assert "hard ceiling 700" in user
 
 
@@ -402,8 +402,7 @@ def test_compress_uses_thinking():
 def test_compress_user_includes_word_count():
     text = build_compress_user("a b c d e", 100)
     assert "5 words" in text
-    assert "85 words or fewer" in text, "100 × 0.85 = 85"
-    assert "hard ceiling 100" in text
+    assert "about 85 words" in text, "100 × 0.85 = 85"
     assert "--- BEGIN PROMPT ---" in text and "--- END PROMPT ---" in text
 
 
@@ -565,8 +564,8 @@ def test_user_message_says_the_timestamps_are_a_sampling_aid():
         chunk_start=0, chunk_end=10, frame_marks=[(0.0, "head"), (0.5, "mid")],
         audio_text="", media=None, chunk_index=0, chunk_total=1,
     )
-    assert "not the edit structure" in text
-    assert "yours to judge" in text
+    assert "a cut is the most likely explanation" in text
+    assert "do not merge away a cut the frames clearly show" in text
 
 
 def test_dump_prompts_exports_everything(tmp_path):
@@ -590,7 +589,7 @@ def test_dump_prompts_exports_everything(tmp_path):
     # 导出的用户消息里要能看到帧时间戳列表和用户说明注入
     u = (tmp_path / "user.txt").read_text(encoding="utf-8")
     assert "Image 1 -> timestamp" in u
-    assert "not the edit structure" in u
+    assert "a cut is the most likely explanation" in u
     assert "CONTEXT FROM THE PERSON WHO SUBMITTED" in u
 
     # payload 骨架要能当 JSON 读回来，且图片是占位符
@@ -638,7 +637,7 @@ def test_shot_boundary_is_marked_in_frame_list():
     assert "0.10s after the previous frame" in marked[0]
     # 只说「检测器在这里看到了变化」，不能说成已确认的切点 ——
     # 我们的检测可能把一镜到底切碎，说死了反而误导。
-    assert "Do not treat the marker as a confirmed cut" in txt
+    assert "do not merge away a cut the frames clearly show" in txt
 
 
 def test_uniform_gaps_are_not_marked():

@@ -241,7 +241,7 @@ async def chat_completions(request: Request) -> dict:
 
     # 自由发挥模式也带图，但它直接出提示词，不出 Pass1 的 JSON。
     # 靠系统提示词里那句「镜头数由你自己判断」识别 —— 那是该模式独有的。
-    is_freeform = "yours to judge from the footage" in system_text
+    is_freeform = "professional storyboard artist" in system_text
     is_pass1 = n_images > 0 and not is_freeform
 
     CALLS.append({

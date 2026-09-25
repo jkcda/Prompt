@@ -84,11 +84,11 @@ def build_user(
     lines.append(
         "**Read the gaps, not just the timestamps.** Consecutive frames are normally about "
         f"{normal_gap:.2f}s apart; the places marked `sampling boundary` above are much closer "
-        "together — that is where the automated detector saw a change. These timestamps are a "
-        "**sampling aid, not the edit structure**: the detector splits on pixel difference, so "
-        "it both misses real cuts and breaks single takes into pieces. Do not treat the marker "
-        "as a confirmed cut. **How many shots there are, and where the cuts fall, is yours to "
-        "judge from the images.**"
+        "together — that is where the automated detector saw a change, and **a cut is the most "
+        "likely explanation.** Check the images: if the composition, subject position or "
+        "lighting jumps there, it is a cut. The marker can also fire inside one continuous take "
+        "when the camera moves fast, so confirm against the images — but **do not merge away a "
+        "cut the frames clearly show.**"
     )
     lines.append("")
 
@@ -140,8 +140,8 @@ are meaningless in T2VA and will be read as literal text.
 - Speakers get stable IDs `(S1)`, `(S2)` in order of first vocal event. Dialogue and lyrics are \
 written `<d>[Language] the exact words</d>`. When a speaker is on camera, state their mouth \
 movement in the same shot.
-- **LENGTH BUDGET — hard.** 420 words or fewer; oversized prompts get truncated. Cut adjectives \
-and scene-setting if you run long — never the action or the mouth movement.
+- **Do not drop or merge shots to keep the prompt short.** If the footage has many cuts, the \
+prompt needs many `[Shot N]` blocks — write every one of them.
 - No closing or resolution marker: stop mid-flow on the last described action.
 
 `overall_soundscape`: one or two sentences of ambience and physical action sound across the whole \
@@ -175,20 +175,11 @@ detailed_description:
 overall_soundscape:
 non_diegetic_music:
 
-LENGTH BUDGET — hard requirement. **The entire output must be under 700 words** or the generator \
-truncates it and the whole rewrite is wasted.
+`subject_definitions` takes **at most 6 entries** — the generator accepts no more.
 
-| section | budget |
-|---|---|
-| `subject_definitions` | at most 6 entries, 15 words each |
-| `summary` | 40 words |
-| `retention_analysis` | one line per subject, 15 words each |
-| `detailed_description` | **420 words** — the bulk of the budget |
-| `overall_soundscape` | 40 words |
-| `non_diegetic_music` | 25 words |
-
-If you run long, cut the definitions and analysis lines — never from `detailed_description`. No filler, \
-no restating the style, no repeating an appearance after its first mention.
+Keep the writing tight: no filler, no restating the style, no repeating an appearance after its \
+first mention. **But never drop or merge shots to save space** — a cut in the footage is a \
+`[Shot N]` in the output.
 
 **Subject selection**: the registry may exceed 6 items. Pick the 6 that most need a reference \
 image, in this priority: people > wardrobe/props > environment > style/grade. Drop the least important ones \
@@ -196,7 +187,7 @@ entirely rather than giving everyone a half-line.
 
 Sections:
 - `subject_definitions`: one line per selected entry, numbered in registry order `<Subject 1>`, \
-`<Subject 2>`, ... — what the label denotes plus identifying features, 15 words or fewer. A `style` \
+`<Subject 2>`, ... — what the label denotes plus identifying features. A `style` \
 entry is defined as the look and grade to carry across, not as an object. Do not add a `<Video 1>` or \
 `<Audio 1>` line.
 - `summary`: one short paragraph opening with a bracketed task-type prefix, e.g. \
@@ -205,14 +196,14 @@ the source clip a reference.
 - `retention_analysis`: one line per `<Subject N>` label ONLY — no video or audio line. Use the fixed \
 markers `fully_preserved` / `partially_preserved` / `attribute_transfer` / `weak_reference`, \
 formatted `<Subject 1> (appears in [Shot 1], [Shot 3]): fully_preserved - ...`, shot list verbatim \
-from the registry, reason in 15 words or fewer. Default is `fully_preserved` unless the report \
+from the registry, with a short reason. Default is `fully_preserved` unless the report \
 says the appearance changes.
-- `detailed_description`: 420 words. One or two sentences of style before `[Shot 1]`. Then \
+- `detailed_description`: the main body. One or two sentences of style before `[Shot 1]`. Then \
 `[Shot 1]` with no timestamp and `[Shot N] At MM:SS.mmm, ...` afterwards. Each shot leads with the \
 action, then short appearance / environment / lighting. Insert labels at first appearance and \
 wherever their role applies. Speakers use `(Sx)`; dialogue uses `<d>[Language] ...</d>`.
-- `overall_soundscape` / `non_diegetic_music`: ambience and physical sound vs. audience-only score, \
-40 / 25 words. `N/A` when a category is absent. Never repeat dialogue.
+- `overall_soundscape` / `non_diegetic_music`: ambience and physical sound vs. audience-only score. \
+`N/A` when a category is absent. Never repeat dialogue.
 """
 
 
@@ -288,13 +279,13 @@ def build_compress_system(limit: int) -> str:
     （2297 → 803，确实砍了 65%，但还是超）。让它瞄 0.85 倍，落点才在上限之内。
     """
     target = max(1, int(limit * 0.85))
-    return f"""You are a ruthless text editor. Shorten the prompt the user sends to \
-under {target} words — it must end up comfortably below {limit}.
+    return f"""You are an editor tightening a prompt. Shorten it to about {target} words \
+— never more than {limit}. Cut only redundancy: adjectives, filler, repeated descriptions. \
+Do NOT drop or merge shots, and do not go below {target} — every cut costs fidelity.
 
 Keep: the section names present in the original, in order, each on its own line \
 as a bare `name:`; every `<Subject N>` label; every `[Shot N]` marker; all retention \
 markers; all dialogue verbatim; and `N/A` where present.
-Cut: adjectives, filler, repeated descriptions, hedging.
 
 Output only the shortened prompt."""
 
@@ -302,10 +293,9 @@ Output only the shortened prompt."""
 def build_compress_user(prompt: str, limit: int) -> str:
     words = len(prompt.split())
     target = max(1, int(limit * 0.85))
-    cut = max(0, words - target)
     return (
-        f"The following prompt is {words} words. Cut at least {cut} words — "
-        f"aim for {target} words or fewer (hard ceiling {limit}).\n\n"
+        f"The following prompt is {words} words. It needs to come down to about "
+        f"{target} words (hard ceiling {limit}) — no further.\n\n"
         f"--- BEGIN PROMPT ---\n{prompt}\n--- END PROMPT ---"
     )
 
@@ -475,15 +465,10 @@ def build_format_block(fmt: str, language: str) -> str:
 # **约束输出格式 ≠ 约束思考。** 这里只留两样：目标格式（输出契约），以及两条关于
 # **产物**的硬约束 —— 静止动词会让生成的视频冻住（包括嘴），音频未知时编造比留空更糟。
 
-_FREEFORM_OPENING = """You are a prompt engineer. You receive still frames sampled from ONE \
-continuous video segment, each labelled with its exact timestamp, plus an audio report and any \
-notes from the person who submitted the video.
-
-Write the generation prompt for the target video model below, so that generating from your \
-prompt reproduces this footage — what it looks like, what happens in it, and how the edit moves. \
-The frames are samples of one continuous event, not a storyboard: they are evidence for what \
-happened, not things to caption. **How many shots the segment has, and where the cuts fall, is \
-yours to judge from the footage.**
+_FREEFORM_OPENING = """You are a professional storyboard artist. The images below are this \
+video's storyboard — frames sampled at 2 per second, in order, each labelled with its exact \
+timestamp. Write the generation prompt for the target video model below. Free rein: reproduce \
+the original video's content as faithfully as you can.
 
 Two constraints on the wording — they are about the artifact, not about how you reason:
 * Never use static or terminal verbs (stays, holds, remains, freezes, pauses, ends, final pose) \

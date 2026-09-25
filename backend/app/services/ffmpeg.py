@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import re
+import statistics
 import subprocess
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
@@ -229,7 +230,20 @@ def cuts_to_shots(
     duration: float,
     min_shot_seconds: float | None = None,
 ) -> list[tuple[float, float]]:
-    """把切换点整理成镜头区间，并合并过短的镜头（快闪噪声）。"""
+    """把切换点整理成镜头区间，并合并过短的镜头（快闪噪声）。
+
+    ⚠️ 合并门槛要**跟着素材的切点密度走**，不能用一个固定值。
+
+    实测一支每 0.28 秒一刀的 PV：场景检测正确检出 27 个切点，却被默认的
+    0.8 秒门槛并成 **12 个镜头**（三刀并一刀）。抽帧跟着按错误的区间分配，
+    模型最后只写出 5 个镜头 —— 而这份素材真实约 21 个镜头，用户直接反馈
+    「效果变差了」。同一段素材把门槛降到 0.15 秒能恢复 23 个镜头。
+
+    固定门槛的本意是抑制检测器在同一处重复触发（软转场会连报几次），
+    但「0.8 秒」这种绝对值对快切素材是灾难。所以取两者的较小值：
+    配置值，以及**真实间隔中位数的一半**（留个 0.12 秒的地板防误触）。
+    慢素材不受影响：间隔中位数本来就大，仍然用配置值。
+    """
     s = get_settings()
     min_len = s.min_shot_seconds if min_shot_seconds is None else min_shot_seconds
     duration = max(duration, 0.01)
@@ -239,6 +253,10 @@ def cuts_to_shots(
         if 0.0 < c < duration:
             bounds.append(c)
     bounds.append(duration)
+
+    gaps = [b - a for a, b in zip(bounds, bounds[1:], strict=False) if b - a > 0.001]
+    if gaps:
+        min_len = min(min_len, max(_MIN_SHOT_FLOOR, statistics.median(gaps) / 2))
 
     shots: list[tuple[float, float]] = []
     for a, b in zip(bounds, bounds[1:], strict=False):
@@ -263,6 +281,9 @@ def uniform_shots(duration: float, target_count: int) -> list[tuple[float, float
 
 # 平均镜头长度超过这个值，就怀疑是漏检了
 _COARSE_AVG_SHOT = 6.0
+# 快切素材的合并门槛地板（秒）。低于它的一律并掉 —— 检测器在软转场处
+# 会连报几次，间隔常在 0.05~0.1 秒。
+_MIN_SHOT_FLOOR = 0.12
 # 降阈值重试时用的倍率（相对配置阈值）
 _ADAPTIVE_FACTORS = (0.5,)
 # 降阈值时最短镜头时长的下限，用来抑制噪声切点
