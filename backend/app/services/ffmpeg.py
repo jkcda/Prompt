@@ -349,17 +349,23 @@ def describe_sheet_layout(
         f"order (left-to-right, then top-to-bottom), in chronological sequence.",
         "Treat every grid cell as one separate frame. Cells filled with black are padding — ignore them.",
     ]
-    # ⚠️ 时间用 `MM:SS.mmm` 写 —— 目标格式里 `[Shot N] At ...` 就是这个格式。
-    # 写成 `0.67s` 的话模型会照着抄成 `At 0.670s`，与格式块要求打架（实测踩过）。
-    # 直接把数据摆成它要用的形状，比再写一条「请转换成 MM:SS」的指令稳。
+    # ⚠️ **只给每张图覆盖的时间范围，不要列逐帧时间戳。**
+    #
+    # 踩过：原来把每格的时间戳一个个列出来（`sheet 1: 00:00.000, 00:00.670, ...`），
+    # 模型就**照着枚举**——30 个时间戳 → 30 个 `[Shot N]`，一帧一镜。
+    # 证据：它在 4 处写了 "the eye close-up continues" / "the hand continues"
+    # ——**知道是同一个镜头却还是编了新号**，因为它在一格一格地数。
+    #
+    # 改成只给范围后实测：**30 镜头 → 15 镜头**，词数 1488 → 826，耗时 42s → 30s。
+    #
+    # 时间戳由模型自己估（它知道片段多长、每张图覆盖哪一段），估出来都在范围内。
     def _tc(t: float) -> str:
         m, sec = divmod(max(0.0, t), 60.0)
         return f"{int(m):02d}:{sec:06.3f}"
 
     for i, (times, _) in enumerate(sheets, 1):
         if len(times) > 1:
-            rng = ", ".join(_tc(t) for t in times)
-            lines.append(f"  sheet {i}: {rng}")
+            lines.append(f"  sheet {i}: covers {_tc(times[0])} to {_tc(times[-1])}")
         else:
             lines.append(f"  sheet {i}: single frame at {_tc(times[0])}")
     return "\n".join(lines)
