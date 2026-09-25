@@ -34,6 +34,7 @@ def build_user(
     chunk_total: int,
     content_hint: str = "",
     closing: str = "",
+    sheet_note: str = "",
 ) -> str:
     """组织用户消息文本（图片由调用方按顺序附在后面）。
 
@@ -51,7 +52,17 @@ def build_user(
         res = f"{media.width}x{media.height}" if media.width else "unknown"
         lines.append(f"Source video: {res}, {media.fps:.2f} fps, {media.duration:.2f}s total.")
     lines.append("")
-    lines.append(f"The {len(frame_marks)} images attached AFTER this text are in this exact order:")
+    if sheet_note:
+        lines.append(
+            f"The {len(frame_marks)} frames below are given to you as **CONTACT SHEETS**: each "
+            "attached image is a grid holding several consecutive frames. The list below gives "
+            "every frame's own timestamp, in the same order the cells are laid out; the layout "
+            "note at the end maps each sheet to the frames inside it."
+        )
+    else:
+        lines.append(
+            f"The {len(frame_marks)} images attached AFTER this text are in this exact order:"
+        )
 
     # 帧间隔本身携带信息：抽帧是按镜头切点对齐的，所以镜头末帧（tail）和
     # 下一镜首帧（head）之间会挨得特别近 —— 那个位置就是切点。
@@ -100,6 +111,12 @@ def build_user(
 
 
     lines.append(audio_text)
+
+    # 拼图布局：告诉模型每张网格图里装了哪几个时间点。
+    # 不说明的话它不知道格子和时间怎么对应 —— 拼图反而变成噪声。
+    if sheet_note:
+        lines.append("")
+        lines.append(sheet_note)
 
     # 用户补充的画面说明。放在音频之后、正式指令之前 ——
     # 位置太靠前容易被后面的长指令冲淡，太靠后又会被当成输出要求。

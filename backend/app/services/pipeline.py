@@ -204,6 +204,50 @@ async def run_pipeline(job: Job, video_path: Path) -> JobResult:
         raise RuntimeError("抽帧失败，无法进行视觉分析（请检查 ffmpeg 是否可解码该文件）")
     log.info("共抽帧 %d 张", total_frames)
 
+    flat: list[tuple[float, str, Path]] = [
+        (ft, role, fp) for items in chunk_frames for ft, role, fp in items
+    ]
+
+    # ---------------- 5.5 拼图：把相邻帧并进一张网格图 ----------------
+    #
+    # 用户 09-23 提的方案（「一秒2帧 + 自动切镜 + 合成缩略图」）。
+    # 为什么要把相邻帧放进同一张图：
+    #   1) **模型能直接并排比较** —— 判断「这是切镜还是同一个镜头里的运动」，
+    #      在一张图里比在几张图之间容易得多。这是分镜判断的关键。
+    #   2) token 几乎不涨：实测网格从 2.7 Mpx 做到 9.2 Mpx（3.4 倍），
+    #      token 只从 1156 涨到 1176。一格里放 6 帧还是 20 帧成本一样。
+    #   3) 同预算下时间覆盖度翻几倍。
+    #
+    # ⚠️ 帧清单仍按**每一帧**给（不是按图给），否则帧间隔里的 `sampling boundary`
+    # 切点标注就丢了。布局说明负责把「第几张图 = 哪几个时间点」讲清楚。
+    images = [fp for _, _, fp in flat]
+    sheet_note = ""
+    if s.frame_sheet_cells >= 2 and len(flat) >= 2:
+        sheets = await asyncio.to_thread(
+            ff.build_contact_sheets,
+            [(ft, fp) for ft, _, fp in flat],
+            s.frame_sheet_cells,
+            ff.frame_dir_for(job_id) / "sheets",
+        )
+        if sheets and any(len(times) > 1 for times, _ in sheets):
+            sheet_note = ff.describe_sheet_layout(sheets, s.frame_sheet_cells)
+            # ⚠️ 拼图会打乱「第几张图 = 哪个时间点」的直觉，实测模型会**自己编时间戳**
+            # （写成 00:40.000 / 01:20.000 这种整十秒，而视频只有 15 秒）。
+            # 所以把「只能用列出的时间」写死。
+            all_times = sorted(t for times, _ in sheets for t in times)
+            sheet_note += (
+                f"\n\nThe segment is {eff_duration:.2f}s long. **Every `[Shot N] At ...` "
+                "timestamp you write must be one of the times listed above** — those are the "
+                "only real timestamps you have — copy them in the same MM:SS.mmm form. Do not "
+                "invent timestamps, and do not round them to tidy numbers."
+            )
+            log.info("拼图覆盖时间：%.2fs - %.2fs", all_times[0], all_times[-1])
+            images = [path for _, path in sheets]
+            log.info(
+                "拼图：%d 帧 → %d 张网格（每张最多 %d 格），送模型的图片数 %d → %d",
+                total_frames, len(images), s.frame_sheet_cells, len(flat), len(images),
+            )
+
     # ---------------- 6. 生成提示词 ----------------
     #
     # 帧 + 时间戳 + 用户说明 → 一次调用出稿。
@@ -217,8 +261,7 @@ async def run_pipeline(job: Job, video_path: Path) -> JobResult:
     client = VLMClient()
     client.require_configured()
 
-    await step("compose", 55, f"一次成稿（{total_frames} 帧）")
-    flat = [(ft, role, fp) for items in chunk_frames for ft, role, fp in items]
+    await step("compose", 55, f"一次成稿（{total_frames} 帧，{len(images)} 张图）")
     freeform_user = templates.build_user(
         chunk_start=0.0,
         chunk_end=eff_duration,
@@ -229,6 +272,7 @@ async def run_pipeline(job: Job, video_path: Path) -> JobResult:
         chunk_total=1,
         content_hint=opts.content_hint,
         closing=templates.build_closing(),
+        sheet_note=sheet_note,
     )
     if opts.extra_instruction.strip():
         freeform_user += (
@@ -243,7 +287,7 @@ async def run_pipeline(job: Job, video_path: Path) -> JobResult:
         prompt = await client.complete(
             templates.build_system(opts.format, opts.language),
             freeform_user,
-            images=[fp for _, _, fp in flat],
+            images=images,
             max_tokens=s.vlm_max_tokens,
         )
     except VLMError as exc:
@@ -338,6 +382,8 @@ async def run_pipeline(job: Job, video_path: Path) -> JobResult:
             "scene_threshold": used_threshold,
             "scene_adaptive": adaptive_note or "",
             "est_tokens": selection.estimate_tokens(total_frames, long_edge=s.frame_long_edge),
+            "images_sent": len(images),
+            "sheet_cells": s.frame_sheet_cells if sheet_note else 0,
             "prompt_words": word_count,
             "prompt_chars": len(prompt),
             "prompt_word_limit": word_limit,

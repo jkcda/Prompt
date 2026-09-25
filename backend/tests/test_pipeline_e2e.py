@@ -81,7 +81,8 @@ def test_pass1_receives_images_matching_frame_count(mock_vlm_env, sample_video: 
 
     pass1_calls = [c for c in mock_vlm.CALLS if c["pass"] == 1]
     assert pass1_calls, "没有 Pass1 调用"
-    assert sum(c["images"] for c in pass1_calls) == result.frames_used
+    # 拼图模式下送的是网格图，所以图片数 = images_sent（= 网格张数），不是帧数
+    assert sum(c["images"] for c in pass1_calls) == result.stats["images_sent"]
 
 
 def test_pipeline_respects_frame_budget(mock_vlm_env, sample_video: Path):
@@ -93,7 +94,9 @@ def test_pipeline_respects_frame_budget(mock_vlm_env, sample_video: Path):
     )
     result = pipeline.run_pipeline_sync(job, sample_video)
     assert result.frames_used <= 6
-    assert sum(c["images"] for c in mock_vlm.CALLS if c["pass"] == 1) <= 6
+    # 预算管的是抽帧数；送出去的图片数在拼图模式下只会更少
+    sent = sum(c["images"] for c in mock_vlm.CALLS if c["pass"] == 1)
+    assert sent <= result.frames_used
 def test_h3_modes_report_their_mode(mock_vlm_env, sample_video: Path):
     """T2VA 与 Ref2VA 都归到 h3 模式，但 format 各自不同。"""
     for fmt in ("h3", "h3-ref"):
@@ -328,7 +331,9 @@ def test_freeform_is_the_default_path(mock_vlm_env, sample_video: Path):
 
     kinds = [c["kind"] for c in mock_vlm.CALLS]
     assert kinds == ["freeform"], f"自由发挥应该只调一次模型，实际 {kinds}"
-    assert mock_vlm.CALLS[0]["images"] == result.frames_used, "帧要全部送到"
+    # 拼图模式下「全部送到」= 所有帧都进了网格图
+    assert mock_vlm.CALLS[0]["images"] == result.stats["images_sent"]
+    assert result.stats["images_sent"] <= result.frames_used
 
     # 出的是提示词，不是 Pass1 的 JSON
     assert "integrated_multimodal_description:" in result.prompt
