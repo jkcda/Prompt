@@ -235,12 +235,13 @@ async def run_pipeline(job: Job, video_path: Path) -> JobResult:
             # （写成 00:40.000 / 01:20.000 这种整十秒，而视频只有 15 秒）。
             # 所以把「只能用列出的时间」写死。
             all_times = sorted(t for times, _ in sheets for t in times)
-            sheet_note += (
-                f"\n\nThe segment is {eff_duration:.2f}s long. **Every `[Shot N] At ...` "
-                "timestamp you write must be one of the times listed above** — those are the "
-                "only real timestamps you have — copy them in the same MM:SS.mmm form. Do not "
-                "invent timestamps, and do not round them to tidy numbers."
-            )
+            # ⚠️ **不要在这里加任何关于时间戳的指令。**
+            # 踩过两次：
+            #   「每个时间戳必须是列出的那些」 → 模型读成「有 30 个时间戳要用」
+            #                                    → 产出 30 个镜头（一帧一镜）
+            #   「每个镜头用列出的时间」       → 同样是「一个时间戳一个镜头」的暗示
+            # 只要布局说明里的时间本身写成 MM:SS.mmm（见 describe_sheet_layout），
+            # 模型就会照抄，不需要额外约束。
             log.info("拼图覆盖时间：%.2fs - %.2fs", all_times[0], all_times[-1])
             images = [path for _, path in sheets]
             log.info(
