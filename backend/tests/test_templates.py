@@ -43,7 +43,8 @@ def test_pass1_user_lists_images_in_order():
     assert "Image 1 -> timestamp 0.500s [role: head]" in text
     assert "Image 3 -> timestamp 9.500s [role: tail]" in text
     assert "1920x1080" in text
-    assert "segment 1 of 1" in text
+    # 开头只给「时长 + 分辨率」，不再有 segment 编号那套说法
+    assert "10.00 seconds long" in text
 def test_pass2_system_h3_uses_bare_field_names():
     """H3 的字段名必须是裸名 + 冒号，不能用尖括号标签包裹。"""
     system = build_system("h3", "en")

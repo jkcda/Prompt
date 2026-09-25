@@ -44,25 +44,38 @@ def build_user(
 
     """
     lines: list[str] = []
-    lines.append(
-        f"This is segment {chunk_index + 1} of {chunk_total}, covering "
-        f"{chunk_start:.2f}s to {chunk_end:.2f}s of the source video."
-    )
+    span = chunk_end - chunk_start
     if media:
         res = f"{media.width}x{media.height}" if media.width else "unknown"
-        lines.append(f"Source video: {res}, {media.fps:.2f} fps, {media.duration:.2f}s total.")
-    lines.append("")
-    if sheet_note:
         lines.append(
-            f"The {len(frame_marks)} frames below are given to you as **CONTACT SHEETS**: each "
-            "attached image is a grid holding several consecutive frames. The list below gives "
-            "every frame's own timestamp, in the same order the cells are laid out; the layout "
-            "note at the end maps each sheet to the frames inside it."
+            f"This video is {span:.2f} seconds long — {res} at {media.fps:.2f} fps."
         )
     else:
-        lines.append(
-            f"The {len(frame_marks)} images attached AFTER this text are in this exact order:"
-        )
+        lines.append(f"This video is {span:.2f} seconds long.")
+
+    if sheet_note:
+        # 拼图模式：**只给时长 + 图 + 每格里是哪些时间点**，剩下交给模型判断。
+        #
+        # ⚠️ 这里刻意不列逐帧清单、不给 role 标签、不加「怎么读帧间隔」的说明。
+        # 用户原话：「你就把这段视频到底一共几秒传过去，然后图传上去，剩下 AI
+        # 自行判断，很难吗？」—— 我原来塞了 9 段说明进去（30 行帧清单 + 每帧
+        # 角色 + 切点标注 + 两段「怎么读间隔」+ 布局说明），全是在教它做事。
+        lines.append("")
+        lines.append(sheet_note)
+        lines.append("")
+        lines.append(audio_text)
+        if content_hint.strip():
+            lines.append("")
+            lines.append("--- CONTEXT FROM THE PERSON WHO SUBMITTED THIS VIDEO ---")
+            lines.append(content_hint.strip())
+        lines.append("")
+        lines.append(closing or build_closing())
+        return "\n".join(lines)
+
+    lines.append("")
+    lines.append(
+        f"The {len(frame_marks)} images attached AFTER this text are in this exact order:"
+    )
 
     # 帧间隔本身携带信息：抽帧是按镜头切点对齐的，所以镜头末帧（tail）和
     # 下一镜首帧（head）之间会挨得特别近 —— 那个位置就是切点。
