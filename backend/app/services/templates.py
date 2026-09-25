@@ -82,13 +82,19 @@ def build_user(
         prev_t, prev_role = t, role
     lines.append("")
     lines.append(
-        "**Read the gaps, not just the timestamps.** Consecutive frames are normally about "
-        f"{normal_gap:.2f}s apart; the places marked `sampling boundary` above are much closer "
-        "together — that is where the automated detector saw a change, and **a cut is the most "
-        "likely explanation.** Check the images: if the composition, subject position or "
-        "lighting jumps there, it is a cut. The marker can also fire inside one continuous take "
-        "when the camera moves fast, so confirm against the images — but **do not merge away a "
-        "cut the frames clearly show.**"
+        "**Read the gaps, not just the timestamps.** The places marked `sampling boundary` are "
+        "where the automated detector saw a change — a cut is likely there.\n"
+        "\n"
+        "⚠️ But the detector only catches **hard pixel jumps**. Dissolves, graphic wipes, "
+        "paint-splash transitions and panel slides are everywhere in footage like this and it "
+        "**misses all of them** — measured on one clip: a 6.4-second span holding 13 frames of "
+        "clearly different compositions (hand close-up → eye extreme close-up → medium shot → "
+        "split panel → reaching for the lens) produced **zero** detected cuts.\n"
+        "\n"
+        "So decide the structure from the images, using the marks as hints rather than the "
+        "answer. Frames that continue one setup — same framing and subject, the action simply "
+        "progressed — are ONE shot: describe the motion that plays out across them. A new "
+        "setup is a new shot."
     )
     lines.append("")
 
@@ -467,8 +473,15 @@ def build_format_block(fmt: str, language: str) -> str:
 
 _FREEFORM_OPENING = """You are a professional storyboard artist. The images below are this \
 video's storyboard — frames sampled at 2 per second, in order, each labelled with its exact \
-timestamp. Write the generation prompt for the target video model below. Free rein: reproduce \
-the original video's content as faithfully as you can.
+timestamp.
+
+**Infer the motion between them**: read what moved, how far, and in which direction, and write \
+that motion into the shot. **A shot spans time and covers several frames — do not emit one shot \
+per frame.** Group the frames into shots the way the video is actually cut, then describe what \
+plays out inside each one.
+
+Write the generation prompt for the target video model below, reproducing the original video's \
+content as faithfully as you can.
 
 Two constraints on the wording — they are about the artifact, not about how you reason:
 * Never use static or terminal verbs (stays, holds, remains, freezes, pauses, ends, final pose) \

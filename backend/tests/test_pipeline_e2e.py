@@ -368,12 +368,13 @@ def test_freeform_system_carries_only_identity_task_and_format():
     assert "static or terminal verbs" in system, "静止动词会让生成的视频冻住"
     assert "the content is unknown" in system, "音频未知时编造比留空更糟"
 
-    # 开场只有「身份 + 任务」一句话，不再有观察指导
+    # 开场只有「身份 + 输入 + 怎么读帧 + 任务」，不再有别的观察指导
     head = system.split("Two constraints")[0]
     assert "professional storyboard artist" in head
     assert "2 per second" in head, "要告诉它帧率（1s 2 帧）"
-    assert "Free rein" in head, "要明确放权"
-    assert len(head.split()) < 80, f"开场太长（{len(head.split())} 词），又变成教它做事了"
+    assert "Infer the motion between them" in head, "要让它推测帧间运动"
+    assert "do not emit one shot per frame" in head, "要明确说不是一帧一镜"
+    assert len(head.split()) < 140, f"开场太长（{len(head.split())} 词），又变成教它做事了"
 
 
 def test_freeform_keeps_every_target_format():

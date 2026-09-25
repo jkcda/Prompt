@@ -564,8 +564,7 @@ def test_user_message_says_the_timestamps_are_a_sampling_aid():
         chunk_start=0, chunk_end=10, frame_marks=[(0.0, "head"), (0.5, "mid")],
         audio_text="", media=None, chunk_index=0, chunk_total=1,
     )
-    assert "a cut is the most likely explanation" in text
-    assert "do not merge away a cut the frames clearly show" in text
+    assert "the marks as hints rather than the answer" in text
 
 
 def test_dump_prompts_exports_everything(tmp_path):
@@ -589,7 +588,7 @@ def test_dump_prompts_exports_everything(tmp_path):
     # 导出的用户消息里要能看到帧时间戳列表和用户说明注入
     u = (tmp_path / "user.txt").read_text(encoding="utf-8")
     assert "Image 1 -> timestamp" in u
-    assert "a cut is the most likely explanation" in u
+    assert "the marks as hints rather than the answer" in u
     assert "CONTEXT FROM THE PERSON WHO SUBMITTED" in u
 
     # payload 骨架要能当 JSON 读回来，且图片是占位符
@@ -637,7 +636,7 @@ def test_shot_boundary_is_marked_in_frame_list():
     assert "0.10s after the previous frame" in marked[0]
     # 只说「检测器在这里看到了变化」，不能说成已确认的切点 ——
     # 我们的检测可能把一镜到底切碎，说死了反而误导。
-    assert "do not merge away a cut the frames clearly show" in txt
+    assert "the marks as hints rather than the answer" in txt
 
 
 def test_uniform_gaps_are_not_marked():

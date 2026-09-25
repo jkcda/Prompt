@@ -325,6 +325,14 @@ def detect_shots_adaptive(
     shots = cuts_to_shots(cuts, duration, min_shot_seconds) if cuts else []
     best = (shots, len(cuts), threshold, "")
 
+    # ⚠️ 判据只用「平均镜头长度」，**不要加「单个镜头相对中位数异常」这条**。
+    # 试过：实测一支 PV 里有一个 6.3 秒镜头、中位数 1.4 秒，看着像漏检，
+    # 于是加了「最长 > 中位数 × 3 就降阈值重检」——结果降到 0.15 后
+    # 切点从 27 涨到 120、镜头从 23 涨到 62，**反而更离谱**。
+    # 原因：这类动效密集的 PV 里，覆盖层一直在动，降阈值检的是动画不是切点；
+    # 而那个 6.3 秒的「长镜头」是**真的**（画面覆盖层在变，镜头没切）。
+    # 教训：**判据要能被数据证伪**，这条加进去之后每个阈值档都报异常，
+    # 说明它不是在识别漏检，只是在抱怨中位数小。
     avg = (duration / len(shots)) if shots else duration
     suspicious = duration >= 8.0 and (not shots or avg > _COARSE_AVG_SHOT)
     if not suspicious:
