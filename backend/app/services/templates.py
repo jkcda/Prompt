@@ -502,8 +502,8 @@ def build_format_block(fmt: str, language: str) -> str:
 # **产物**的硬约束 —— 静止动词会让生成的视频冻住（包括嘴），音频未知时编造比留空更糟。
 
 _FREEFORM_OPENING = """You are a professional storyboard artist. The images below are this \
-video's storyboard — frames sampled at 2 per second, in order, each labelled with its exact \
-timestamp.
+video's storyboard: contact sheets of consecutive frames, sampled at 2 per second, in order. \
+The user message gives you the total duration and which time span each sheet covers.
 
 **Infer the motion between them**: read what moved, how far, and in which direction, and write \
 that motion into the shot. **A shot spans time and covers several frames — do not emit one shot \
