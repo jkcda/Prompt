@@ -312,3 +312,57 @@ def test_api_falls_back_to_json_when_verbose_json_unsupported(tmp_path: Path, mo
     assert text == "こんにちは"
     assert segs == [], "纯文本模式本来就没有分句"
     assert "无时间戳" in note
+
+
+# ---------------------------------------------------------------------------
+# 纯音乐素材的转写垃圾过滤 + 「带时间戳」备注的真实性
+# ---------------------------------------------------------------------------
+#
+# 实测硅基流动 + SenseVoiceSmall 跑一段 20 秒的纯 BGM MV，转写出来是：
+#     🎼。The。🎼。By拜拜。
+# 这不是空字符串 —— 原样喂给下游比「音频未知」更糟：模型会把 🎼 或
+# 「The By拜拜」当成歌词写进提示词。而「未知」至少会触发禁止编造的约束。
+
+
+@pytest.mark.parametrize(
+    ("text", "duration", "want"),
+    [
+        # 实测的那条垃圾输出
+        ("🎼。The。🎼。By拜拜。", 20.0, False),
+        ("", 20.0, False),
+        ("🎼🎼🎼🎼🎼🎼🎼🎼🎼🎼", 20.0, False),
+        ("嗯。啊。", 20.0, False),
+        ("......", 20.0, False),
+        # 正常台词要放行
+        ("今天天气不错我们出去走走吧顺便买点东西回来做饭吃", 20.0, True),
+        ("Hello everyone and welcome back to the channel", 20.0, True),
+        # 稀疏台词也不能误杀（20 秒只有 10 个字）
+        ("你好。谢谢。再见。", 20.0, True),
+    ],
+)
+def test_looks_like_speech(text: str, duration: float, want: bool):
+    assert asr._looks_like_speech(text, duration) is want
+
+
+def test_looks_like_speech_scales_with_duration():
+    """阈值随时长走 —— 短音频不该被长音频的标准误杀。"""
+    short = "你好世界"
+    assert asr._looks_like_speech(short, 2.0) is True
+    # 同样的字数放到 60 秒里就不像话了
+    assert asr._looks_like_speech(short, 60.0) is False
+
+
+def test_transcribe_note_is_honest_about_timestamps():
+    """⚠️ 备注不能说「带时间戳」而实际没有分句。
+
+    踩过：硅基流动**接受** `response_format=verbose_json`（HTTP 200）但不返回
+    `segments`。原来只要状态码 < 400 就把 used_format 记成 verbose_json，
+    备注谎报「带时间戳」—— 「歌词对齐不准」于是变成查不到原因的现象。
+    """
+    import inspect
+
+    src = inspect.getsource(asr._transcribe_api)
+    assert 'payload.get("segments")' in src, (
+        "判定 verbose_json 是否成功必须检查真的拿到了 segments，不能只看状态码"
+    )
+    assert 'used_format = used_format or "json"' in src, "拿不到分句要如实记成 json"

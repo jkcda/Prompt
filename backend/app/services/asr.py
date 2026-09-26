@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import re
 from pathlib import Path
 
 import httpx
@@ -188,6 +189,24 @@ def _transcribe_api(audio_path: Path, duration: float) -> tuple[str, list[Transc
                         log.warning("ASR(%s) 分片失败 %s: %s", fmt, resp.status_code, resp.text[:200])
                         continue
                     payload = resp.json()
+                    # ⚠️ **只有真的拿到分句，才算 verbose_json 成功。**
+                    #
+                    # 踩过：硅基流动**接受** `response_format=verbose_json` 参数
+                    # （HTTP 200），但响应里没有 `segments`，只有整段 `text`。
+                    # 原来只要状态码 < 400 就把 used_format 记成 verbose_json，
+                    # 于是备注里谎报「带时间戳」—— 「歌词对齐不准」就变成一个
+                    # 查不到原因的现象，正是这个函数的 docstring 想避免的事。
+                    #
+                    # 也**不要再试 json** —— 同一个服务商不会因为换个参数就突然有分段，
+                    # 白花一次请求。直接采信这个 payload（text 是有的），
+                    # 但把 used_format 记成 json，备注就会如实说明「无时间戳」。
+                    if fmt == "verbose_json" and not (payload.get("segments") or []):
+                        log.info(
+                            "ASR: %s 接受 verbose_json 但未返回 segments，按无时间戳处理",
+                            s.asr_model,
+                        )
+                        used_format = used_format or "json"
+                        break
                     used_format = used_format or fmt
                     break
                 except Exception as exc:  # noqa: BLE001
@@ -233,6 +252,41 @@ def _transcribe_api(audio_path: Path, duration: float) -> tuple[str, list[Transc
 # ---------------------------------------------------------------------------
 # 对外入口
 # ---------------------------------------------------------------------------
+
+def _looks_like_speech(text: str, duration: float) -> bool:
+    """判断转写结果是不是「真的有人说话」。
+
+    **为什么需要**：SenseVoice 这类模型对**纯音乐**不会返回空字符串，而是返回
+    音乐标记 + 零碎音节。实测一段 20 秒的纯 BGM MV 转写出来是：
+
+        🎼。The。🎼。By拜拜。
+
+    这段要是原样喂给下游，比「音频未知」**更糟** —— 模型会把 `🎼` 或
+    `The By拜拜` 当成歌词写进提示词，用户拿去生成就会唱出莫名其妙的东西。
+    而「未知」至少会触发「禁止编造台词歌词」的约束。
+
+    判据分两层：
+
+    1. **音乐标记**（`🎼 ♪ ♫ ♩ ♬`）是 SenseVoice 对「这段是音乐」的直接判断。
+       有标记、且有效字符又少 → 是音乐段落里的零碎音节，不是台词。
+    2. **有效字符数相对时长**。正常语速中文约每秒 3~4 字，取每秒 0.3 字作下限
+       （很宽松，稀疏台词不会被误杀）。
+
+    ⚠️ 光靠字数分不开：实测那条垃圾是 7 个有效字符，而一句真实的稀疏台词
+    （「你好。谢谢。再见。」）是 6 个 —— 纯看长度必然误判一个。
+    **音乐标记才是那个能区分的信号。**
+    """
+    cleaned = re.sub(r"[🎼♪♫♩♬\s\W_]", "", text, flags=re.UNICODE)
+    if not cleaned:
+        return False
+
+    need = max(3, int(duration * 0.3))
+    music_marks = len(re.findall(r"[🎼♪♫♩♬]", text))
+    # 有音乐标记时要求**三倍**的有效字符才算真有人说话
+    if music_marks and len(cleaned) < need * 3:
+        return False
+    return len(cleaned) >= need
+
 
 def analyze_audio(video_path: str | Path, enable_asr: bool = True) -> AudioReport:
     """完整音频分析：音乐画像 + 语音转写 + 音量/静音/频段能量。
@@ -313,6 +367,23 @@ def analyze_audio(video_path: str | Path, enable_asr: bool = True) -> AudioRepor
                 api_note,
             ) = _transcribe_api(asr_input, info.duration)
             report.note = f"{report.note}；{api_note}".strip("；")
+
+            # ⚠️ 纯音乐素材的转写结果不是空字符串，而是音乐标记 + 零碎音节
+            # （实测「🎼。The。🎼。By拜拜。」）。原样喂给下游比「未知」更糟 ——
+            # 模型会把 🎼 或 The By拜拜 当成歌词写进去。判定没人说话就清空，
+            # 让它走「音频未知 → 禁止编造台词歌词」那条更安全的分支。
+            if (
+                not report.segments
+                and report.transcript
+                and not _looks_like_speech(report.transcript, info.duration)
+            ):
+                log.info(
+                    "ASR 结果不像人话（%d 字符 / %.1fs），按「无语音」处理：%r",
+                    len(report.transcript), info.duration, report.transcript[:60],
+                )
+                report.transcript = ""
+                report.language = ""
+                report.note = f"{report.note}；识别结果不含有效语音，按无台词处理".strip("；")
         elif _local_whisper_available():
             try:
                 report.transcript, report.segments, report.language = _transcribe_local(asr_input)
