@@ -1,0 +1,73 @@
+# 视频提示词反推 —— Nginx 反代示例
+#
+# ⚠️ 先说清楚：**Nginx 反代本身不提供任何防护。**
+# 它只是把请求转发给后端。不配 auth_basic 的话，谁能访问 80 端口，
+# 谁就能用你的服务 —— 他不需要偷你的密钥，直接拿你的服务器当免费代理，
+# 每次反推都烧你的 VLM 额度。
+#
+# **真正的防护是下面那三行 auth_basic / allow-deny，不是「反代」这个动作。**
+#
+# 用法：
+#   1. 装 basic auth 工具并建账号
+#        sudo apt install apache2-utils          # 或 yum install httpd-tools
+#        sudo htpasswd -c /etc/nginx/.htpasswd 你的用户名
+#   2. 把这个文件放到 /etc/nginx/conf.d/vpr.conf，改掉 server_name
+#   3. sudo nginx -t && sudo systemctl reload nginx
+
+server {
+    listen 80;
+    server_name your-domain-or-ip;
+
+    # 换 HTTPS 的话把上面改成 443 ssl，证书用 certbot 自动签：
+    #   sudo certbot --nginx -d your-domain
+    # 自用也可以只留 HTTP + 强密码。
+
+    # ---------------------------------------------------------------------
+    # 认证 —— 这一段才是防护，别省
+    # ---------------------------------------------------------------------
+    auth_basic           "Restricted";
+    auth_basic_user_file /etc/nginx/.htpasswd;
+
+    # 更省事的替代方案（二选一）：只允许自己的出口 IP
+    #   allow 1.2.3.4;
+    #   deny  all;
+    # 注意家宽 IP 会变，出差 / 换网就进不去。
+
+    # ---------------------------------------------------------------------
+    # 反推相关的超时与体积
+    # ---------------------------------------------------------------------
+
+    # 上传的视频可能几百 MB
+    client_max_body_size 1024m;
+
+    # 一次反推实测 30~140 秒（取决于帧数和模型），别用默认的 60s
+    proxy_read_timeout    600s;
+    proxy_send_timeout    600s;
+    proxy_connect_timeout  30s;
+
+    location / {
+        proxy_pass http://127.0.0.1:8000;
+
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # -----------------------------------------------------------------
+        # ⚠️ 进度推送是 SSE（`/api/jobs/<id>/events`，text/event-stream）。
+        # 必须关掉缓冲，否则 Nginx 会攒够一批才发，前端进度条会卡住不动。
+        # 实测踩过：界面停在「分析中」几分钟没反应，日志里其实早就跑完了。
+        # -----------------------------------------------------------------
+        proxy_buffering off;
+        proxy_cache     off;
+        chunked_transfer_encoding on;
+
+        # SSE 是长连接，别让它被 keepalive 掐掉
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+    }
+
+    # 顺带把 nginx 自己的访问日志留着，出问题能查
+    access_log /var/log/nginx/vpr.access.log;
+    error_log  /var/log/nginx/vpr.error.log;
+}
