@@ -348,6 +348,15 @@ async def run_pipeline(job: Job, video_path: Path) -> JobResult:
     # 本身抄进了输出（「不要写 content unanalysed」反而让它记住了这个词）。
     # 这类泄漏只能在输出侧堵。
     prompt, jargon_hits = audio_features.sanitize_audio_jargon(prompt)
+
+    # Seedance 的节拍图自洽校验。**只警告不改写** —— 判断归模型，
+    # 但「声明七个镜头却只写四段」这种漏镜头得让人看得见。
+    # 实测过一次真实输出就是这样，用户直接反馈「提示词漏镜头」。
+    beat_ok, beat_why = True, ""
+    if templates.MODE_OF_FORMAT.get(opts.format) == "seedance":
+        beat_ok, beat_why = templates.check_beat_map_consistency(prompt)
+        if not beat_ok:
+            log.warning("Seedance 节拍图不自洽：%s（提示词仍会返回，请人工核对）", beat_why)
     if jargon_hits:
         log.warning("提示词里出现了音频分析术语，已清理：%s", ", ".join(jargon_hits))
         word_count = len(prompt.split())
@@ -392,6 +401,8 @@ async def run_pipeline(job: Job, video_path: Path) -> JobResult:
             "prompt_over_limit": bool(
                 word_limit > 0 and word_count > word_limit
             ),
+            "beat_map_ok": beat_ok,
+            "beat_map_why": beat_why,
             "format": opts.format,
             "trim": (
                 {"start": round(trim_start, 3), "end": round(trim_end, 3),

@@ -15,6 +15,7 @@ from app.schemas import (
     AudioReport,
     MediaInfo,
 )
+from app.services import templates
 from app.services.templates import (
     FORMAT_LABELS,
     MODE_LABELS,
@@ -648,3 +649,91 @@ def test_uniform_gaps_are_not_marked():
     assert not [ln for ln in _frame_lines(txt) if "sampling boundary" in ln]
     # 但「看间隔」这条提示始终在
     assert "Read the gaps, not just the timestamps" in txt
+
+
+# ---------------------------------------------------------------------------
+# Seedance 节拍图自洽校验
+# ---------------------------------------------------------------------------
+#
+# 实测踩过：一次真实输出把 4 个场景（阳台 / 台球桌 / 沙发 / 台球桌）压成**一整段**，
+# 用「随后画面切到」「接着」「最后」串起来，**末尾连节拍图都没有** ——
+# 下游根本看不出切了几次镜。用户直接反馈「提示词漏镜头，格式也不对」。
+#
+# 根因是 Seedance 格式块自相矛盾：开头写「Write ONE coherent prompt」，
+# 镜头规则又要求「每个镜头单独成段」，模型按 ONE 走 → 写成一整段。
+# 已修（矛盾去掉 + 每镜成段提到开头 + 末尾节拍图提到开头）。
+
+
+def test_beat_map_passes_when_declared_matches_body():
+    txt = "开场画面。画面切到A。画面切到B。全片三个镜头，节拍为 0–1 秒、1–2 秒、2–3 秒。"
+    assert templates.check_beat_map_consistency(txt) == (True, "")
+
+
+def test_beat_map_accepts_chinese_numerals():
+    """模型两种写法都会用：「七个镜头」和「7个镜头」。"""
+    txt = "开场。画面切到A。全片两个镜头，节拍为 0–1 秒、1–2 秒。"
+    assert templates.check_beat_map_consistency(txt)[0] is True
+    txt2 = "开场。画面切到A。全片 2 个镜头，节拍为 0–1 秒、1–2 秒。"
+    assert templates.check_beat_map_consistency(txt2)[0] is True
+
+
+def test_beat_map_flags_missing_beat_map_when_there_are_cuts():
+    """**有切镜却没写节拍图 = 漏镜头。** 这是用户实际报的那个 case。
+
+    正文分了段，但末尾没有节拍图 —— 下游看不出切了几次镜。
+    """
+    txt = "开场画面。画面切到室内。画面切到台球桌。画面切回沙发。不要出现字幕。"
+    ok, why = templates.check_beat_map_consistency(txt)
+    assert ok is False
+    assert "没写节拍图" in why
+    assert "4 段" in why, f"要报出实际段数，实际：{why}"
+
+
+def test_beat_map_counts_both_qiedao_and_qiehui():
+    """⚠️ 「画面切**回**」也要数 —— 只匹配「切到」会把 4 段数成 2 次切镜。"""
+    txt = "开场。画面切到A。画面切回B。全片三个镜头，节拍为 0–1 秒、1–2 秒、2–3 秒。"
+    assert templates.check_beat_map_consistency(txt)[0] is True
+
+
+def test_beat_map_flags_count_mismatch():
+    """声明 3 个镜头却只列 2 个时间区间。"""
+    txt = "开场。画面切到A。全片三个镜头，节拍为 0–1 秒、1–2 秒。"
+    ok, why = templates.check_beat_map_consistency(txt)
+    assert ok is False
+    assert "3 个镜头" in why and "2 个时间区间" in why
+
+
+def test_beat_map_allows_single_shot_without_beat_map():
+    """单镜素材（不切镜）不写节拍图是正常的，不能判错。"""
+    assert templates.check_beat_map_consistency("一个人走来。全片不切镜。无对白。") == (True, "")
+    assert templates.check_beat_map_consistency("一个人走来。无对白。") == (True, "")
+
+
+def test_beat_map_rejects_empty_output():
+    ok, why = templates.check_beat_map_consistency("   ")
+    assert ok is False
+    assert "空" in why
+
+
+def test_seedance_block_requires_one_paragraph_per_shot():
+    """Seedance 格式块必须写明「每个镜头单独成段」。
+
+    缺这条时实测模型会把 4 个场景压成一整段（因为开头写着「ONE coherent prompt」）。
+    H3 一直有对应的规则（one paragraph per shot），Seedance 原来漏了。
+    """
+    block = templates.build_system("seedance", "zh")
+    assert "每个镜头单独成段" in block
+    assert "不要为了写短而删减或合并镜头" in block
+    # 开头那两行要出现（而不是只埋在约束列表里）
+    head = block.split("Hard constraints:")[0]
+    assert "每一镜单独成段" in head or "每个镜头单独成段" in head
+    assert "节拍图" in head, "节拍图要求要放在开头，埋在约束里会被忽略"
+
+
+def test_seedance_block_has_no_stale_observation_report_reference():
+    """⚠️ 「观察报告」是两阶段管线的产物，早就删了。
+
+    留着这个死引用会让模型去找一份不存在的报告，从而不知道该覆盖哪些镜头。
+    """
+    block = templates.build_system("seedance", "zh")
+    assert "观察报告" not in block

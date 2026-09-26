@@ -245,8 +245,19 @@ wherever their role applies. Speakers use `(Sx)`; dialogue uses `<d>[Language] .
 
 _PASS2_SEEDANCE = """{common}
 
-TARGET MODE — Seedance 2.0 / 即梦. Write ONE coherent natural-language prompt in CHINESE. Element \
-order: 主体 → 动作 → 环境 → 风格 → 镜头 → 声音.
+TARGET MODE — Seedance 2.0 / 即梦。用**中文**写自然语言提示词。
+
+**素材切了几次镜，正文就写几段** —— 每一镜单独成段，段首写清这一镜的景别与运镜。
+全片不切镜就只写一段，并在段里说明「全片不切镜」。
+
+它整体**是一个连贯的提示词，不是字段化文档**（不要小标题、不要 JSON、不要 `[Shot N]` 标记）——
+「每一镜一段」和「一个连贯提示词」不矛盾：段落之间是同一套主体与风格，只是镜头换了。
+
+要素顺序：主体 → 动作 → 环境 → 风格 → 镜头 → 声音。
+
+**末尾必须单独写一行节拍图** —— 写明镜头数并逐个列出每镜的时间区间，
+例如「全片四个镜头，节拍为 0–2.5 秒、2.5–5 秒、5–7.5 秒、7.5–10 秒」。
+实测漏写这一行的概率很高，而它正是下游判断「切了几次镜」的唯一依据。
 
 Hard constraints:
 - Chinese only. No English except proper nouns and on-screen text.
@@ -260,9 +271,11 @@ no reference images in this mode. 漂亮、高级、电影感十足 carry no inf
 没有动作描写的主体在生成视频里会变成冻住的假人。
   **动作写在最前面** —— 画面是时间的流动不是一张照片：先写这个镜头里发生了什么、怎么发展，\
 再补环境与外观，且只补动作需要的那点。样本帧之间的动作要自己推断出来写进去。
-- 镜头：把景别与运镜写成连续推进，例如「以全景开场，随后缓慢推轨至中近景，浅景深」。全片不切镜就写\
-「全片不切镜」；有切镜则写明镜头数，并在末尾给节拍图，覆盖观察报告里的每一个镜头、不留空隙不重叠，\
-例如「全片四个镜头，节拍为 0–2.5 秒、2.5–5 秒、5–7.5 秒、7.5–10 秒」。
+- 镜头：**每个镜头单独成段**，段首写清这一镜的景别与运镜，例如「画面切到极特写：…」。全片不切镜就写\
+「全片不切镜」；有切镜则在末尾给节拍图 —— 写明镜头数，逐个列出每镜的时间区间，覆盖**你判断出的每一个\
+镜头**、不留空隙不重叠，例如「全片四个镜头，节拍为 0–2.5 秒、2.5–5 秒、5–7.5 秒、7.5–10 秒」。\
+⚠️ **节拍图里的镜头数必须和正文的镜头段数一致。** 实测出现过「节拍图写七个镜头、正文只写四段」——\
+**不要为了写短而删减或合并镜头**：素材切了几次，正文就要有几段。
 - 声音：环境声、动作声、音乐、台词，用分号分隔。无台词则以「无对白」结尾。配乐描述放在最后。
 - 报告里出现字幕、文字、logo、水印时，在末尾单独加负面指令：「不要出现字幕、文字、水印」。
 - 不写时长与画幅 —— 那是独立参数。
@@ -379,6 +392,76 @@ def check_prompt_integrity(original: str, compressed: str) -> tuple[bool, str]:
     if "N/A" in original and "N/A" not in compressed:
         return False, "N/A 段被删掉了"
 
+    return True, ""
+
+
+# 中文数字 → 阿拉伯数字。节拍图里模型两种都会写（「七个镜头」/「7个镜头」）。
+_CN_DIGITS = {"零": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5,
+              "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
+
+
+def _cn_to_int(text: str) -> int | None:
+    """解析「七」「十二」「二十」这类中文数字。解析不了返回 None。"""
+    if not text:
+        return None
+    if text.isdigit():
+        return int(text)
+    if text in _CN_DIGITS:
+        return _CN_DIGITS[text]
+    if "十" in text:
+        head, _, tail = text.partition("十")
+        tens = _CN_DIGITS.get(head, 1) if head else 1
+        ones = _CN_DIGITS.get(tail, 0) if tail else 0
+        return tens * 10 + ones
+    return None
+
+
+def check_beat_map_consistency(prompt: str) -> tuple[bool, str]:
+    """Seedance 模式：节拍图声明的镜头数，要和正文的镜头段数对得上。
+
+    **为什么需要**：实测一次真实输出 —— 节拍图写着「全片共**七个**镜头，
+    节拍为 0–1.425 秒、…、9.134–10.27 秒」，但正文只有 **四** 段
+    （「画面切到极特写」「画面切到中近景」…）。**声明七个、只写四段**，
+    用户直接反馈「提示词漏镜头」。
+
+    根因是 Seedance 的格式块缺了 H3 有的两条规则（「每个镜头单独成段」
+    和「不要为了写短而删减或合并镜头」），已补。这条校验是第二道保险 ——
+    补了规则也仍可能漏，但漏了至少能看见。
+
+    只对「有切镜」的输出生效：写「全片不切镜」的直接通过。
+    """
+    if not prompt.strip():
+        return False, "输出为空"
+    if "全片不切镜" in prompt or "不切镜" in prompt:
+        return True, ""
+
+    # ⚠️ 要匹配「画面切到」**和**「画面切回」—— 只写「切到」会漏数，
+    # 实测一条 4 段的输出被数成 2 次切镜（末段是「画面切回沙发近景」）。
+    cuts = len(re.findall(r"画面切[到回]|镜头切[到回]", prompt))
+    m = re.search(r"全片(?:共)?\s*([零一二两三四五六七八九十\d]+)\s*个?镜头", prompt)
+    if not m:
+        # ⚠️ 有切镜却没写节拍图 = 漏镜头。
+        # 实测踩过：正文分了 4 段，但末尾没有节拍图，下游根本看不出切了几次镜。
+        # 单镜素材（没有「画面切到」）不写节拍图是正常的，放行。
+        if cuts:
+            return False, f"正文有 {cuts + 1} 段（{cuts} 次切镜）但没写节拍图"
+        return True, ""
+
+    declared = _cn_to_int(m.group(1))
+    if declared is None:
+        return True, ""
+
+    # 节拍图里的时间区间个数
+    beats = re.findall(r"\d+(?:\.\d+)?\s*[–\-—~至]\s*\d+(?:\.\d+)?\s*秒", prompt)
+    # 正文的镜头段数：段首用「画面切到…」分段（Seedance 的格式约定）。
+    # ⚠️ **要 +1** —— 开场那一镜不写「画面切到」（它前面没有上一镜可切），
+    # 所以 n 个「画面切到」对应 n+1 个镜头段。漏了这个 +1 会把正常输出判成残缺。
+    body_lo, body_hi = cuts, cuts + 1
+
+    if declared != len(beats):
+        return False, f"节拍图声明 {declared} 个镜头，但只列了 {len(beats)} 个时间区间"
+    if cuts and not (body_lo <= declared <= body_hi):
+        return False, f"节拍图声明 {declared} 个镜头，但正文只有 {body_lo}~{body_hi} 段"
     return True, ""
 
 
