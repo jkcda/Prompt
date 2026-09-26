@@ -91,11 +91,15 @@ def main() -> int:
             continue
         v = float(seg.mean())
         print(f"  {sec:2d}-{sec + 1:2d}s   {v:.4f}  {'#' * int(v * 120)}")
-    print(f"\n  全片平均 {d1.mean():.4f}   最大 {d1.max():.4f}")
-    lo, hi = float(np.percentile(d1, 5)), float(np.percentile(d1, 95))
-    print(f"  5% 分位 {lo:.4f}   95% 分位 {hi:.4f}   对比度 {hi / max(lo, 1e-6):.1f}x")
-    print("\n  判读：对比度 > 8x 说明「镜头内安静、切点处突跳」，像素法可用；")
-    print("        对比度 < 3x 说明画面一直在动，**像素法在这条素材上定不了切点**。")
+    print(f"\n  全片平均 {d1.mean():.4f}   中位 {np.median(d1):.4f}   最大 {d1.max():.4f}")
+    # ⚠️ 判据用 **max / 中位数**，不要用 5%/95% 分位。
+    # 踩过：实拍片 91 秒，切点处 0.6475、中位 0.05 → max/median = 13x，信号很清楚；
+    # 但 95% 分位仍落在「镜头内的运动」里（0.105），算出对比度只有 4.3x，
+    # 会把一条明明可用的素材误判成不可用。**分位数抹掉了尖峰。**
+    contrast = d1.max() / max(float(np.median(d1)), 1e-6)
+    print(f"  尖峰 / 中位 = {contrast:.1f}x")
+    print("\n  判读：> 8x 说明「镜头内安静、切点处突跳」，**像素法可用**；")
+    print("        < 3x 说明画面一直在动，像素法在这条素材上定不了切点。")
 
     # 用 d3 找峰：超过中位数 4 倍且是局部极大
     med = np.median(d3)
