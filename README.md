@@ -658,9 +658,26 @@ uvicorn app.main:app --reload
 
 ## 部署到服务器
 
-单机自用定位，没有鉴权。**对外暴露前先加认证**（见「已知限制」）。
+**默认没有鉴权。对外暴露前必须在 `backend/.env` 里设 `AUTH_PASSWORD`**，
+否则谁能连上就能提交任务 —— 攻击者不需要偷你的 VLM 密钥，
+直接拿服务器当免费代理，每次调用都烧你的额度。
 
-两种方式。**推荐 Docker** —— 它把「装 Python 依赖、装 ffmpeg、构建前端」三步
+```bash
+AUTH_USERNAME=admin
+AUTH_PASSWORD=换成你的强密码
+```
+
+设上之后浏览器会弹登录框（HTTP Basic）。**不设 = 不启用**，本地开发不受影响。
+健康检查 `/api/health` 是无条件放行的 —— Docker 的 HEALTHCHECK 靠它。
+
+> ⚠️ **「换端口」「加 Nginx 反代」都不算防护。** 反代只是转发请求，不是权限；
+> 不配 `auth_basic` 的 Nginx 和直接暴露 8000 端口安全性完全一样。
+> 真正起作用的是应用里这两行，或者 Nginx 的 `auth_basic`（二选一即可）。
+>
+> ⚠️ 纯 HTTP 下 Basic Auth 的密码是明文传输的，务必同时上 HTTPS
+> （Nginx + certbot），或者干脆只绑 `127.0.0.1` 走 SSH 隧道。
+
+两种部署方式。**推荐 Docker** —— 它把「装 Python 依赖、装 ffmpeg、构建前端」三步
 都封在镜像里，而且**不需要把仓库那 155MB 的二进制拉下来**
 （`.dockerignore` 排掉了 Windows 那份，构建上下文只有几十 MB）。
 

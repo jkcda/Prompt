@@ -20,6 +20,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from .core.auth import BasicAuthMiddleware
 from .core.config import FRONTEND_DIR, get_settings, resolve_ffmpeg, resolve_ffprobe
 from .core.db import init_db
 from .core.logging import setup_logging
@@ -89,6 +90,21 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# 访问认证。**没设 AUTH_PASSWORD 就不挂中间件** —— 本地开发不该被登录框挡路。
+# 对外暴露前必须设上，否则谁能连上就能白嫖你的 VLM 额度。
+if _settings.auth_password:
+    app.add_middleware(
+        BasicAuthMiddleware,
+        username=_settings.auth_username,
+        password=_settings.auth_password,
+    )
+    log.info("已启用访问认证（用户名 %s）", _settings.auth_username)
+else:
+    log.warning(
+        "未启用访问认证（AUTH_PASSWORD 为空）—— 本地开发没问题，"
+        "对外暴露前务必设置，否则任何人都能提交任务、烧你的 VLM 额度"
+    )
 
 app.include_router(api_router)
 

@@ -47,6 +47,21 @@ class Settings(BaseSettings):
     cors_origins: str = "*"
     debug: bool = False
 
+    # ---- 访问认证（HTTP Basic）----
+    #
+    # **`auth_password` 为空 = 不启用认证**（默认）。本地开发不该被登录框挡路。
+    #
+    # ⚠️ 对外暴露前**必须**设上。这个服务没有其他鉴权，谁能连上就能提交任务 ——
+    # 攻击者不需要偷你的 VLM 密钥，直接拿服务器当免费代理，每次调用都烧你的额度。
+    #
+    # ⚠️ 「换端口」「加 Nginx 反代」都拦不住这个。反代只是转发，不是权限。
+    # 真正起作用的是这里 —— 或者 Nginx 的 `auth_basic`（二选一，别都当摆设）。
+    #
+    # 只用 HTTP 时密码是明文传输的，务必同时上 HTTPS（Nginx + certbot，
+    # 或者只绑 127.0.0.1 走 SSH 隧道）。
+    auth_username: str = "admin"
+    auth_password: str = ""
+
     # ---- 持久化 ----
     # SQLite 单文件。相对路径按 data/ 解析，也可写绝对路径。
     database_url: str = "sqlite:///app.db"
