@@ -433,6 +433,20 @@ export const useAnalyzeStore = defineStore('analyze', () => {
     stopTimer()
     error.value = ''
     events.value = []
+    // ⚠️ **必须清掉「当前上传」的状态。**
+    //
+    // 踩过：打开历史记录，看到的却是自己刚上传的那个视频。
+    // 原因是 `videoUrl` 的优先级里 `uploadResult.video_url` / `localPreviewUrl`
+    // 排在 `job` 前面（那个顺序是为了「正在分析新上传的素材时显示它」），
+    // 而 loadJob 没清这两项 —— 于是刚传的视频把历史任务的视频盖住了。
+    //
+    // 只在**打开历史任务**时清。点「开始分析」那条路径不能清，
+    // 因为那时 job 还没结果，正需要靠 uploadResult 显示预览。
+    clearPreview()
+    file.value = null
+    uploadResult.value = null
+    uploadPercent.value = 0
+    trimRange.value = null
     jobId.value = id
     await refreshJob()
     const state = job.value?.state

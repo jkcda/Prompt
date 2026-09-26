@@ -418,13 +418,48 @@ def download(url: str, job_id: str) -> tuple[Path | None, ProbeResult, str]:
             if path:
                 return path, info, ""
 
+    return None, info, _failure_hint(platform, ytdlp_reason)
+
+
+def _failure_hint(platform: str, ytdlp_reason: str) -> str:
+    """抓取失败时给用户的提示。**按真实原因分流，不要一句话盖住所有情况。**
+
+    抽成独立函数是为了可测 —— 这段文案直接决定用户下一步做什么，
+    写错了用户会照着去折腾无效的配置（踩过：服务器上让人设
+    COOKIES_FROM_BROWSER，而服务器根本没有浏览器）。
+    """
     # --- 通道 3：失败，给可操作提示 ---
+    #
+    # ⚠️ 提示要**按真实原因分流**，不能一句话盖住所有情况。
+    # 踩过：原来一律提示「会员内容 / 需要登录」，把「ffmpeg 找不到导致合并失败」
+    # 这类完全不同的原因盖掉了，用户照着提示去充会员，白折腾。
     if platform == "bilibili":
-        hint = (
-            "B站视频解析失败。可能原因：视频为会员/付费内容、已被删除、或需要登录。\n"
-            "可在 backend/.env 里设置 COOKIES_FROM_BROWSER=chrome（从本机浏览器读取 cookie）后重试，"
-            "或手动下载视频后上传。"
-        )
+        if "412" in (ytdlp_reason or ""):
+            # 412 = B 站风控。**云服务器 IP 是主要触发原因** —— B 站对机房 IP
+            # 拦得很严，家宽 IP 同样的代码就能过。带上登录 cookie 能显著缓解。
+            #
+            # ⚠️ 这里**不能只提 COOKIES_FROM_BROWSER** —— 那个选项是「从本机浏览器
+            # 读 cookie」，而服务器上根本没有浏览器，照做必然无效。服务器要用
+            # COOKIES_FILE（提前导出成文件传上去）。
+            hint = (
+                "B站返回 412，这是**风控拦截**（不是会员内容问题）。\n"
+                "最常见的原因是**服务器是机房 IP** —— B站对云服务器拦得比家宽严得多，"
+                "同一份代码在本机能跑、上服务器就 412。\n"
+                "带登录 cookie 能显著缓解：\n"
+                "  1. 在**你本机浏览器**登录 B站，用扩展导出 cookies.txt（Netscape 格式）\n"
+                "  2. 传到服务器：scp cookies.txt user@服务器:/opt/vpr/data/cookies.txt\n"
+                "  3. 在 backend/.env 里设 COOKIES_FILE=/app/data/cookies.txt\n"
+                "  4. sudo docker compose up -d --force-recreate\n"
+                "⚠️ 别用 COOKIES_FROM_BROWSER —— 那是从本机浏览器读，服务器上没有浏览器。\n"
+                "兜底：手动下载视频后直接上传。"
+            )
+        else:
+            hint = (
+                "B站视频解析失败。可能原因：视频为会员/付费内容、已被删除、或需要登录。\n"
+                "可在 backend/.env 里设置 COOKIES_FILE 指向导出的 cookies.txt 后重试"
+                "（服务器上不要用 COOKIES_FROM_BROWSER，那里没有浏览器），"
+                "或手动下载视频后上传。"
+            )
     elif platform == "douyin":
         hint = (
             "抖音视频解析失败。抖音的签名校验变动频繁，自动抓取不是总能成功。\n"
@@ -436,4 +471,4 @@ def download(url: str, job_id: str) -> tuple[Path | None, ProbeResult, str]:
     if ytdlp_reason:
         hint += f"\n\nyt-dlp 原始报错：{ytdlp_reason}"
 
-    return None, info, hint
+    return hint

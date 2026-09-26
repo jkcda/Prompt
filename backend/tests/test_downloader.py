@@ -360,3 +360,129 @@ def _fake_ytdlp(monkeypatch, behavior):
     mod.YoutubeDL = FakeYDL  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "yt_dlp", mod)
     return captured
+
+
+# ---------------------------------------------------------------------------
+# 抓取失败的提示文案 —— 必须按真实原因分流
+# ---------------------------------------------------------------------------
+#
+# 踩过：原来一律提示「会员内容 / 需要登录」，把「ffmpeg 找不到导致合并失败」
+# 这类完全不同的原因盖掉了，用户照着提示去充会员，白折腾。
+#
+# 又踩过一次：服务器上 B站报 412（风控），提示却让人设
+# `COOKIES_FROM_BROWSER=chrome` —— 而**服务器上根本没有浏览器**，
+# 照做必然无效。用户会以为「我照提示做了还是不行，那没救了」。
+
+
+def test_412_hint_points_at_cookie_file_not_browser():
+    """412 的提示必须给 COOKIES_FILE（服务器可用），并**明确劝阻** FROM_BROWSER。"""
+    hint = dl._failure_hint(
+        "bilibili",
+        "DownloadError: ERROR: [BiliBili] 1Sa5F6HEV9: Unable to download webpage: "
+        "HTTP Error 412: Precondition Failed",
+    )
+    assert "412" in hint
+    assert "COOKIES_FILE" in hint
+    assert "别用 COOKIES_FROM_BROWSER" in hint, "要明确劝阻，否则用户会照旧的提示去设"
+    # 要点明「机房 IP」这个真实原因，否则用户以为是视频本身的问题
+    assert "机房 IP" in hint or "服务器" in hint
+
+
+def test_412_hint_mentions_data_dir_mount():
+    """cookie 文件必须放在挂载卷里，否则容器内路径取不到。
+
+    只给 scp 命令而不说放哪个目录，用户会随便丢一个位置然后说「设了没用」。
+    """
+    hint = dl._failure_hint("bilibili", "HTTP Error 412: Precondition Failed")
+    assert "/app/data/" in hint
+    assert "docker compose" in hint, "要给出重建容器的命令"
+
+
+def test_non_412_bilibili_hint_also_avoids_browser_option():
+    """非 412 的 B站失败也不能推荐 COOKIES_FROM_BROWSER。"""
+    hint = dl._failure_hint("bilibili", "ERROR: Video unavailable")
+    assert "COOKIES_FILE" in hint
+    assert "COOKIES_FROM_BROWSER" not in hint.split("或手动下载")[0].replace(
+        "不要用 COOKIES_FROM_BROWSER", ""
+    ), "只能以「不要用」的形式出现"
+
+
+def test_hint_always_appends_raw_error():
+    """原始报错必须附在末尾 —— 兜底文案不能盖住真因。"""
+    raw = "DownloadError: some very specific internal failure"
+    for platform in ("bilibili", "douyin", "other"):
+        assert raw in dl._failure_hint(platform, raw)
+
+
+def test_douyin_hint_suggests_upload():
+    """抖音抓取不稳定是常态，提示要直接引导上传而不是让用户反复重试。"""
+    hint = dl._failure_hint("douyin", "")
+    assert "上传" in hint
+
+
+def test_unknown_platform_hint_is_generic():
+    hint = dl._failure_hint("vimeo", "")
+    assert "无法解析" in hint
+
+
+# ---------------------------------------------------------------------------
+# 抓取失败的提示文案 —— 必须按真实原因分流
+# ---------------------------------------------------------------------------
+#
+# 踩过：原来一律提示「会员内容 / 需要登录」，把「ffmpeg 找不到导致合并失败」
+# 这类完全不同的原因盖掉了，用户照着提示去充会员，白折腾。
+#
+# 又踩过一次：服务器上 B站报 412（风控），提示却让人设
+# `COOKIES_FROM_BROWSER=chrome` —— 而**服务器上根本没有浏览器**，
+# 照做必然无效。用户会以为「我照提示做了还是不行，那没救了」。
+
+
+def test_412_hint_points_at_cookie_file_not_browser():
+    """412 的提示必须给 COOKIES_FILE（服务器可用），并**明确劝阻** FROM_BROWSER。"""
+    hint = dl._failure_hint(
+        "bilibili",
+        "DownloadError: ERROR: [BiliBili] 1Sa5F6HEV9: Unable to download webpage: "
+        "HTTP Error 412: Precondition Failed",
+    )
+    assert "412" in hint
+    assert "COOKIES_FILE" in hint
+    assert "别用 COOKIES_FROM_BROWSER" in hint, "要明确劝阻，否则用户会照旧的提示去设"
+    # 要点明「机房 IP」这个真实原因，否则用户以为是视频本身的问题
+    assert "机房 IP" in hint or "服务器" in hint
+
+
+def test_412_hint_mentions_data_dir_mount():
+    """cookie 文件必须放在挂载卷里，否则容器内路径取不到。
+
+    只给 scp 命令而不说放哪个目录，用户会随便丢一个位置然后说「设了没用」。
+    """
+    hint = dl._failure_hint("bilibili", "HTTP Error 412: Precondition Failed")
+    assert "/app/data/" in hint
+    assert "docker compose" in hint, "要给出重建容器的命令"
+
+
+def test_non_412_bilibili_hint_also_avoids_browser_option():
+    """非 412 的 B站失败也不能推荐 COOKIES_FROM_BROWSER。"""
+    hint = dl._failure_hint("bilibili", "ERROR: Video unavailable")
+    assert "COOKIES_FILE" in hint
+    assert "COOKIES_FROM_BROWSER" not in hint.split("或手动下载")[0].replace(
+        "不要用 COOKIES_FROM_BROWSER", ""
+    ), "只能以「不要用」的形式出现"
+
+
+def test_hint_always_appends_raw_error():
+    """原始报错必须附在末尾 —— 兜底文案不能盖住真因。"""
+    raw = "DownloadError: some very specific internal failure"
+    for platform in ("bilibili", "douyin", "other"):
+        assert raw in dl._failure_hint(platform, raw)
+
+
+def test_douyin_hint_suggests_upload():
+    """抖音抓取不稳定是常态，提示要直接引导上传而不是让用户反复重试。"""
+    hint = dl._failure_hint("douyin", "")
+    assert "上传" in hint
+
+
+def test_unknown_platform_hint_is_generic():
+    hint = dl._failure_hint("vimeo", "")
+    assert "无法解析" in hint
